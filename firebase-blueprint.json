@@ -1,0 +1,652 @@
+{
+  "entities": {
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted administrator marker document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "createdAt"]
+    },
+    "StaffPublic": {
+      "title": "StaffPublic",
+      "description": "Non-PII staff profile and role assignment.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "enum": ["manager", "staff"]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "role", "active", "createdAt", "updatedAt"]
+    },
+    "StaffPrivate": {
+      "title": "StaffPrivate",
+      "description": "Isolated PII contact information for staff members.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer profile summary and debt ledger metrics.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "group": {
+          "type": "string",
+          "enum": ["Nhà nông", "Đại lý cấp 2", "Trang trại", "Khách lẻ"]
+        },
+        "totalPurchased": {
+          "type": "number"
+        },
+        "totalDebt": {
+          "type": "number"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "name",
+        "group",
+        "totalPurchased",
+        "totalDebt",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CustomerPrivate": {
+      "title": "CustomerPrivate",
+      "description": "Isolated PII contact information for customers (phone, email, address).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "address": {
+          "type": "string",
+          "maxLength": 250
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "phone",
+        "email",
+        "address",
+        "note",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "NotificationPrefs": {
+      "title": "NotificationPrefs",
+      "description": "User-customizable push notification preferences.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "debtCustomerEnabled": {
+          "type": "boolean"
+        },
+        "debtSupplierEnabled": {
+          "type": "boolean"
+        },
+        "lowStockEnabled": {
+          "type": "boolean"
+        },
+        "periodicReportEnabled": {
+          "type": "boolean"
+        },
+        "browserPushEnabled": {
+          "type": "boolean"
+        },
+        "leadDays": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "debtCustomerEnabled",
+        "debtSupplierEnabled",
+        "lowStockEnabled",
+        "periodicReportEnabled",
+        "browserPushEnabled",
+        "leadDays",
+        "updatedAt"
+      ]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Agricultural supply inventory item.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Phân bón", "Thuốc BVTV", "Hạt giống", "Chế phẩm sinh học", "Vật tư & Dụng cụ"]
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "importPrice": {
+          "type": "number"
+        },
+        "sellPrice": {
+          "type": "number"
+        },
+        "stock": {
+          "type": "number"
+        },
+        "minStock": {
+          "type": "number"
+        },
+        "supplierName": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "code",
+        "name",
+        "category",
+        "unit",
+        "importPrice",
+        "sellPrice",
+        "stock",
+        "minStock",
+        "supplierName",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SaleRecord": {
+      "title": "SaleRecord",
+      "description": "Sales log transaction and customer debt tracking record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "invoiceCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "customerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "customerPhone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "productId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "unitPrice": {
+          "type": "number"
+        },
+        "totalAmount": {
+          "type": "number"
+        },
+        "paidAmount": {
+          "type": "number"
+        },
+        "debtAmount": {
+          "type": "number"
+        },
+        "dueDate": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "status": {
+          "type": "string",
+          "enum": ["paid", "partial", "unpaid"]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "staffName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "invoiceCode",
+        "customerId",
+        "customerName",
+        "customerPhone",
+        "productId",
+        "productName",
+        "unit",
+        "quantity",
+        "unitPrice",
+        "totalAmount",
+        "paidAmount",
+        "debtAmount",
+        "dueDate",
+        "status",
+        "note",
+        "staffName",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ImportRecord": {
+      "title": "ImportRecord",
+      "description": "Purchase/import log entry and supplier debt tracking record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "receiptCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "supplierName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "supplierPhone": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "productId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "productName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 30
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "unitCost": {
+          "type": "number"
+        },
+        "totalCost": {
+          "type": "number"
+        },
+        "paidAmount": {
+          "type": "number"
+        },
+        "debtAmount": {
+          "type": "number"
+        },
+        "dueDate": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "status": {
+          "type": "string",
+          "enum": ["paid", "partial", "unpaid"]
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "staffName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "receiptCode",
+        "supplierName",
+        "supplierPhone",
+        "productId",
+        "productName",
+        "unit",
+        "quantity",
+        "unitCost",
+        "totalCost",
+        "paidAmount",
+        "debtAmount",
+        "dueDate",
+        "status",
+        "note",
+        "staffName",
+        "ownerId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BackupRecord": {
+      "title": "BackupRecord",
+      "description": "Audit log of Google Drive backups.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "driveFileId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "targetEmail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "recordCount": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["completed", "failed"]
+        },
+        "triggerType": {
+          "type": "string",
+          "enum": ["auto_daily", "manual"]
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "fileName",
+        "driveFileId",
+        "targetEmail",
+        "recordCount",
+        "status",
+        "triggerType",
+        "ownerId",
+        "createdAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": {
+        "$ref": "#/entities/AdminRecord"
+      },
+      "description": "Admin role assignment table."
+    },
+    "/staff/{userId}": {
+      "schema": {
+        "$ref": "#/entities/StaffPublic"
+      },
+      "description": "Public staff profile and role registry."
+    },
+    "/staff_private/{userId}": {
+      "schema": {
+        "$ref": "#/entities/StaffPrivate"
+      },
+      "description": "Isolated PII contact info for staff."
+    },
+    "/customers/{customerId}": {
+      "schema": {
+        "$ref": "#/entities/Customer"
+      },
+      "description": "Customer profile and aggregated purchase/debt metrics."
+    },
+    "/customers_private/{customerId}": {
+      "schema": {
+        "$ref": "#/entities/CustomerPrivate"
+      },
+      "description": "Isolated PII contact details (phone, email, address) for customers."
+    },
+    "/notification_prefs/{userId}": {
+      "schema": {
+        "$ref": "#/entities/NotificationPrefs"
+      },
+      "description": "User-customizable push notification preferences."
+    },
+    "/products/{productId}": {
+      "schema": {
+        "$ref": "#/entities/Product"
+      },
+      "description": "Inventory catalog of agricultural supplies."
+    },
+    "/sales/{saleId}": {
+      "schema": {
+        "$ref": "#/entities/SaleRecord"
+      },
+      "description": "Sales log and customer debt records."
+    },
+    "/imports/{importId}": {
+      "schema": {
+        "$ref": "#/entities/ImportRecord"
+      },
+      "description": "Purchase/import log and supplier debt records."
+    },
+    "/backups/{backupId}": {
+      "schema": {
+        "$ref": "#/entities/BackupRecord"
+      },
+      "description": "Google Drive backup history logs."
+    }
+  }
+}

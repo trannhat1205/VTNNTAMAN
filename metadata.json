@@ -1,0 +1,6 @@
+{
+  "name": "VTNN Tâm An - Quản Lý Bán Hàng & Kho Nông Nghiệp",
+  "description": "Hệ thống quản lý nhật ký bán hàng, nhập kho, tồn kho tự động, công nợ khách hàng & nhà cung cấp, xuất báo cáo Excel/PDF và sao lưu Google Drive cho Vật tư Nông nghiệp Tâm An.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
