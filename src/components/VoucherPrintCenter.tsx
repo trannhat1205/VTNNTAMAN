@@ -446,8 +446,8 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
 
       {/* NEW: Phiếu Tổng Hợp Chung Danh Sách Các Mặt Hàng Đã Nhận & Còn Nợ (Từ ngày ... Đến ngày ...) */}
       <div className="bg-white p-4 sm:p-6 rounded-xl border border-emerald-200 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-          <div>
+        <div className="flex flex-col gap-3">
+          <div className="min-w-0">
             <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide flex items-center gap-1.5">
               <Calendar className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
               <span>Phiếu Tổng Hợp Chung & Tệp Báo Cáo Các Mặt Hàng Đã Nhận (Từ ngày ... Đến ngày ...)</span>
@@ -460,7 +460,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100">
             <button
               type="button"
               onClick={() => {
@@ -490,7 +490,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
               }}
               className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
             >
-              <Printer className="w-4 h-4" />
+              <Printer className="w-4 h-4 shrink-0" />
               <span>In Phiếu Tổng Hợp Chung (PDF)</span>
             </button>
 
@@ -513,7 +513,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
               }}
               className="px-3.5 py-2 text-xs font-semibold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
             >
-              <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+              <FileSpreadsheet className="w-4 h-4 text-emerald-700 shrink-0" />
               <span>Xuất Tệp Báo Cáo Mặt Hàng Đã Nhận (Excel)</span>
             </button>
           </div>
@@ -605,19 +605,19 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
 
         {/* Table of Received Items from Date to Date */}
         <div className="border border-slate-200 rounded-xl overflow-hidden">
-          <div className="overflow-x-auto max-h-[280px]">
-            <table className="w-full text-left border-collapse text-xs">
+          <div className="overflow-x-auto max-h-[320px]">
+            <table className="w-full min-w-[860px] text-left border-collapse text-xs">
               <thead>
                 <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                  <th className="py-2.5 px-3 whitespace-nowrap">Ngày nhận</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Mã HĐ</th>
-                  <th className="py-2.5 px-3">Khách hàng</th>
-                  <th className="py-2.5 px-3">Tên mặt hàng đã nhận</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Số lượng</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Đơn giá</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Thành tiền</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Đã trả</th>
-                  <th className="py-2.5 px-3 text-right whitespace-nowrap">Còn nợ</th>
+                  <th className="py-2.5 px-2.5 w-[88px] whitespace-nowrap">Ngày nhận</th>
+                  <th className="py-2.5 px-2.5 w-[98px] whitespace-nowrap">Mã HĐ</th>
+                  <th className="py-2.5 px-2.5 min-w-[150px]">Khách hàng</th>
+                  <th className="py-2.5 px-2.5 min-w-[190px]">Tên mặt hàng đã nhận</th>
+                  <th className="py-2.5 px-2.5 w-[90px] text-center whitespace-nowrap">Số lượng</th>
+                  <th className="py-2.5 px-2.5 w-[88px] text-right whitespace-nowrap">Đơn giá</th>
+                  <th className="py-2.5 px-2.5 w-[96px] text-right whitespace-nowrap">Thành tiền</th>
+                  <th className="py-2.5 px-2.5 w-[96px] text-right whitespace-nowrap">Đã trả</th>
+                  <th className="py-2.5 px-2.5 w-[96px] text-right whitespace-nowrap">Còn nợ</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -631,29 +631,29 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                 ) : (
                   combinedReceivedReport.items.map((item) => (
                     <tr key={item.saleId} className="hover:bg-slate-50">
-                      <td className="py-2.5 px-3 font-mono whitespace-nowrap">{item.date}</td>
-                      <td className="py-2.5 px-3 font-mono font-bold text-emerald-800 whitespace-nowrap">
+                      <td className="py-2.5 px-2.5 font-mono whitespace-nowrap align-middle">{item.date}</td>
+                      <td className="py-2.5 px-2.5 font-mono font-bold text-emerald-800 whitespace-nowrap align-middle">
                         {item.invoiceCode}
                       </td>
-                      <td className="py-2.5 px-3 font-semibold text-slate-900">
+                      <td className="py-2.5 px-2.5 min-w-[150px] font-semibold text-slate-900 align-middle leading-snug">
                         {item.customerName}
                       </td>
-                      <td className="py-2.5 px-3 font-medium text-slate-900">
+                      <td className="py-2.5 px-2.5 min-w-[190px] font-medium text-slate-900 align-middle leading-snug">
                         {item.productName}
                       </td>
-                      <td className="py-2.5 px-3 text-center font-mono whitespace-nowrap">
+                      <td className="py-2.5 px-2.5 text-center font-mono whitespace-nowrap align-middle">
                         {item.quantity} {item.unit}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                      <td className="py-2.5 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                         {formatVND(item.unitPrice)}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums font-semibold whitespace-nowrap">
+                      <td className="py-2.5 px-2.5 text-right font-mono tabular-nums font-semibold whitespace-nowrap align-middle">
                         {formatVND(item.totalAmount)}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap">
+                      <td className="py-2.5 px-2.5 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap align-middle">
                         {formatVND(item.paidAmount)}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                      <td className="py-2.5 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                         <span
                           className={
                             item.debtAmount > 0
@@ -1377,13 +1377,13 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
           <table className="w-full min-w-[900px] text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                <th className="py-3 px-4 whitespace-nowrap">Mã chứng từ & Loại phiếu</th>
-                <th className="py-3 px-4 whitespace-nowrap">Kho & Ngày lập</th>
-                <th className="py-3 px-4 min-w-[200px]">Khách hàng / Nhà cung cấp</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Tổng tiền / Dư nợ gốc</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Thu / Trả đợt này</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Còn nợ</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">
+                <th className="py-3 px-3.5 w-[145px] whitespace-nowrap">Mã chứng từ & Loại phiếu</th>
+                <th className="py-3 px-3.5 w-[125px] whitespace-nowrap">Kho & Ngày lập</th>
+                <th className="py-3 px-3.5 min-w-[200px]">Khách hàng / Nhà cung cấp</th>
+                <th className="py-3 px-3.5 w-[130px] text-right whitespace-nowrap">Tổng tiền / Dư nợ gốc</th>
+                <th className="py-3 px-3.5 w-[120px] text-right whitespace-nowrap">Thu / Trả đợt này</th>
+                <th className="py-3 px-3.5 w-[115px] text-right whitespace-nowrap">Còn nợ</th>
+                <th className="py-3 px-3.5 w-[135px] text-right whitespace-nowrap">
                   In PDF / Sửa & Xóa (Quản lý)
                 </th>
               </tr>
@@ -1400,13 +1400,13 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                     : 'Phiếu nhập kho';
                 return (
                   <tr key={vc.id} className="hover:bg-slate-50">
-                    <td className="py-3 px-4 whitespace-nowrap">
+                    <td className="py-3 px-4 whitespace-nowrap align-middle">
                       <div className="font-mono text-xs font-bold text-slate-900">
                         {vc.voucherCode}
                       </div>
                       <div className="text-xs text-emerald-800 font-medium mt-0.5">{typeLabel}</div>
                     </td>
-                    <td className="py-3 px-4 whitespace-nowrap">
+                    <td className="py-3 px-4 whitespace-nowrap align-middle">
                       <div className="text-xs font-semibold text-slate-800">
                         {vc.warehouseName || 'Tâm An Mỹ Ngãi'}
                       </div>
@@ -1414,23 +1414,23 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                         {vc.createdAt.slice(0, 10)}
                       </div>
                     </td>
-                    <td className="py-3 px-4 min-w-[200px]">
-                      <div className="font-semibold text-slate-900">{vc.partnerName}</div>
-                      <div className="text-xs text-slate-500">
+                    <td className="py-3 px-4 min-w-[220px] align-middle">
+                      <div className="font-semibold text-slate-900 leading-snug">{vc.partnerName}</div>
+                      <div className="text-xs text-slate-500 mt-0.5 leading-snug">
                         <span className="font-mono">{vc.partnerPhone}</span>
                         {vc.note ? ` · ${vc.note}` : ''}
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs text-slate-800 whitespace-nowrap">
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs text-slate-800 whitespace-nowrap align-middle">
                       {formatVND(vc.totalOrPrevDebt)}
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-semibold text-emerald-700 whitespace-nowrap">
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-semibold text-emerald-700 whitespace-nowrap align-middle">
                       {formatVND(vc.paidOrCollected)}
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-red-600 whitespace-nowrap">
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-red-600 whitespace-nowrap align-middle">
                       {formatVND(vc.remainingDebt)}
                     </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap">
+                    <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                       <div className="flex items-center justify-end gap-1.5">
                         {canPerformRoleAction(role, 'edit_record') ? (
                           <>

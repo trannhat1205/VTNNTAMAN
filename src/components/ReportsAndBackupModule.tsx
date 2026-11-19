@@ -505,8 +505,8 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       <div className="space-y-6">
         {/* Top Master Date-Range & Role-Designated Report Control Header */}
         <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 space-y-5">
-          <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-4">
-            <div className="space-y-1.5">
+          <div className="flex flex-col gap-3.5">
+            <div className="space-y-1.5 min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-700 text-white rounded-md">
                   TRUNG TÂM BÁO CÁO CHUYÊN SÂU
@@ -528,26 +528,6 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       allowedCategories.length
                     } mục báo cáo tương ứng với nhiệm vụ quản lý để báo cáo kịp thời lên cấp trên.`}
               </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <button
-                type="button"
-                onClick={handleExportComprehensiveExcel}
-                className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                <span>Xuất Báo Cáo Tổng Hợp (Excel .xlsx)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleExportComprehensivePDF}
-                className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <FileText className="w-4 h-4 text-red-600" />
-                <span>Xuất Báo Cáo Cấp Trên (PDF .pdf)</span>
-              </button>
             </div>
           </div>
 
@@ -912,30 +892,30 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
         {(activeCategory === 'customers_items' || activeCategory === 'overview') &&
           allowedCategories.includes('customers_items') && (
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-              <div className="p-4 sm:p-6 border-b border-slate-200 bg-emerald-50/40 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                <div>
+              <div className="p-4 sm:p-6 border-b border-slate-200 bg-emerald-50/40 flex flex-col gap-3.5">
+                <div className="min-w-0">
                   <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide flex items-center gap-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-emerald-700" />
+                    <Calendar className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                     <span>
                       Báo Cáo Các Mặt Hàng Đã Nhận & Còn Nợ Thu Nợ (Từ ngày {fromDate} đến ngày{' '}
                       {toDate})
                     </span>
                   </div>
-                  <h3 className="text-base font-bold text-slate-900 mt-0.5">
+                  <h3 className="text-base font-bold text-slate-900 mt-1">
                     Danh Sách Tổng Hợp Tất Cả Các Mặt Hàng Khách Đã Nhận & Phiếu Tổng Hợp Chung
                   </h3>
-                  <p className="text-xs text-slate-600 mt-0.5">
+                  <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
                     Nhấp vào bất kỳ mã hóa đơn hoặc mặt hàng nào trong bảng để kiểm tra chi tiết, thu nợ tổng hợp hoặc xuất Phiếu tổng hợp chung (PDF & Excel).
                   </p>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     onClick={handleExportReceivedItemsPDF}
                     className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
                   >
-                    <Printer className="w-4 h-4" />
+                    <Printer className="w-4 h-4 shrink-0" />
                     <span>In Phiếu Tổng Hợp Hàng Đã Nhận (PDF)</span>
                   </button>
 
@@ -944,7 +924,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                     onClick={handleExportReceivedItemsExcel}
                     className="px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
                   >
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-700 shrink-0" />
                     <span>Xuất Tệp Báo Cáo Hàng Nhận (Excel)</span>
                   </button>
 
@@ -960,7 +940,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       }}
                       className="px-3.5 py-2 text-xs font-bold text-amber-950 bg-amber-100 border border-amber-300 hover:bg-amber-200 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
                     >
-                      <Wallet className="w-4 h-4 text-amber-800" />
+                      <Wallet className="w-4 h-4 text-amber-800 shrink-0" />
                       <span>Thu Nợ Tổng Hợp Kỳ Này ({formatVND(receivedItemsReport.totalDebt)})</span>
                     </button>
                   )}
@@ -995,7 +975,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   <button
                     type="button"
                     onClick={() => setOnlyUnpaidGoods(false)}
-                    className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
                       !onlyUnpaidGoods
                         ? 'bg-emerald-700 text-white'
                         : 'text-slate-600 hover:text-slate-900'
@@ -1006,7 +986,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   <button
                     type="button"
                     onClick={() => setOnlyUnpaidGoods(true)}
-                    className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap ${
                       onlyUnpaidGoods
                         ? 'bg-red-600 text-white'
                         : 'text-slate-600 hover:text-slate-900'
@@ -1018,19 +998,19 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
+                <table className="w-full min-w-[900px] text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50/80 border-b border-slate-200 font-semibold text-slate-600">
-                      <th className="py-3 px-3 whitespace-nowrap">Ngày nhận</th>
-                      <th className="py-3 px-3 whitespace-nowrap">Mã HĐ (Nhấp xem)</th>
-                      <th className="py-3 px-3">Khách hàng</th>
-                      <th className="py-3 px-3">Tên mặt hàng đã nhận</th>
-                      <th className="py-3 px-3 text-center whitespace-nowrap">SL & ĐVT</th>
-                      <th className="py-3 px-3 text-right whitespace-nowrap">Đơn giá</th>
-                      <th className="py-3 px-3 text-right whitespace-nowrap">Thành tiền</th>
-                      <th className="py-3 px-3 text-right whitespace-nowrap">Đã thanh toán</th>
-                      <th className="py-3 px-3 text-right whitespace-nowrap">Còn nợ</th>
-                      <th className="py-3 px-3 text-right whitespace-nowrap">Kiểm tra chi tiết</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap w-[86px]">Ngày nhận</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap w-[100px]">Mã HĐ (Nhấp xem)</th>
+                      <th className="py-2.5 px-2.5 min-w-[148px]">Khách hàng</th>
+                      <th className="py-2.5 px-2.5 min-w-[180px]">Tên mặt hàng đã nhận</th>
+                      <th className="py-2.5 px-2.5 text-center whitespace-nowrap w-[85px]">SL & ĐVT</th>
+                      <th className="py-2.5 px-2.5 text-right whitespace-nowrap w-[85px]">Đơn giá</th>
+                      <th className="py-2.5 px-2.5 text-right whitespace-nowrap w-[95px]">Thành tiền</th>
+                      <th className="py-2.5 px-2.5 text-right whitespace-nowrap w-[95px]">Đã thanh toán</th>
+                      <th className="py-2.5 px-2.5 text-right whitespace-nowrap w-[92px]">Còn nợ</th>
+                      <th className="py-2.5 px-2.5 text-right whitespace-nowrap w-[85px]">Kiểm tra chi tiết</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -1051,35 +1031,35 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                             }}
                             className="hover:bg-emerald-50/50 cursor-pointer transition-colors"
                           >
-                            <td className="py-3 px-3 font-mono whitespace-nowrap">{item.date}</td>
-                            <td className="py-3 px-3 font-mono font-bold text-emerald-800 underline whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 font-mono whitespace-nowrap align-middle">{item.date}</td>
+                            <td className="py-2.5 px-2.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
                               {item.invoiceCode}
                             </td>
-                            <td className="py-3 px-3">
-                              <div className="font-semibold text-slate-900">{item.customerName}</div>
-                              <div className="text-[11px] font-mono text-slate-500">
+                            <td className="py-2.5 px-2.5 min-w-[148px] align-middle">
+                              <div className="font-semibold text-slate-900 leading-snug">{item.customerName}</div>
+                              <div className="text-[11px] font-mono text-slate-500 mt-0.5">
                                 {item.customerPhone}
                               </div>
                             </td>
-                            <td className="py-3 px-3 font-semibold text-slate-900">
-                              {item.productName}
-                              <div className="text-[11px] font-normal text-slate-500">
+                            <td className="py-2.5 px-2.5 min-w-[180px] font-semibold text-slate-900 leading-snug align-middle">
+                              <div>{item.productName}</div>
+                              <div className="text-[11px] font-normal text-slate-500 mt-0.5">
                                 Kho: {item.warehouseName}
                               </div>
                             </td>
-                            <td className="py-3 px-3 text-center font-mono whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 text-center font-mono whitespace-nowrap align-middle">
                               {item.quantity} {item.unit}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                               {formatVND(item.unitPrice)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono tabular-nums font-semibold whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 text-right font-mono tabular-nums font-semibold whitespace-nowrap align-middle">
                               {formatVND(item.totalAmount)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap align-middle">
                               {formatVND(item.paidAmount)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                               <span
                                 className={
                                   item.debtAmount > 0 ? 'font-bold text-red-600' : 'text-slate-500'
@@ -1088,7 +1068,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                 {formatVND(item.debtAmount)}
                               </span>
                             </td>
-                            <td className="py-3 px-3 text-right whitespace-nowrap">
+                            <td className="py-2.5 px-2.5 text-right whitespace-nowrap align-middle">
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1097,9 +1077,9 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                     setDrillDownItem({ type: 'sale', record: matchedSale });
                                   }
                                 }}
-                                className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md inline-flex items-center gap-1"
+                                className="px-2 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
                               >
-                                <Eye className="w-3.5 h-3.5" />
+                                <Eye className="w-3.5 h-3.5 shrink-0" />
                                 <span>Chi tiết</span>
                               </button>
                             </td>
@@ -1162,19 +1142,19 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="w-full min-w-[1040px] text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                    <th className="py-3 px-3">Ngày bán</th>
-                    <th className="py-3 px-3">Mã HĐ</th>
-                    <th className="py-3 px-3">Kho xuất</th>
-                    <th className="py-3 px-3">Khách hàng</th>
-                    <th className="py-3 px-3">Vật tư nông nghiệp</th>
-                    <th className="py-3 px-3 text-center">SL</th>
-                    <th className="py-3 px-3 text-right">Thành tiền</th>
-                    <th className="py-3 px-3 text-right">Đã thu</th>
-                    <th className="py-3 px-3 text-right">Còn nợ</th>
-                    <th className="py-3 px-3 text-right">Liên kết chi tiết</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[105px]">Ngày bán</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[115px]">Mã HĐ</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[135px]">Kho xuất</th>
+                    <th className="py-3 px-3.5 min-w-[180px]">Khách hàng</th>
+                    <th className="py-3 px-3.5 min-w-[230px]">Vật tư nông nghiệp</th>
+                    <th className="py-3 px-3.5 text-center whitespace-nowrap w-[100px]">SL</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Thành tiền</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Đã thu</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Còn nợ</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[130px]">Liên kết chi tiết</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -1184,37 +1164,41 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       onClick={() => setDrillDownItem({ type: 'sale', record: s })}
                       className="hover:bg-emerald-50/50 cursor-pointer"
                     >
-                      <td className="py-3 px-3 font-mono whitespace-nowrap">
+                      <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
                         {s.createdAt.slice(0, 10)}
                       </td>
-                      <td className="py-3 px-3 font-mono font-bold text-emerald-800 underline whitespace-nowrap">
+                      <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
                         {s.invoiceCode}
                       </td>
-                      <td className="py-3 px-3 whitespace-nowrap">
+                      <td className="py-3 px-3.5 whitespace-nowrap align-middle">
                         {s.warehouseName || 'Tâm An Mỹ Ngãi'}
                       </td>
-                      <td className="py-3 px-3 font-semibold text-slate-900">{s.customerName}</td>
-                      <td className="py-3 px-3 font-medium text-slate-900">{s.productName}</td>
-                      <td className="py-3 px-3 text-center font-mono whitespace-nowrap">
+                      <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[180px] leading-snug align-middle">
+                        {s.customerName}
+                      </td>
+                      <td className="py-3 px-3.5 font-medium text-slate-900 min-w-[230px] leading-snug align-middle">
+                        {s.productName}
+                      </td>
+                      <td className="py-3 px-3.5 text-center font-mono whitespace-nowrap align-middle">
                         {s.quantity} {s.unit}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-semibold whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums font-semibold whitespace-nowrap align-middle">
                         {formatVND(s.totalAmount)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono text-emerald-700 whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap align-middle">
                         {formatVND(s.paidAmount)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-red-600 whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-red-600 whitespace-nowrap align-middle">
                         {formatVND(s.debtAmount)}
                       </td>
-                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             setDrillDownItem({ type: 'sale', record: s });
                           }}
-                          className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md"
+                          className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
                         >
                           Xem & Kiểm tra →
                         </button>
@@ -1247,28 +1231,28 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 <button
                   type="button"
                   onClick={() => onNavigateToModule('imports')}
-                  className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center gap-1.5 self-start sm:self-auto"
+                  className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center gap-1.5 self-start sm:self-auto whitespace-nowrap shrink-0"
                 >
                   <span>Mở phân hệ Nhật ký Nhập hàng</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
+                  <ExternalLink className="w-3.5 h-3.5 shrink-0" />
                 </button>
               )}
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="w-full min-w-[1040px] text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                    <th className="py-3 px-3">Ngày nhập</th>
-                    <th className="py-3 px-3">Mã phiếu</th>
-                    <th className="py-3 px-3">Kho nhập</th>
-                    <th className="py-3 px-3">Nhà cung cấp</th>
-                    <th className="py-3 px-3">Vật tư nhập kho</th>
-                    <th className="py-3 px-3 text-center">SL nhập</th>
-                    <th className="py-3 px-3 text-right">Tổng tiền nhập</th>
-                    <th className="py-3 px-3 text-right">Đã trả NCC</th>
-                    <th className="py-3 px-3 text-right">Còn nợ NCC</th>
-                    <th className="py-3 px-3 text-right">Liên kết chi tiết</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[105px]">Ngày nhập</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[115px]">Mã phiếu</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[135px]">Kho nhập</th>
+                    <th className="py-3 px-3.5 min-w-[190px]">Nhà cung cấp</th>
+                    <th className="py-3 px-3.5 min-w-[230px]">Vật tư nhập kho</th>
+                    <th className="py-3 px-3.5 text-center whitespace-nowrap w-[100px]">SL nhập</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Tổng tiền nhập</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Đã trả NCC</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Còn nợ NCC</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[130px]">Liên kết chi tiết</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -1278,37 +1262,41 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       onClick={() => setDrillDownItem({ type: 'import', record: imp })}
                       className="hover:bg-emerald-50/50 cursor-pointer"
                     >
-                      <td className="py-3 px-3 font-mono whitespace-nowrap">
+                      <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
                         {imp.createdAt.slice(0, 10)}
                       </td>
-                      <td className="py-3 px-3 font-mono font-bold text-emerald-800 underline whitespace-nowrap">
+                      <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
                         {imp.receiptCode}
                       </td>
-                      <td className="py-3 px-3 whitespace-nowrap">
+                      <td className="py-3 px-3.5 whitespace-nowrap align-middle">
                         {imp.warehouseName || 'Tâm An Mỹ Ngãi'}
                       </td>
-                      <td className="py-3 px-3 font-semibold text-slate-900">{imp.supplierName}</td>
-                      <td className="py-3 px-3 font-medium text-slate-900">{imp.productName}</td>
-                      <td className="py-3 px-3 text-center font-mono whitespace-nowrap">
+                      <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[190px] leading-snug align-middle">
+                        {imp.supplierName}
+                      </td>
+                      <td className="py-3 px-3.5 font-medium text-slate-900 min-w-[230px] leading-snug align-middle">
+                        {imp.productName}
+                      </td>
+                      <td className="py-3 px-3.5 text-center font-mono whitespace-nowrap align-middle">
                         {imp.quantity} {imp.unit}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-semibold whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums font-semibold whitespace-nowrap align-middle">
                         {formatVND(imp.totalCost)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono text-emerald-700 whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap align-middle">
                         {formatVND(imp.paidAmount)}
                       </td>
-                      <td className="py-3 px-3 text-right font-mono font-bold text-red-600 whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-red-600 whitespace-nowrap align-middle">
                         {formatVND(imp.debtAmount)}
                       </td>
-                      <td className="py-3 px-3 text-right whitespace-nowrap">
+                      <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
                             setDrillDownItem({ type: 'import', record: imp });
                           }}
-                          className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md"
+                          className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
                         >
                           Xem & Kiểm tra →
                         </button>
@@ -1340,27 +1328,27 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 <button
                   type="button"
                   onClick={() => onNavigateToModule('inventory')}
-                  className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center gap-1.5 self-start sm:self-auto"
+                  className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center gap-1.5 self-start sm:self-auto whitespace-nowrap shrink-0"
                 >
                   <span>Mở phân hệ Quản lý Tồn kho</span>
-                  <ExternalLink className="w-3.5 h-3.5" />
+                  <ExternalLink className="w-3.5 h-3.5 shrink-0" />
                 </button>
               )}
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
+              <table className="w-full min-w-[1000px] text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                    <th className="py-3 px-3">Mã VT</th>
-                    <th className="py-3 px-3">Kho lưu trữ</th>
-                    <th className="py-3 px-3">Tên vật tư nông nghiệp</th>
-                    <th className="py-3 px-3 text-center">Nhập trong kỳ</th>
-                    <th className="py-3 px-3 text-center">Xuất trong kỳ</th>
-                    <th className="py-3 px-3 text-center">Tồn hiện tại</th>
-                    <th className="py-3 px-3 text-right">Giá trị tồn kho</th>
-                    <th className="py-3 px-3 text-center">Cảnh báo</th>
-                    <th className="py-3 px-3 text-right">Liên kết kiểm tra</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[95px]">Mã VT</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[140px]">Kho lưu trữ</th>
+                    <th className="py-3 px-3.5 min-w-[240px]">Tên vật tư nông nghiệp</th>
+                    <th className="py-3 px-3.5 text-center whitespace-nowrap w-[115px]">Nhập trong kỳ</th>
+                    <th className="py-3 px-3.5 text-center whitespace-nowrap w-[115px]">Xuất trong kỳ</th>
+                    <th className="py-3 px-3.5 text-center whitespace-nowrap w-[115px]">Tồn hiện tại</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[125px]">Giá trị tồn kho</th>
+                    <th className="py-3 px-3.5 text-center whitespace-nowrap w-[110px]">Cảnh báo</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[130px]">Liên kết kiểm tra</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200">
@@ -1378,26 +1366,30 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                         onClick={() => setDrillDownItem({ type: 'product', record: p })}
                         className="hover:bg-emerald-50/50 cursor-pointer"
                       >
-                        <td className="py-3 px-3 font-mono font-bold text-emerald-800 underline">
+                        <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
                           {p.code}
                         </td>
-                        <td className="py-3 px-3">{p.warehouseName || 'Tâm An Mỹ Ngãi'}</td>
-                        <td className="py-3 px-3 font-semibold text-slate-900">{p.name}</td>
-                        <td className="py-3 px-3 text-center font-mono text-emerald-700 font-semibold">
+                        <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                          {p.warehouseName || 'Tâm An Mỹ Ngãi'}
+                        </td>
+                        <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[240px] leading-snug align-middle">
+                          {p.name}
+                        </td>
+                        <td className="py-3 px-3.5 text-center font-mono text-emerald-700 font-semibold whitespace-nowrap align-middle">
                           +{importedInPeriod} {p.unit}
                         </td>
-                        <td className="py-3 px-3 text-center font-mono text-amber-800 font-semibold">
+                        <td className="py-3 px-3.5 text-center font-mono text-amber-800 font-semibold whitespace-nowrap align-middle">
                           -{soldInPeriod} {p.unit}
                         </td>
-                        <td className="py-3 px-3 text-center font-mono font-bold text-slate-900">
+                        <td className="py-3 px-3.5 text-center font-mono font-bold text-slate-900 whitespace-nowrap align-middle">
                           {p.stock} {p.unit}
                         </td>
-                        <td className="py-3 px-3 text-right font-mono">
+                        <td className="py-3 px-3.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                           {formatVND(p.stock * p.importPrice)}
                         </td>
-                        <td className="py-3 px-3 text-center">
+                        <td className="py-3 px-3.5 text-center whitespace-nowrap align-middle">
                           <span
-                            className={`px-2 py-0.5 text-[11px] font-bold rounded ${
+                            className={`px-2 py-0.5 text-[11px] font-bold rounded whitespace-nowrap ${
                               alert === 'out_of_stock'
                                 ? 'bg-red-100 text-red-800'
                                 : alert === 'low_stock'
@@ -1412,14 +1404,14 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                               : 'Đủ hàng'}
                           </span>
                         </td>
-                        <td className="py-3 px-3 text-right">
+                        <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                           <button
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
                               setDrillDownItem({ type: 'product', record: p });
                             }}
-                            className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md"
+                            className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
                           >
                             Kiểm tra kho →
                           </button>
@@ -1454,27 +1446,27 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   <button
                     type="button"
                     onClick={() => onNavigateToModule('debts')}
-                    className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center gap-1.5 self-start sm:self-auto"
+                    className="px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center gap-1.5 self-start sm:self-auto whitespace-nowrap shrink-0"
                   >
                     <span>Mở phân hệ Quản lý Công nợ</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
+                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
                   </button>
                 )}
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
+                <table className="w-full min-w-[1040px] text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                      <th className="py-3 px-3">Loại công nợ</th>
-                      <th className="py-3 px-3">Ngày / Mã phiếu</th>
-                      <th className="py-3 px-3">Khách hàng / Nhà cung cấp</th>
-                      <th className="py-3 px-3">Mặt hàng còn nợ</th>
-                      <th className="py-3 px-3 text-right">Tổng tiền</th>
-                      <th className="py-3 px-3 text-right">Đã trả</th>
-                      <th className="py-3 px-3 text-right">Còn nợ</th>
-                      <th className="py-3 px-3">Hạn thanh toán</th>
-                      <th className="py-3 px-3 text-right">Kiểm tra & Thu/Trả</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[120px]">Loại công nợ</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[125px]">Ngày / Mã phiếu</th>
+                      <th className="py-3 px-3.5 min-w-[185px]">Khách hàng / Nhà cung cấp</th>
+                      <th className="py-3 px-3.5 min-w-[230px]">Mặt hàng còn nợ</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Tổng tiền</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Đã trả</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[115px]">Còn nợ</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[140px]">Hạn thanh toán</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[145px]">Kiểm tra & Thu/Trả</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -1491,41 +1483,41 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                             onClick={() => setDrillDownItem({ type: 'sale', record: s })}
                             className="hover:bg-red-50/30 cursor-pointer"
                           >
-                            <td className="py-3 px-3">
-                              <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded">
+                            <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                              <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded whitespace-nowrap">
                                 Phải thu KH
                               </span>
                             </td>
-                            <td className="py-3 px-3 font-mono">
+                            <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
                               <div className="font-bold text-emerald-800 underline">
                                 {s.invoiceCode}
                               </div>
-                              <div className="text-[11px] text-slate-500">
+                              <div className="text-[11px] text-slate-500 mt-0.5">
                                 {s.createdAt.slice(0, 10)}
                               </div>
                             </td>
-                            <td className="py-3 px-3 font-semibold text-slate-900">
-                              {s.customerName}
-                              <div className="text-[11px] font-mono text-slate-500">
+                            <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[185px] leading-snug align-middle">
+                              <div>{s.customerName}</div>
+                              <div className="text-[11px] font-mono text-slate-500 mt-0.5">
                                 {s.customerPhone}
                               </div>
                             </td>
-                            <td className="py-3 px-3">
+                            <td className="py-3 px-3.5 min-w-[230px] leading-snug align-middle">
                               {s.productName} ({s.quantity} {s.unit})
                             </td>
-                            <td className="py-3 px-3 text-right font-mono">
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                               {formatVND(s.totalAmount)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono text-emerald-700">
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap align-middle">
                               {formatVND(s.paidAmount)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono font-bold text-red-600">
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-red-600 whitespace-nowrap align-middle">
                               {formatVND(s.debtAmount)}
                             </td>
-                            <td className="py-3 px-3 font-mono">
+                            <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
                               <div>{s.dueDate}</div>
                               <div
-                                className={`text-[11px] font-semibold ${
+                                className={`text-[11px] font-semibold mt-0.5 ${
                                   urgency === 'overdue' ? 'text-red-600' : 'text-amber-700'
                                 }`}
                               >
@@ -1534,7 +1526,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                   : `Còn ${daysRemaining} ngày`}
                               </div>
                             </td>
-                            <td className="py-3 px-3 text-right">
+                            <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1545,7 +1537,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                     setDrillDownItem({ type: 'sale', record: s });
                                   }
                                 }}
-                                className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md"
+                                className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
                               >
                                 Đối soát & Thu nợ →
                               </button>
@@ -1566,41 +1558,41 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                             onClick={() => setDrillDownItem({ type: 'import', record: i })}
                             className="hover:bg-amber-50/40 cursor-pointer"
                           >
-                            <td className="py-3 px-3">
-                              <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 rounded">
+                            <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                              <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 rounded whitespace-nowrap">
                                 Phải trả NCC
                               </span>
                             </td>
-                            <td className="py-3 px-3 font-mono">
+                            <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
                               <div className="font-bold text-amber-900 underline">
                                 {i.receiptCode}
                               </div>
-                              <div className="text-[11px] text-slate-500">
+                              <div className="text-[11px] text-slate-500 mt-0.5">
                                 {i.createdAt.slice(0, 10)}
                               </div>
                             </td>
-                            <td className="py-3 px-3 font-semibold text-slate-900">
-                              {i.supplierName}
-                              <div className="text-[11px] font-mono text-slate-500">
+                            <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[185px] leading-snug align-middle">
+                              <div>{i.supplierName}</div>
+                              <div className="text-[11px] font-mono text-slate-500 mt-0.5">
                                 {i.supplierPhone}
                               </div>
                             </td>
-                            <td className="py-3 px-3">
+                            <td className="py-3 px-3.5 min-w-[230px] leading-snug align-middle">
                               {i.productName} ({i.quantity} {i.unit})
                             </td>
-                            <td className="py-3 px-3 text-right font-mono">
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                               {formatVND(i.totalCost)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono text-emerald-700">
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums text-emerald-700 whitespace-nowrap align-middle">
                               {formatVND(i.paidAmount)}
                             </td>
-                            <td className="py-3 px-3 text-right font-mono font-bold text-red-600">
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-red-600 whitespace-nowrap align-middle">
                               {formatVND(i.debtAmount)}
                             </td>
-                            <td className="py-3 px-3 font-mono">
+                            <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
                               <div>{i.dueDate}</div>
                               <div
-                                className={`text-[11px] font-semibold ${
+                                className={`text-[11px] font-semibold mt-0.5 ${
                                   urgency === 'overdue' ? 'text-red-600' : 'text-amber-700'
                                 }`}
                               >
@@ -1609,7 +1601,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                   : `Còn ${daysRemaining} ngày`}
                               </div>
                             </td>
-                            <td className="py-3 px-3 text-right">
+                            <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1620,7 +1612,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                     setDrillDownItem({ type: 'import', record: i });
                                   }
                                 }}
-                                className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md"
+                                className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md whitespace-nowrap"
                               >
                                 Mở phiếu nợ NCC →
                               </button>
@@ -1686,17 +1678,17 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
+                <table className="w-full min-w-[1000px] text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                      <th className="py-3 px-3">Ngày giao dịch</th>
-                      <th className="py-3 px-3">Loại phiếu Thu / Chi</th>
-                      <th className="py-3 px-3">Mã chứng từ</th>
-                      <th className="py-3 px-3">Đối tác / Khách hàng</th>
-                      <th className="py-3 px-3">Diễn giải nội dung dòng tiền</th>
-                      <th className="py-3 px-3 text-right">Tiền Thu (+)</th>
-                      <th className="py-3 px-3 text-right">Tiền Chi (-)</th>
-                      <th className="py-3 px-3 text-right">Kiểm tra</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[110px]">Ngày giao dịch</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[155px]">Loại phiếu Thu / Chi</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[125px]">Mã chứng từ</th>
+                      <th className="py-3 px-3.5 min-w-[180px]">Đối tác / Khách hàng</th>
+                      <th className="py-3 px-3.5 min-w-[240px]">Diễn giải nội dung dòng tiền</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[120px]">Tiền Thu (+)</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[120px]">Tiền Chi (-)</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[105px]">Kiểm tra</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -1708,33 +1700,33 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                           onClick={() => setDrillDownItem({ type: 'sale', record: s })}
                           className="hover:bg-emerald-50/40 cursor-pointer"
                         >
-                          <td className="py-3 px-3 font-mono">{s.createdAt.slice(0, 10)}</td>
-                          <td className="py-3 px-3">
-                            <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded">
+                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">{s.createdAt.slice(0, 10)}</td>
+                          <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                            <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded whitespace-nowrap">
                               PHIẾU THU BÁN HÀNG
                             </span>
                           </td>
-                          <td className="py-3 px-3 font-mono font-bold text-emerald-800 underline">
+                          <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
                             {s.invoiceCode}
                           </td>
-                          <td className="py-3 px-3 font-semibold text-slate-900">
+                          <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[180px] leading-snug align-middle">
                             {s.customerName}
                           </td>
-                          <td className="py-3 px-3">
+                          <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
                             Thu tiền bán {s.quantity} {s.unit} {s.productName}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-emerald-700 whitespace-nowrap align-middle">
                             +{formatVND(s.paidAmount)}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono text-slate-400">0 đ</td>
-                          <td className="py-3 px-3 text-right">
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">0 đ</td>
+                          <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setDrillDownItem({ type: 'sale', record: s });
                               }}
-                              className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 rounded-md"
+                              className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 rounded-md whitespace-nowrap"
                             >
                               Chi tiết →
                             </button>
@@ -1749,33 +1741,33 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                           onClick={() => setDrillDownItem({ type: 'import', record: i })}
                           className="hover:bg-amber-50/40 cursor-pointer"
                         >
-                          <td className="py-3 px-3 font-mono">{i.createdAt.slice(0, 10)}</td>
-                          <td className="py-3 px-3">
-                            <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 rounded">
+                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">{i.createdAt.slice(0, 10)}</td>
+                          <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                            <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 rounded whitespace-nowrap">
                               PHIẾU CHI NHẬP KHO
                             </span>
                           </td>
-                          <td className="py-3 px-3 font-mono font-bold text-amber-900 underline">
+                          <td className="py-3 px-3.5 font-mono font-bold text-amber-900 underline whitespace-nowrap align-middle">
                             {i.receiptCode}
                           </td>
-                          <td className="py-3 px-3 font-semibold text-slate-900">
+                          <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[180px] leading-snug align-middle">
                             {i.supplierName}
                           </td>
-                          <td className="py-3 px-3">
+                          <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
                             Chi thanh toán nhập {i.quantity} {i.unit} {i.productName}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono text-slate-400">0 đ</td>
-                          <td className="py-3 px-3 text-right font-mono font-bold text-amber-800">
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">0 đ</td>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-amber-800 whitespace-nowrap align-middle">
                             -{formatVND(i.paidAmount)}
                           </td>
-                          <td className="py-3 px-3 text-right">
+                          <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                             <button
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setDrillDownItem({ type: 'import', record: i });
                               }}
-                              className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 rounded-md"
+                              className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 rounded-md whitespace-nowrap"
                             >
                               Chi tiết →
                             </button>
@@ -1839,18 +1831,18 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               </div>
 
               <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
+                <table className="w-full min-w-[980px] text-left border-collapse text-xs">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-600">
-                      <th className="py-3 px-3">Ngày bán</th>
-                      <th className="py-3 px-3">Mã HĐ</th>
-                      <th className="py-3 px-3">Khách hàng</th>
-                      <th className="py-3 px-3">Mặt hàng</th>
-                      <th className="py-3 px-3 text-center">SL</th>
-                      <th className="py-3 px-3 text-right">Doanh thu bán</th>
-                      <th className="py-3 px-3 text-right">Giá vốn</th>
-                      <th className="py-3 px-3 text-right">Lợi nhuận gộp</th>
-                      <th className="py-3 px-3 text-center">Tỷ suất</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[105px]">Ngày bán</th>
+                      <th className="py-3 px-3.5 whitespace-nowrap w-[115px]">Mã HĐ</th>
+                      <th className="py-3 px-3.5 min-w-[180px]">Khách hàng</th>
+                      <th className="py-3 px-3.5 min-w-[230px]">Mặt hàng</th>
+                      <th className="py-3 px-3.5 text-center whitespace-nowrap w-[100px]">SL</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[120px]">Doanh thu bán</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[120px]">Giá vốn</th>
+                      <th className="py-3 px-3.5 text-right whitespace-nowrap w-[120px]">Lợi nhuận gộp</th>
+                      <th className="py-3 px-3.5 text-center whitespace-nowrap w-[90px]">Tỷ suất</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
@@ -1867,27 +1859,27 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                           onClick={() => setDrillDownItem({ type: 'sale', record: s })}
                           className="hover:bg-emerald-50/40 cursor-pointer"
                         >
-                          <td className="py-3 px-3 font-mono">{s.createdAt.slice(0, 10)}</td>
-                          <td className="py-3 px-3 font-mono font-bold text-emerald-800 underline">
+                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">{s.createdAt.slice(0, 10)}</td>
+                          <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
                             {s.invoiceCode}
                           </td>
-                          <td className="py-3 px-3 font-semibold text-slate-900">
+                          <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[180px] leading-snug align-middle">
                             {s.customerName}
                           </td>
-                          <td className="py-3 px-3">{s.productName}</td>
-                          <td className="py-3 px-3 text-center font-mono">
+                          <td className="py-3 px-3.5 min-w-[230px] leading-snug align-middle">{s.productName}</td>
+                          <td className="py-3 px-3.5 text-center font-mono whitespace-nowrap align-middle">
                             {s.quantity} {s.unit}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono font-semibold">
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-semibold whitespace-nowrap align-middle">
                             {formatVND(s.totalAmount)}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono text-slate-600">
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-600 whitespace-nowrap align-middle">
                             {formatVND(totalCost)}
                           </td>
-                          <td className="py-3 px-3 text-right font-mono font-bold text-emerald-700">
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-emerald-700 whitespace-nowrap align-middle">
                             +{formatVND(profit)}
                           </td>
-                          <td className="py-3 px-3 text-center font-mono font-semibold text-emerald-800">
+                          <td className="py-3 px-3.5 text-center font-mono font-semibold text-emerald-800 whitespace-nowrap align-middle">
                             {margin}%
                           </td>
                         </tr>
@@ -1898,6 +1890,32 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               </div>
             </div>
           )}
+
+        {/* Bottom Report Export Bar (Moved to bottom of page) */}
+        <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-xs font-semibold text-slate-700">
+            Xuất tệp báo cáo tổng hợp & Báo cáo cấp trên ({fromDate} → {toDate}):
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportComprehensiveExcel}
+              className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <FileSpreadsheet className="w-4 h-4 shrink-0" />
+              <span>Xuất Báo Cáo Tổng Hợp (Excel .xlsx)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleExportComprehensivePDF}
+              className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <FileText className="w-4 h-4 text-red-600 shrink-0" />
+              <span>Xuất Báo Cáo Cấp Trên (PDF .pdf)</span>
+            </button>
+          </div>
+        </div>
 
         {/* Modal: Kiểm tra chi tiết chứng từ / mặt hàng khi nhấp vào bất kỳ dòng nào trong Báo cáo */}
         {drillDownItem && (
@@ -2286,15 +2304,15 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
     <div className="space-y-6">
       {isPrimaryAdmin && (
         <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 space-y-5">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div>
+          <div className="flex flex-col gap-3.5">
+            <div className="min-w-0">
               <div className="text-xs text-emerald-700 font-semibold">
                 Đồng bộ đám mây Google Workspace & Sao lưu về máy tính (Kèm Lịch sử thao tác)
               </div>
-              <h3 className="text-base font-bold text-slate-900 mt-0.5">
+              <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-0.5">
                 Sao lưu dữ liệu tự động hàng ngày vào Google Drive & Khôi phục dữ liệu
               </h3>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
                 Tài khoản Gmail nhận sao lưu mặc định:{' '}
                 <strong className="font-mono text-slate-900">{ADMIN_BACKUP_EMAIL}</strong> · Mỗi tệp
                 sao lưu đều đính kèm toàn bộ{' '}
@@ -2323,7 +2341,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 onClick={() => setConfirmBackupModal(true)}
                 className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
               >
-                <CloudUpload className="w-4 h-4" />
+                <CloudUpload className="w-4 h-4 shrink-0" />
                 <span>
                   {isBackingUp ? 'Đang tải lên Drive...' : 'Sao lưu ngay lên Google Drive'}
                 </span>
@@ -2332,8 +2350,8 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
           </div>
 
           {/* Exclusive Primary Manager Box: Download Backup to Computer & Upload Backup to Restore */}
-          <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div className="space-y-1">
+          <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl flex flex-col gap-3.5">
+            <div className="space-y-1 min-w-0">
               <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
                 <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
                 <span>
@@ -2341,14 +2359,14 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   Khôi Phục Dữ Liệu
                 </span>
               </div>
-              <p className="text-xs text-slate-600">
+              <p className="text-xs text-slate-600 leading-relaxed">
                 Tải trực tiếp tệp sao lưu (.json) chứa toàn bộ dữ liệu + lịch sử thao tác về máy
                 tính, hoặc chọn tệp sao lưu từ máy tính đăng tải lên để khôi phục nguyên trạng dữ
                 liệu khi cần thiết.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <div className="flex flex-wrap items-center gap-2.5">
               <input
                 ref={backupFileInputRef}
                 type="file"
@@ -2417,7 +2435,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       onClick={() => onDownloadBackupFile(bk)}
                       className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md flex items-center gap-1"
                     >
-                      <Download className="w-3.5 h-3.5" />
+                      <Download className="w-3.5 h-3.5 shrink-0" />
                       <span>Tải về máy</span>
                     </button>
                     {bk.snapshotPayload && (
@@ -2426,7 +2444,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                         onClick={() => setPendingRestorePayload(bk.snapshotPayload!)}
                         className="px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1"
                       >
-                        <RotateCcw className="w-3.5 h-3.5 text-emerald-700" />
+                        <RotateCcw className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                         <span>Khôi phục</span>
                       </button>
                     )}
@@ -2447,44 +2465,44 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
 
           {/* Backup History: Desktop Balanced Table (>= md) */}
           <div className="hidden md:block overflow-x-auto border border-slate-200 rounded-lg">
-            <table className="w-full text-left border-collapse">
+            <table className="w-full min-w-[940px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-2.5 px-3">Tên tệp sao lưu</th>
-                  <th className="py-2.5 px-3">Gmail nhận</th>
-                  <th className="py-2.5 px-3">Loại & Trạng thái</th>
-                  <th className="py-2.5 px-3 text-right">Bản ghi & Lịch sử</th>
-                  <th className="py-2.5 px-3">Thời gian</th>
-                  <th className="py-2.5 px-3 text-right">Thao tác</th>
+                  <th className="py-2.5 px-3.5 min-w-[235px]">Tên tệp sao lưu</th>
+                  <th className="py-2.5 px-3.5 min-w-[180px]">Gmail nhận</th>
+                  <th className="py-2.5 px-3.5 whitespace-nowrap w-[140px]">Loại & Trạng thái</th>
+                  <th className="py-2.5 px-3.5 text-right whitespace-nowrap w-[160px]">Bản ghi & Lịch sử</th>
+                  <th className="py-2.5 px-3.5 whitespace-nowrap w-[135px]">Thời gian</th>
+                  <th className="py-2.5 px-3.5 text-right whitespace-nowrap w-[170px]">Thao tác</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-xs">
                 {backups.map((bk) => (
                   <tr key={bk.id} className="hover:bg-slate-50">
-                    <td className="py-3 px-3 font-mono font-medium text-slate-900 break-all">
+                    <td className="py-3 px-3.5 font-mono font-medium text-slate-900 min-w-[235px] align-middle">
                       {bk.fileName}
                     </td>
-                    <td className="py-3 px-3 font-mono text-slate-700 break-all">
+                    <td className="py-3 px-3.5 font-mono text-slate-700 min-w-[180px] align-middle">
                       {bk.targetEmail}
                     </td>
-                    <td className="py-3 px-3 text-slate-600">
+                    <td className="py-3 px-3.5 text-slate-600 whitespace-nowrap align-middle">
                       {bk.triggerType === 'auto_daily' ? 'Tự động' : 'Thủ công'}
                       <span className="mx-1" aria-hidden="true">
                         ·
                       </span>
                       <span className="text-emerald-700 font-medium">Hoàn tất</span>
                     </td>
-                    <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                    <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-800 whitespace-nowrap align-middle">
                       <span className="font-semibold">{bk.recordCount} bản ghi</span>
                       <span className="mx-1 text-slate-400">·</span>
                       <span className="text-emerald-800 font-semibold">
                         {bk.auditLogCount ?? auditLogs.length} thao tác
                       </span>
                     </td>
-                    <td className="py-3 px-3 font-mono text-slate-500 whitespace-nowrap">
+                    <td className="py-3 px-3.5 font-mono text-slate-500 whitespace-nowrap align-middle">
                       {bk.createdAt.replace('T', ' ').slice(0, 16)}
                     </td>
-                    <td className="py-3 px-3 text-right whitespace-nowrap">
+                    <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
@@ -2492,7 +2510,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                           title="Tải tệp sao lưu này về máy tính (.json)"
                           className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                         >
-                          <Download className="w-3.5 h-3.5" />
+                          <Download className="w-3.5 h-3.5 shrink-0" />
                           <span>Tải về máy</span>
                         </button>
                         {bk.snapshotPayload && (
@@ -2502,7 +2520,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                             title="Khôi phục dữ liệu theo tệp sao lưu này"
                             className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                           >
-                            <RotateCcw className="w-3.5 h-3.5 text-emerald-700" />
+                            <RotateCcw className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                             <span>Khôi phục</span>
                           </button>
                         )}
@@ -2527,18 +2545,18 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       {/* Operation Audit Log (Lịch sử các thao tác đã thực hiện — EXCLUSIVE to trannhat1205@gmail.com) */}
       {isPrimaryAdmin && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <div className="p-4 sm:p-6 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-50/60">
-            <div>
+          <div className="p-4 sm:p-6 border-b border-slate-200 flex flex-col gap-3.5 bg-slate-50/60">
+            <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <History className="w-4 h-4 text-emerald-700 shrink-0" />
                 <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
                   Giám Sát Độc Quyền Quản Lý Chính ({ADMIN_BACKUP_EMAIL})
                 </span>
               </div>
-              <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-0.5">
+              <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-1">
                 Lịch Sử Các Thao Tác Đã Thực Hiện ({auditLogs.length} bước thao tác đã ghi nhận)
               </h3>
-              <p className="text-xs text-slate-600 mt-1">
+              <p className="text-xs text-slate-600 mt-1 leading-relaxed">
                 Lưu lại toàn bộ các bước thực hiện (đặc biệt khi cấp quyền xóa phiếu / xóa dữ liệu
                 hoặc chỉnh sửa cho các Quản lý & Nhân viên). Chỉ duy nhất tài khoản{' '}
                 <strong className="font-mono text-slate-900">{ADMIN_BACKUP_EMAIL}</strong> có quyền
@@ -2546,11 +2564,11 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <span className="px-2.5 py-1 text-xs font-semibold bg-red-50 text-red-700 border border-red-200 rounded-lg">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="px-2.5 py-1 text-xs font-semibold bg-red-50 text-red-700 border border-red-200 rounded-lg whitespace-nowrap">
                 {deleteAuditCount} thao tác xóa đã ghi bằng chứng
               </span>
-              <span className="px-2.5 py-1 text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 rounded-lg">
+              <span className="px-2.5 py-1 text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 rounded-lg whitespace-nowrap">
                 {editAuditCount} thao tác chỉnh sửa
               </span>
               <button
@@ -2558,14 +2576,14 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 onClick={() => onDownloadBackupFile()}
                 className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
               >
-                <Download className="w-3.5 h-3.5" />
+                <Download className="w-3.5 h-3.5 shrink-0" />
                 <span>Tải Sao Lưu Kèm Lịch Sử (.json)</span>
               </button>
             </div>
           </div>
 
           <div className="space-y-4">
-            <div className="px-4 sm:px-6 pt-4 flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+            <div className="px-4 sm:px-6 pt-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
               <div className="flex flex-wrap items-center gap-1.5">
                 {[
                   { id: 'all', label: `Tất cả (${auditLogs.length})` },
@@ -2593,7 +2611,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 ))}
               </div>
 
-              <div className="relative w-full xl:w-72">
+              <div className="relative w-full lg:w-72 shrink-0">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
@@ -2607,14 +2625,14 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
             </div>
 
             <div className="overflow-x-auto border-t border-slate-200">
-              <table className="w-full text-left border-collapse">
+              <table className="w-full min-w-[1040px] text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                    <th className="py-3 px-3 whitespace-nowrap">Thời gian & Kho</th>
-                    <th className="py-3 px-3">Tài khoản nhân sự thực hiện</th>
-                    <th className="py-3 px-3">Loại thao tác & Mã phiếu</th>
-                    <th className="py-3 px-3">Chi tiết bước thực hiện (Bằng chứng lưu trữ)</th>
-                    <th className="py-3 px-3 text-right whitespace-nowrap">
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[150px]">Thời gian & Kho</th>
+                    <th className="py-3 px-3.5 min-w-[205px]">Tài khoản nhân sự thực hiện</th>
+                    <th className="py-3 px-3.5 whitespace-nowrap w-[160px]">Loại thao tác & Mã phiếu</th>
+                    <th className="py-3 px-3.5 min-w-[300px]">Chi tiết bước thực hiện (Bằng chứng lưu trữ)</th>
+                    <th className="py-3 px-3.5 text-right whitespace-nowrap w-[150px]">
                       Bằng chứng / Khôi phục
                     </th>
                   </tr>
@@ -2636,7 +2654,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                             : 'hover:bg-slate-50'
                         }
                       >
-                        <td className="py-3.5 px-3 whitespace-nowrap align-top">
+                        <td className="py-3.5 px-3.5 whitespace-nowrap align-middle">
                           <div className="font-mono font-semibold text-slate-900">
                             {entry.timestamp.replace('T', ' ').slice(0, 19)}
                           </div>
@@ -2645,29 +2663,29 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                             <span>{entry.warehouseName}</span>
                           </div>
                         </td>
-                        <td className="py-3.5 px-3 align-top max-w-[200px]">
-                          <div className="font-bold text-slate-900">{entry.actorDisplayName}</div>
-                          <div className="text-[11px] text-slate-500 mt-0.5 break-all">
+                        <td className="py-3.5 px-3.5 align-middle min-w-[205px]">
+                          <div className="font-bold text-slate-900 leading-snug">{entry.actorDisplayName}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">
                             <span className="font-mono font-semibold text-emerald-800">
                               @{entry.actorUsername}
                             </span>
                             {entry.actorEmail ? ` · ${entry.actorEmail}` : ''}
                           </div>
-                          <div className="text-[11px] text-slate-500">{entry.actorRoleLabel}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5 leading-snug">{entry.actorRoleLabel}</div>
                         </td>
-                        <td className="py-3.5 px-3 align-top whitespace-nowrap">
+                        <td className="py-3.5 px-3.5 align-middle whitespace-nowrap">
                           <div>{getCategoryBadge(entry.category)}</div>
                           <div className="font-mono font-bold text-slate-900 mt-1">
                             Mã: {entry.targetCode}
                           </div>
                         </td>
-                        <td className="py-3.5 px-3 align-top">
-                          <div className="font-semibold text-slate-900">{entry.actionTitle}</div>
+                        <td className="py-3.5 px-3.5 align-middle min-w-[300px]">
+                          <div className="font-semibold text-slate-900 leading-snug">{entry.actionTitle}</div>
                           <div className="text-slate-600 mt-0.5 leading-relaxed">
                             {entry.details}
                           </div>
                         </td>
-                        <td className="py-3.5 px-3 text-right whitespace-nowrap align-top">
+                        <td className="py-3.5 px-3.5 text-right whitespace-nowrap align-middle">
                           <div className="flex flex-col items-end gap-1.5">
                             {entry.snapshotData ? (
                               <button
@@ -2675,7 +2693,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                 onClick={() => setInspectingAuditSnapshot(entry)}
                                 className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1 whitespace-nowrap"
                               >
-                                <Eye className="w-3.5 h-3.5 text-slate-600" />
+                                <Eye className="w-3.5 h-3.5 text-slate-600 shrink-0" />
                                 <span>Xem dữ liệu gốc</span>
                               </button>
                             ) : (
@@ -2686,7 +2704,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                               entry.snapshotData &&
                               (entry.restoredAt ? (
                                 <span className="px-2.5 py-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center gap-1 whitespace-nowrap">
-                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                                   <span>Đã khôi phục</span>
                                 </span>
                               ) : (
@@ -2695,7 +2713,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                                   onClick={() => onRestoreDeletedRecordFromAudit(entry)}
                                   className="px-2.5 py-1 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1 whitespace-nowrap"
                                 >
-                                  <RotateCcw className="w-3.5 h-3.5" />
+                                  <RotateCcw className="w-3.5 h-3.5 shrink-0" />
                                   <span>Khôi phục lại</span>
                                 </button>
                               ))}
@@ -2714,13 +2732,13 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       {/* Section 3: Google Authentication & Role-Based Access Control (RBAC) — Exclusive to Primary Manager */}
       {isPrimaryAdmin && (
         <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 space-y-5">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div>
+          <div className="flex flex-col gap-3.5">
+            <div className="min-w-0">
               <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
                 <span>Đăng nhập Google & Bảng Phân Quyền Nhân Sự Chi Tiết</span>
               </h3>
-              <p className="text-xs text-slate-500 mt-1">
+              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
                 Phân quyền chặt chẽ theo đánh dấu [X] thời gian thực: Mỗi nhân viên được chỉ định
                 xem và xuất báo cáo đúng theo nhiệm vụ của mình.
               </p>
@@ -2747,7 +2765,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 <button
                   type="button"
                   onClick={() => onSwitchRolePreview('manager')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
                     role === 'manager'
                       ? 'bg-white text-slate-900 shadow-xs'
                       : 'text-slate-600 hover:text-slate-900'
@@ -2758,7 +2776,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 <button
                   type="button"
                   onClick={() => onSwitchRolePreview('staff')}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
                     role === 'staff'
                       ? 'bg-white text-slate-900 shadow-xs'
                       : 'text-slate-600 hover:text-slate-900'
@@ -2771,13 +2789,13 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
           </div>
 
           <div className="overflow-x-auto border border-slate-200 rounded-lg">
-            <table className="w-full min-w-[880px] text-left border-collapse">
+            <table className="w-full min-w-[960px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
                   <th className="py-3 px-4 min-w-[210px]">Nhân sự & Kho phụ trách</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Tài khoản Google (Gmail)</th>
-                  <th className="py-3 px-4 min-w-[170px]">Vai trò chức danh</th>
-                  <th className="py-3 px-4 min-w-[300px]">
+                  <th className="py-3 px-4 whitespace-nowrap w-[195px]">Tài khoản Google (Gmail)</th>
+                  <th className="py-3 px-4 min-w-[180px]">Vai trò chức danh</th>
+                  <th className="py-3 px-4 min-w-[340px]">
                     Quyền hạn [X] & Mục Báo cáo được chỉ định
                   </th>
                 </tr>
@@ -2798,19 +2816,19 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
 
                   return (
                     <tr key={st.uid} className="hover:bg-slate-50">
-                      <td className="py-3.5 px-4">
-                        <div className="font-bold text-slate-900">{st.displayName}</div>
+                      <td className="py-3.5 px-4 min-w-[210px] align-middle">
+                        <div className="font-bold text-slate-900 leading-snug">{st.displayName}</div>
                         <div className="text-[11px] text-emerald-800 font-semibold mt-0.5">
                           @{st.username} · Kho: {st.assignedWarehouse}
                         </div>
                       </td>
-                      <td className="py-3.5 px-4 font-mono text-slate-700">
+                      <td className="py-3.5 px-4 font-mono text-slate-700 whitespace-nowrap align-middle">
                         {st.email || '---'}
                       </td>
-                      <td className="py-3.5 px-4 font-semibold text-slate-800">
+                      <td className="py-3.5 px-4 font-semibold text-slate-800 min-w-[180px] leading-snug align-middle">
                         {getPositionRoleLabel(st.positionRole)}
                       </td>
-                      <td className="py-3.5 px-4 text-slate-600 leading-relaxed">
+                      <td className="py-3.5 px-4 text-slate-600 leading-relaxed min-w-[340px] align-middle">
                         <div>{permLabels.join(' · ')}</div>
                         <div className="text-[11px] font-semibold text-emerald-800 mt-1">
                           Mục báo cáo chỉ định ({stScope.allowedReportCategories.length}):{' '}

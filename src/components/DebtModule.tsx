@@ -358,22 +358,6 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Excel Sample Template Download & Upload Bar */}
-      <ExcelDataBar
-        moduleType="debts"
-        moduleTitle="Quản Lý Công Nợ Khách Hàng & Nhà Cung Cấp"
-        onImportRows={onImportDebtPaymentsFromExcel}
-        onExportCurrentData={() =>
-          exportModuleDataExcel({
-            moduleType: 'debts',
-            products,
-            customers,
-            sales,
-            imports,
-          })
-        }
-      />
-
       {/* Top Summary Metrics with Direct Interactive Links to Overdue / Due-Soon Vouchers */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {canAccessSupplierDebts && (
@@ -952,17 +936,17 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
 
           {/* Desktop Balanced Table (>= md) */}
           <div className="hidden md:block overflow-x-auto">
-            <table className="w-full min-w-[940px] text-left border-collapse">
+            <table className="w-full min-w-[1000px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4 whitespace-nowrap">Mã phiếu & Ngày</th>
-                  <th className="py-3 px-4 min-w-[180px]">Nhà cung cấp</th>
-                  <th className="py-3 px-4 min-w-[200px]">Vật tư nhập</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Tổng tiền nhập</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Đã trả NCC</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Còn nợ NCC</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Hạn trả & Nhắc hẹn</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">
+                  <th className="py-3 px-4 w-[135px] whitespace-nowrap">Mã phiếu & Ngày</th>
+                  <th className="py-3 px-4 min-w-[190px]">Nhà cung cấp</th>
+                  <th className="py-3 px-4 min-w-[210px]">Vật tư nhập</th>
+                  <th className="py-3 px-4 w-[120px] text-right whitespace-nowrap">Tổng tiền nhập</th>
+                  <th className="py-3 px-4 w-[115px] text-right whitespace-nowrap">Đã trả NCC</th>
+                  <th className="py-3 px-4 w-[120px] text-right whitespace-nowrap">Còn nợ NCC</th>
+                  <th className="py-3 px-4 w-[150px] whitespace-nowrap">Hạn trả & Nhắc hẹn</th>
+                  <th className="py-3 px-4 w-[210px] text-right whitespace-nowrap">
                     Thao tác / Sửa & Xóa (Quản lý)
                   </th>
                 </tr>
@@ -992,7 +976,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             : 'hover:bg-slate-50'
                         }`}
                       >
-                        <td className="py-3.5 px-4 whitespace-nowrap">
+                        <td className="py-3.5 px-4 whitespace-nowrap align-middle">
                           <button
                             type="button"
                             onClick={() => setSelectedLinkedVoucherId(imp.id)}
@@ -1005,26 +989,26 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             {imp.createdAt.slice(0, 10)}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 min-w-[180px]">
-                          <div className="font-semibold text-slate-900">{imp.supplierName}</div>
-                          <div className="text-xs font-mono text-slate-500">{imp.supplierPhone}</div>
+                        <td className="py-3.5 px-4 min-w-[190px] align-middle">
+                          <div className="font-semibold text-slate-900 leading-snug">{imp.supplierName}</div>
+                          <div className="text-xs font-mono text-slate-500 mt-0.5">{imp.supplierPhone}</div>
                         </td>
-                        <td className="py-3.5 px-4 min-w-[200px]">
-                          <div className="text-xs font-medium text-slate-800">{imp.productName}</div>
-                          <div className="text-xs text-slate-500 font-mono">
+                        <td className="py-3.5 px-4 min-w-[210px] align-middle">
+                          <div className="text-xs font-medium text-slate-800 leading-snug">{imp.productName}</div>
+                          <div className="text-xs text-slate-500 font-mono mt-0.5">
                             SL: {imp.quantity} {imp.unit}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap align-middle">
                           {formatVND(imp.totalCost)}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-emerald-700 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-emerald-700 whitespace-nowrap align-middle">
                           {formatVND(imp.paidAmount)}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-bold text-red-600 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-bold text-red-600 whitespace-nowrap align-middle">
                           {formatVND(imp.debtAmount)}
                         </td>
-                        <td className="py-3.5 px-4 whitespace-nowrap">
+                        <td className="py-3.5 px-4 whitespace-nowrap align-middle">
                           <div className="font-mono text-xs text-slate-900">{imp.dueDate}</div>
                           <button
                             type="button"
@@ -1050,7 +1034,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             )}
                           </button>
                         </td>
-                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right whitespace-nowrap align-middle">
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
@@ -1327,17 +1311,17 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
 
           {/* Desktop Balanced Table (>= md) */}
           <div className="hidden md:block overflow-x-auto">
-            <table className="w-full min-w-[940px] text-left border-collapse">
+            <table className="w-full min-w-[1000px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4 whitespace-nowrap">Mã HĐ & Ngày</th>
-                  <th className="py-3 px-4 min-w-[180px]">Khách hàng</th>
-                  <th className="py-3 px-4 min-w-[200px]">Vật tư mua</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Tổng hóa đơn</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Đã thu</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Còn phải thu</th>
-                  <th className="py-3 px-4 whitespace-nowrap">Hạn thu nợ</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">
+                  <th className="py-3 px-4 w-[135px] whitespace-nowrap">Mã HĐ & Ngày</th>
+                  <th className="py-3 px-4 min-w-[190px]">Khách hàng</th>
+                  <th className="py-3 px-4 min-w-[210px]">Vật tư mua</th>
+                  <th className="py-3 px-4 w-[120px] text-right whitespace-nowrap">Tổng hóa đơn</th>
+                  <th className="py-3 px-4 w-[115px] text-right whitespace-nowrap">Đã thu</th>
+                  <th className="py-3 px-4 w-[120px] text-right whitespace-nowrap">Còn phải thu</th>
+                  <th className="py-3 px-4 w-[150px] whitespace-nowrap">Hạn thu nợ</th>
+                  <th className="py-3 px-4 w-[210px] text-right whitespace-nowrap">
                     Thao tác / Sửa & Xóa (Quản lý)
                   </th>
                 </tr>
@@ -1367,7 +1351,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             : 'hover:bg-slate-50'
                         }`}
                       >
-                        <td className="py-3.5 px-4 whitespace-nowrap">
+                        <td className="py-3.5 px-4 whitespace-nowrap align-middle">
                           <button
                             type="button"
                             onClick={() => setSelectedLinkedVoucherId(sale.id)}
@@ -1380,26 +1364,26 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             {sale.createdAt.slice(0, 10)}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 min-w-[180px]">
-                          <div className="font-semibold text-slate-900">{sale.customerName}</div>
-                          <div className="text-xs font-mono text-slate-500">{sale.customerPhone}</div>
+                        <td className="py-3.5 px-4 min-w-[190px] align-middle">
+                          <div className="font-semibold text-slate-900 leading-snug">{sale.customerName}</div>
+                          <div className="text-xs font-mono text-slate-500 mt-0.5">{sale.customerPhone}</div>
                         </td>
-                        <td className="py-3.5 px-4 min-w-[200px]">
-                          <div className="text-xs font-medium text-slate-800">{sale.productName}</div>
-                          <div className="text-xs text-slate-500 font-mono">
+                        <td className="py-3.5 px-4 min-w-[210px] align-middle">
+                          <div className="text-xs font-medium text-slate-800 leading-snug">{sale.productName}</div>
+                          <div className="text-xs text-slate-500 font-mono mt-0.5">
                             SL: {sale.quantity} {sale.unit}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap align-middle">
                           {formatVND(sale.totalAmount)}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-emerald-700 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-emerald-700 whitespace-nowrap align-middle">
                           {formatVND(sale.paidAmount)}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-bold text-red-600 whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-bold text-red-600 whitespace-nowrap align-middle">
                           {formatVND(sale.debtAmount)}
                         </td>
-                        <td className="py-3.5 px-4 whitespace-nowrap">
+                        <td className="py-3.5 px-4 whitespace-nowrap align-middle">
                           <div className="font-mono text-xs text-slate-900">{sale.dueDate}</div>
                           <button
                             type="button"
@@ -1425,7 +1409,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             )}
                           </button>
                         </td>
-                        <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        <td className="py-3.5 px-4 text-right whitespace-nowrap align-middle">
                           <div className="flex items-center justify-end gap-1.5">
                             <button
                               type="button"
@@ -1505,6 +1489,22 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
           </div>
         </div>
       )}
+
+      {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
+      <ExcelDataBar
+        moduleType="debts"
+        moduleTitle="Quản Lý Công Nợ Khách Hàng & Nhà Cung Cấp"
+        onImportRows={onImportDebtPaymentsFromExcel}
+        onExportCurrentData={() =>
+          exportModuleDataExcel({
+            moduleType: 'debts',
+            products,
+            customers,
+            sales,
+            imports,
+          })
+        }
+      />
 
       {/* Manager-Only Edit Debt Record Modal */}
       {editingDebtType && canPerformRoleAction(role, 'edit_record') && (

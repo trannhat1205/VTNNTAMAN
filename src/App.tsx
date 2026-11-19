@@ -356,6 +356,18 @@ export default function App() {
   const [focusedDebtRecordId, setFocusedDebtRecordId] = useState<string | null>(null);
   const [focusedProductId, setFocusedProductId] = useState<string | null>(null);
 
+  const scrollToTopOfPage = () => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
+  };
+
+  useEffect(() => {
+    scrollToTopOfPage();
+  }, [activeTab, saleFormResetKey]);
+
   useEffect(() => {
     const unsubscribe = initAuth(
       async (user) => {
@@ -2158,9 +2170,9 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col lg:flex-row overflow-x-hidden">
-      {/* Desktop Sidebar (264px width) */}
-      <aside className="hidden lg:flex lg:flex-col lg:w-[264px] lg:shrink-0 bg-white border-r border-slate-200 justify-between">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col lg:flex-row">
+      {/* Desktop Sidebar (264px width) — Sticky on vertical scroll */}
+      <aside className="hidden lg:flex lg:flex-col lg:w-[264px] lg:shrink-0 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto bg-white border-r border-slate-200 justify-between">
         <div>
           {/* Brand Lockup with Attached VTNN Tâm An Logo */}
           <div className="p-5 border-b border-slate-200 flex items-center gap-3">
@@ -2223,6 +2235,7 @@ export default function App() {
                       setSaleFormResetKey((prev) => prev + 1);
                     }
                     setActiveTab(item.id);
+                    scrollToTopOfPage();
                   }}
                   className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap ${
                     isActive
@@ -2313,8 +2326,8 @@ export default function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Top Bar Contract: Mobile-safe layout with zero text overflow */}
-        <header className="bg-white border-b border-slate-200 sticky top-0 z-30">
+        {/* Top Bar Contract: Always pinned at top when scrolling vertically down */}
+        <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200 sticky top-0 z-40 shadow-2xs">
           <div className="px-2.5 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-1.5 sm:gap-3">
             <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink-0">
               <button
@@ -2398,6 +2411,8 @@ export default function App() {
                     setPreselectedCustomerId(null);
                     setSaleFormResetKey((prev) => prev + 1);
                     setActiveTab('sales');
+                    setMobileMenuOpen(false);
+                    scrollToTopOfPage();
                   }}
                   className="px-2 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
@@ -2416,44 +2431,45 @@ export default function App() {
               <span>{lockedWarehouse || `Tất cả kho (${warehouses.length})`}</span>
             </span>
           </div>
-        </header>
 
-        {/* Mobile Navigation Drawer */}
-        {mobileMenuOpen && (
-          <div className="lg:hidden bg-white border-b border-slate-200 px-4 py-3 space-y-1">
-            {navItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => {
-                  if (item.id === 'sales') {
-                    setSaleFormResetKey((prev) => prev + 1);
-                  }
-                  setActiveTab(item.id);
-                  setMobileMenuOpen(false);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold ${
-                  activeTab === item.id
-                    ? 'bg-emerald-700 text-white'
-                    : 'text-slate-700 hover:bg-slate-100'
-                }`}
-              >
-                {item.icon}
-                <span>{item.label}</span>
-              </button>
-            ))}
-            {isSessionLoggedIn && (
-              <button
-                type="button"
-                onClick={handleLogoutApp}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 mt-1"
-              >
-                <LogOut className="w-4 h-4 shrink-0" />
-                <span>Thoát đăng nhập (@{currentStaff.username})</span>
-              </button>
-            )}
-          </div>
-        )}
+          {/* Mobile Navigation Drawer — Kept inside sticky header so it opens at top even when scrolled down */}
+          {mobileMenuOpen && (
+            <div className="lg:hidden bg-white border-t border-slate-200 px-4 py-3 space-y-1 max-h-[calc(100vh-88px)] overflow-y-auto shadow-lg">
+              {navItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    if (item.id === 'sales') {
+                      setSaleFormResetKey((prev) => prev + 1);
+                    }
+                    setActiveTab(item.id);
+                    setMobileMenuOpen(false);
+                    scrollToTopOfPage();
+                  }}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-semibold ${
+                    activeTab === item.id
+                      ? 'bg-emerald-700 text-white'
+                      : 'text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  {item.icon}
+                  <span>{item.label}</span>
+                </button>
+              ))}
+              {isSessionLoggedIn && (
+                <button
+                  type="button"
+                  onClick={handleLogoutApp}
+                  className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 mt-1"
+                >
+                  <LogOut className="w-4 h-4 shrink-0" />
+                  <span>Thoát đăng nhập (@{currentStaff.username})</span>
+                </button>
+              )}
+            </div>
+          )}
+        </header>
 
         {/* Toast Notification Banner */}
         {toastBanner && (
@@ -2474,7 +2490,7 @@ export default function App() {
         )}
 
         {/* Main Workspace Content Viewport */}
-        <main className="flex-1 p-3.5 sm:p-6 max-w-[1400px] w-full mx-auto space-y-6">
+        <main className="flex-1 p-3.5 sm:p-6 max-w-[1400px] w-full mx-auto space-y-6 overflow-x-hidden">
           {activeTab === 'dashboard' && (
             <div className="space-y-6">
               {/* Brand Hero Banner */}
@@ -2491,48 +2507,6 @@ export default function App() {
                       VTNN Tâm An — Vật tư Tâm An, Nhà Nông an tâm
                     </h1>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const file = exportPeriodicReportExcel({
-                        periodLabel: 'Tháng 11/2026',
-                        products: visibleProducts,
-                        customers,
-                        sales: visibleSales,
-                        imports: visibleImports,
-                      });
-                      showToast(`Đã tải xuống báo cáo Excel: ${file}`);
-                    }}
-                    className="px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors text-center whitespace-nowrap"
-                  >
-                    Xuất Excel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const file = exportPeriodicReportPDF({
-                        periodLabel: 'Tháng 11/2026',
-                        products: visibleProducts,
-                        customers,
-                        sales: visibleSales,
-                        imports: visibleImports,
-                      });
-                      showToast(`Đã tải xuống báo cáo PDF: ${file}`);
-                    }}
-                    className="px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors text-center whitespace-nowrap"
-                  >
-                    Xuất PDF
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('vouchers')}
-                    className="px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors text-center whitespace-nowrap"
-                  >
-                    In Phiếu PDF
-                  </button>
                 </div>
               </div>
 
@@ -2791,6 +2765,54 @@ export default function App() {
                   </div>
                 </div>
               </div>
+
+              {/* Bottom Export & Print Quick Actions Bar */}
+              <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="text-xs font-semibold text-slate-700">
+                  Xuất báo cáo tổng quan & In phiếu nhanh:
+                </div>
+                <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const file = exportPeriodicReportExcel({
+                        periodLabel: 'Tháng 11/2026',
+                        products: visibleProducts,
+                        customers,
+                        sales: visibleSales,
+                        imports: visibleImports,
+                      });
+                      showToast(`Đã tải xuống báo cáo Excel: ${file}`);
+                    }}
+                    className="px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors text-center whitespace-nowrap"
+                  >
+                    Xuất Excel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const file = exportPeriodicReportPDF({
+                        periodLabel: 'Tháng 11/2026',
+                        products: visibleProducts,
+                        customers,
+                        sales: visibleSales,
+                        imports: visibleImports,
+                      });
+                      showToast(`Đã tải xuống báo cáo PDF: ${file}`);
+                    }}
+                    className="px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors text-center whitespace-nowrap"
+                  >
+                    Xuất PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('vouchers')}
+                    className="px-2.5 sm:px-3.5 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors text-center whitespace-nowrap"
+                  >
+                    In Phiếu PDF
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -2888,6 +2910,7 @@ export default function App() {
               onCreateSaleForCustomer={(custId) => {
                 setPreselectedCustomerId(custId);
                 setActiveTab('sales');
+                scrollToTopOfPage();
               }}
               leadDays={notificationPrefs.leadDays}
             />

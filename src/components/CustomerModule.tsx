@@ -265,22 +265,6 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Excel Sample Template Download & Upload Bar */}
-      <ExcelDataBar
-        moduleType="customers"
-        moduleTitle="Quản Lý Khách Hàng"
-        onImportRows={onImportCustomersFromExcel}
-        onExportCurrentData={() =>
-          exportModuleDataExcel({
-            moduleType: 'customers',
-            products,
-            customers,
-            sales,
-            imports,
-          })
-        }
-      />
-
       {/* Header Action Strip */}
       <div className="flex items-center justify-start sm:justify-end bg-white p-4 rounded-xl border border-slate-200">
         <button
@@ -371,13 +355,13 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
+            <table className="w-full min-w-[500px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4">Khách hàng</th>
-                  <th className="py-3 px-4">Liên hệ & Địa chỉ</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Tổng mua</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Công nợ hiện tại</th>
+                  <th className="py-3 px-3 min-w-[155px]">Khách hàng</th>
+                  <th className="py-3 px-3 min-w-[140px]">Liên hệ & Địa chỉ</th>
+                  <th className="py-3 px-3 w-[100px] text-right whitespace-nowrap">Tổng mua</th>
+                  <th className="py-3 px-3 w-[115px] text-right whitespace-nowrap">Công nợ hiện tại</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-sm">
@@ -398,26 +382,26 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                           isSelected ? 'bg-emerald-50/60' : 'hover:bg-slate-50'
                         }`}
                       >
-                        <td className="py-3 px-4">
-                          <div className="font-semibold text-slate-900">{customer.name}</div>
+                        <td className="py-3 px-3 min-w-[155px] align-middle">
+                          <div className="font-semibold text-slate-900 leading-snug">{customer.name}</div>
                           <div className="text-xs text-slate-500 mt-0.5 whitespace-nowrap">
                             <span className="font-mono">{customer.code}</span>
                             <span className="mx-1.5" aria-hidden="true">·</span>
                             <span>{customer.group}</span>
                           </div>
                         </td>
-                        <td className="py-3 px-4">
+                        <td className="py-3 px-3 min-w-[140px] align-middle">
                           <div className="text-xs font-mono text-slate-800 whitespace-nowrap">
                             {customer.phone}
                           </div>
-                          <div className="text-xs text-slate-500 truncate max-w-[170px]">
+                          <div className="text-xs text-slate-500 truncate max-w-[150px] mt-0.5">
                             {customer.address || customer.email || 'Chưa cập nhật địa chỉ'}
                           </div>
                         </td>
-                        <td className="py-3 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap">
+                        <td className="py-3 px-3 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap align-middle">
                           {formatVND(ledger.totalPurchased)}
                         </td>
-                        <td className="py-3 px-4 text-right whitespace-nowrap">
+                        <td className="py-3 px-3 text-right whitespace-nowrap align-middle">
                           <div
                             className={`font-mono tabular-nums text-xs font-semibold ${
                               ledger.totalDebt > 0 ? 'text-red-600' : 'text-emerald-700'
@@ -454,7 +438,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
             </div>
           ) : (
             <div>
-              <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-col gap-3">
                 <div className="min-w-0">
                   <div className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5">
                     <span className="font-mono font-semibold text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded">
@@ -463,11 +447,11 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                     <span aria-hidden="true">·</span>
                     <span className="font-medium text-slate-600">{activeEntry.customer.group}</span>
                   </div>
-                  <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-1 break-words">
+                  <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-1">
                     {activeEntry.customer.name}
                   </h3>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-2">
                   {canPerformRoleAction(role, 'edit_record') ? (
                     <>
                       <button
@@ -657,15 +641,15 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
 
                 {/* Received Items Table in Date Range */}
                 <div className="bg-white rounded-lg border border-slate-200 overflow-hidden">
-                  <div className="overflow-x-auto max-h-[240px]">
-                    <table className="w-full text-left border-collapse text-xs">
+                  <div className="overflow-x-auto max-h-[260px]">
+                    <table className="w-full min-w-[460px] text-left border-collapse text-xs">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-600">
-                          <th className="py-2 px-2.5 whitespace-nowrap">Ngày / Mã HĐ</th>
-                          <th className="py-2 px-2.5">Mặt hàng đã nhận</th>
-                          <th className="py-2 px-2.5 text-center whitespace-nowrap">SL</th>
-                          <th className="py-2 px-2.5 text-right whitespace-nowrap">Thành tiền</th>
-                          <th className="py-2 px-2.5 text-right whitespace-nowrap">Còn nợ</th>
+                          <th className="py-2.5 px-2.5 w-[95px] whitespace-nowrap">Ngày / Mã HĐ</th>
+                          <th className="py-2.5 px-2.5 min-w-[165px]">Mặt hàng đã nhận</th>
+                          <th className="py-2.5 px-2.5 w-[70px] text-center whitespace-nowrap">SL</th>
+                          <th className="py-2.5 px-2.5 w-[85px] text-right whitespace-nowrap">Thành tiền</th>
+                          <th className="py-2.5 px-2.5 w-[85px] text-right whitespace-nowrap">Còn nợ</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-200">
@@ -678,29 +662,29 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                         ) : (
                           customerReceivedItemsReport.items.map((item) => (
                             <tr key={item.saleId} className="hover:bg-slate-50">
-                              <td className="py-2 px-2.5 whitespace-nowrap align-top">
+                              <td className="py-2.5 px-2.5 whitespace-nowrap align-middle">
                                 <div className="font-mono font-semibold text-slate-900">
                                   {item.invoiceCode}
                                 </div>
-                                <div className="text-[10px] font-mono text-slate-500">
+                                <div className="text-[10px] font-mono text-slate-500 mt-0.5">
                                   {item.date}
                                 </div>
                               </td>
-                              <td className="py-2 px-2.5 align-top">
-                                <div className="font-semibold text-slate-900">
+                              <td className="py-2.5 px-2.5 min-w-[165px] align-middle">
+                                <div className="font-semibold text-slate-900 leading-snug">
                                   {item.productName}
                                 </div>
-                                <div className="text-[11px] text-slate-500">
+                                <div className="text-[11px] text-slate-500 mt-0.5">
                                   Đơn giá: {formatVND(item.unitPrice)} / {item.unit}
                                 </div>
                               </td>
-                              <td className="py-2 px-2.5 text-center font-mono whitespace-nowrap align-top">
+                              <td className="py-2.5 px-2.5 text-center font-mono whitespace-nowrap align-middle">
                                 {item.quantity} {item.unit}
                               </td>
-                              <td className="py-2 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-top">
+                              <td className="py-2.5 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                                 {formatVND(item.totalAmount)}
                               </td>
-                              <td className="py-2 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-top">
+                              <td className="py-2.5 px-2.5 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                                 <span
                                   className={
                                     item.debtAmount > 0
@@ -904,6 +888,22 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
           )}
         </div>
       </div>
+
+      {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
+      <ExcelDataBar
+        moduleType="customers"
+        moduleTitle="Quản Lý Khách Hàng"
+        onImportRows={onImportCustomersFromExcel}
+        onExportCurrentData={() =>
+          exportModuleDataExcel({
+            moduleType: 'customers',
+            products,
+            customers,
+            sales,
+            imports,
+          })
+        }
+      />
 
       {/* Modal: Thu nợ tổng hợp các mặt hàng đã nhận trong kỳ (Từ ngày ... Đến ngày ...) */}
       {isBatchCollectOpen && activeEntry && (

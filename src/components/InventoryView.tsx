@@ -216,22 +216,6 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Excel Sample Template Download & Upload Bar */}
-      <ExcelDataBar
-        moduleType="inventory"
-        moduleTitle="Quản Lý Tồn Kho Vật Tư"
-        onImportRows={onImportProductsFromExcel}
-        onExportCurrentData={() =>
-          exportModuleDataExcel({
-            moduleType: 'inventory',
-            products: filteredProducts,
-            customers,
-            sales,
-            imports,
-          })
-        }
-      />
-
       {/* Alert Banner for Low Stock Items */}
       {lowStockCount > 0 && (
         <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -504,17 +488,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
         {/* Desktop Balanced Table (>= md) */}
         <div className="hidden md:block overflow-x-auto">
-          <table className="w-full min-w-[920px] text-left border-collapse">
+          <table className="w-full min-w-[980px] text-left border-collapse">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                <th className="py-3 px-4 min-w-[200px]">Mã & Tên vật tư</th>
-                <th className="py-3 px-4 whitespace-nowrap">Kho lưu trữ</th>
-                <th className="py-3 px-4 min-w-[180px]">Nhóm & Nhà cung cấp</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Giá nhập</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Giá bán</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Tồn kho / Định mức</th>
-                <th className="py-3 px-4 whitespace-nowrap">Trạng thái cảnh báo</th>
-                <th className="py-3 px-4 text-right whitespace-nowrap">Thao tác</th>
+                <th className="py-3 px-4 min-w-[230px]">Mã & Tên vật tư</th>
+                <th className="py-3 px-4 w-[135px] whitespace-nowrap">Kho lưu trữ</th>
+                <th className="py-3 px-4 min-w-[190px]">Nhóm & Nhà cung cấp</th>
+                <th className="py-3 px-4 w-[105px] text-right whitespace-nowrap">Giá nhập</th>
+                <th className="py-3 px-4 w-[105px] text-right whitespace-nowrap">Giá bán</th>
+                <th className="py-3 px-4 w-[135px] text-right whitespace-nowrap">Tồn kho / Định mức</th>
+                <th className="py-3 px-4 w-[135px] whitespace-nowrap">Trạng thái cảnh báo</th>
+                <th className="py-3 px-4 w-[190px] text-right whitespace-nowrap">Thao tác</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-sm">
@@ -522,31 +506,31 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 const alert = evaluateStockAlert(p);
                 return (
                   <tr key={p.id} className="hover:bg-slate-50">
-                    <td className="py-3.5 px-4 min-w-[200px]">
-                      <div className="font-semibold text-slate-900">{p.name}</div>
+                    <td className="py-3.5 px-4 min-w-[230px] align-middle">
+                      <div className="font-semibold text-slate-900 leading-snug">{p.name}</div>
                       <div className="text-xs text-slate-500 mt-0.5">
                         <span className="font-mono">{p.code}</span>
                         <span className="mx-1.5" aria-hidden="true">·</span>
                         <span>Đơn vị: {p.unit}</span>
                       </div>
                     </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap">
+                    <td className="py-3.5 px-4 whitespace-nowrap align-middle">
                       <span className="text-xs font-semibold text-emerald-800 flex items-center gap-1">
                         <Warehouse className="w-3.5 h-3.5 shrink-0" />
                         <span>{p.warehouseName || 'Tâm An Mỹ Ngãi'}</span>
                       </span>
                     </td>
-                    <td className="py-3.5 px-4 min-w-[180px]">
-                      <div className="text-xs font-medium text-slate-800">{p.category}</div>
-                      <div className="text-xs text-slate-500">{p.supplierName}</div>
+                    <td className="py-3.5 px-4 min-w-[190px] align-middle">
+                      <div className="text-xs font-medium text-slate-800 leading-snug">{p.category}</div>
+                      <div className="text-xs text-slate-500 mt-0.5 leading-snug">{p.supplierName}</div>
                     </td>
-                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-600 whitespace-nowrap">
+                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-600 whitespace-nowrap align-middle">
                       {formatVND(p.importPrice)}
                     </td>
-                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-semibold text-slate-900 whitespace-nowrap">
+                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-semibold text-slate-900 whitespace-nowrap align-middle">
                       {formatVND(p.sellPrice)}
                     </td>
-                    <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                    <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap align-middle">
                       <span
                         className={`text-sm font-bold ${
                           alert === 'out_of_stock'
@@ -563,7 +547,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         / {p.minStock} {p.unit}
                       </span>
                     </td>
-                    <td className="py-3.5 px-4 text-xs whitespace-nowrap">
+                    <td className="py-3.5 px-4 text-xs whitespace-nowrap align-middle">
                       {alert === 'out_of_stock' ? (
                         <span className="text-red-600 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
@@ -581,7 +565,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         </span>
                       )}
                     </td>
-                    <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                    <td className="py-3.5 px-4 text-right whitespace-nowrap align-middle">
                       <div className="flex items-center justify-end gap-1.5">
                         {canPerformRoleAction(role, 'edit_record') ? (
                           <>
@@ -634,6 +618,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           </table>
         </div>
       </div>
+
+      {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
+      <ExcelDataBar
+        moduleType="inventory"
+        moduleTitle="Quản Lý Tồn Kho Vật Tư"
+        onImportRows={onImportProductsFromExcel}
+        onExportCurrentData={() =>
+          exportModuleDataExcel({
+            moduleType: 'inventory',
+            products: filteredProducts,
+            customers,
+            sales,
+            imports,
+          })
+        }
+      />
 
       {/* Add / Edit Product Modal with Inline Category & Warehouse Creation */}
       {isModalOpen && (

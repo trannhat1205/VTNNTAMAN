@@ -240,6 +240,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     if (resetKey > 0 && !preselectedCustomerId) {
       resetAllSaleFieldsToBlank();
     }
+    if (resetKey > 0 && typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
   }, [resetKey, preselectedCustomerId]);
 
   useEffect(() => {
@@ -247,6 +252,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
       setSelectedCustomerId(preselectedCustomerId);
       setShowNewCustomerBox(false);
       onClearPreselectedCustomer();
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+        document.documentElement.scrollTop = 0;
+        document.body.scrollTop = 0;
+      }
     }
   }, [preselectedCustomerId, onClearPreselectedCustomer]);
 
@@ -534,22 +544,6 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Excel Sample Template Download & Upload Bar */}
-      <ExcelDataBar
-        moduleType="sales"
-        moduleTitle="Nhật Ký Bán Hàng"
-        onImportRows={onImportSalesFromExcel}
-        onExportCurrentData={() =>
-          exportModuleDataExcel({
-            moduleType: 'sales',
-            products,
-            customers,
-            sales: filteredSales,
-            imports: [],
-          })
-        }
-      />
-
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Left: Blank-by-Default Fast Sale Form with Inline Warehouse, Customer & Product Creation */}
         <div className="xl:col-span-5 bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -1436,15 +1430,15 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
           {/* Desktop Balanced Table (>= md) */}
           <div className="hidden md:block overflow-x-auto">
-            <table className="w-full min-w-[880px] text-left border-collapse">
+            <table className="w-full min-w-[940px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4 whitespace-nowrap">Mã HĐ & Kho xuất</th>
-                  <th className="py-3 px-4 min-w-[160px]">Khách hàng</th>
-                  <th className="py-3 px-4 min-w-[190px]">Vật tư & SL</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Thành tiền</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Đã thu / Còn nợ</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">
+                  <th className="py-3 px-4 w-[145px] whitespace-nowrap">Mã HĐ & Kho xuất</th>
+                  <th className="py-3 px-4 min-w-[180px]">Khách hàng</th>
+                  <th className="py-3 px-4 min-w-[220px]">Vật tư & SL</th>
+                  <th className="py-3 px-4 w-[120px] text-right whitespace-nowrap">Thành tiền</th>
+                  <th className="py-3 px-4 w-[160px] text-right whitespace-nowrap">Đã thu / Còn nợ</th>
+                  <th className="py-3 px-4 w-[165px] text-right whitespace-nowrap">
                     Phiếu PDF / Sửa & Xóa (Quản lý)
                   </th>
                 </tr>
@@ -1452,7 +1446,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               <tbody className="divide-y divide-slate-200 text-sm">
                 {filteredSales.map((s) => (
                   <tr key={s.id} className="hover:bg-slate-50">
-                    <td className="py-3 px-4 whitespace-nowrap">
+                    <td className="py-3 px-4 whitespace-nowrap align-middle">
                       <div className="font-mono text-xs font-semibold text-slate-900">
                         {s.invoiceCode}
                       </div>
@@ -1463,32 +1457,32 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         {s.createdAt.slice(0, 10)}
                       </div>
                     </td>
-                    <td className="py-3 px-4 min-w-[160px]">
-                      <div className="font-semibold text-slate-900">{s.customerName}</div>
-                      <div className="text-xs font-mono text-slate-500">{s.customerPhone}</div>
+                    <td className="py-3 px-4 min-w-[180px] align-middle">
+                      <div className="font-semibold text-slate-900 leading-snug">{s.customerName}</div>
+                      <div className="text-xs font-mono text-slate-500 mt-0.5">{s.customerPhone}</div>
                     </td>
-                    <td className="py-3 px-4 min-w-[190px]">
-                      <div className="text-xs font-medium text-slate-900">{s.productName}</div>
-                      <div className="text-xs font-mono text-slate-500">
+                    <td className="py-3 px-4 min-w-[220px] align-middle">
+                      <div className="text-xs font-medium text-slate-900 leading-snug">{s.productName}</div>
+                      <div className="text-xs font-mono text-slate-500 mt-0.5">
                         {s.quantity} {s.unit} × {formatVND(s.unitPrice)}
                       </div>
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap">
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
                       {formatVND(s.totalAmount)}
                     </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap">
+                    <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                       <div className="font-mono tabular-nums text-xs text-emerald-700">
                         Thu: {formatVND(s.paidAmount)}
                       </div>
                       {s.debtAmount > 0 ? (
-                        <div className="font-mono tabular-nums text-xs font-semibold text-red-600">
+                        <div className="font-mono tabular-nums text-xs font-semibold text-red-600 mt-0.5">
                           Nợ: {formatVND(s.debtAmount)} (Hạn {s.dueDate})
                         </div>
                       ) : (
-                        <div className="text-xs text-slate-500">Đã tất toán</div>
+                        <div className="text-xs text-slate-500 mt-0.5">Đã tất toán</div>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap">
+                    <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
@@ -1535,6 +1529,22 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
+      <ExcelDataBar
+        moduleType="sales"
+        moduleTitle="Nhật Ký Bán Hàng"
+        onImportRows={onImportSalesFromExcel}
+        onExportCurrentData={() =>
+          exportModuleDataExcel({
+            moduleType: 'sales',
+            products,
+            customers,
+            sales: filteredSales,
+            imports: [],
+          })
+        }
+      />
 
       {/* Manager-Only Edit Saved Sale Invoice Modal */}
       {editingSale && canPerformRoleAction(role, 'edit_record') && (
@@ -2214,22 +2224,6 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
   return (
     <div className="space-y-5">
-      {/* Excel Sample Template Download & Upload Bar */}
-      <ExcelDataBar
-        moduleType="imports"
-        moduleTitle="Nhật Ký Nhập Hàng & Nhà Cung Cấp"
-        onImportRows={onImportWarehouseFromExcel}
-        onExportCurrentData={() =>
-          exportModuleDataExcel({
-            moduleType: 'imports',
-            products,
-            customers,
-            sales: [],
-            imports,
-          })
-        }
-      />
-
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Left: Create Import Form with Inline Warehouse, Product & Supplier Creation */}
         <div className="xl:col-span-5 bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -3044,15 +3038,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
           {/* Desktop Balanced Table (>= md) */}
           <div className="hidden md:block overflow-x-auto">
-            <table className="w-full min-w-[880px] text-left border-collapse">
+            <table className="w-full min-w-[940px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4 whitespace-nowrap">Mã phiếu & Kho nhập</th>
-                  <th className="py-3 px-4 min-w-[170px]">Nhà cung cấp</th>
-                  <th className="py-3 px-4 min-w-[190px]">Vật tư nhập</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Tổng tiền nhập</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">Công nợ NCC & Hạn trả</th>
-                  <th className="py-3 px-4 text-right whitespace-nowrap">
+                  <th className="py-3 px-4 w-[145px] whitespace-nowrap">Mã phiếu & Kho nhập</th>
+                  <th className="py-3 px-4 min-w-[185px]">Nhà cung cấp</th>
+                  <th className="py-3 px-4 min-w-[220px]">Vật tư nhập</th>
+                  <th className="py-3 px-4 w-[125px] text-right whitespace-nowrap">Tổng tiền nhập</th>
+                  <th className="py-3 px-4 w-[150px] text-right whitespace-nowrap">Công nợ NCC & Hạn trả</th>
+                  <th className="py-3 px-4 w-[165px] text-right whitespace-nowrap">
                     Phiếu PDF / Sửa & Xóa (Quản lý)
                   </th>
                 </tr>
@@ -3062,7 +3056,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   const { urgency } = evaluateDebtUrgency(imp.dueDate, imp.debtAmount);
                   return (
                     <tr key={imp.id} className="hover:bg-slate-50">
-                      <td className="py-3 px-4 whitespace-nowrap">
+                      <td className="py-3 px-4 whitespace-nowrap align-middle">
                         <div className="font-mono text-xs font-semibold text-slate-900">
                           {imp.receiptCode}
                         </div>
@@ -3073,27 +3067,27 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           {imp.createdAt.slice(0, 10)}
                         </div>
                       </td>
-                      <td className="py-3 px-4 min-w-[170px]">
-                        <div className="font-semibold text-slate-900">{imp.supplierName}</div>
-                        <div className="text-xs font-mono text-slate-500">{imp.supplierPhone}</div>
+                      <td className="py-3 px-4 min-w-[185px] align-middle">
+                        <div className="font-semibold text-slate-900 leading-snug">{imp.supplierName}</div>
+                        <div className="text-xs font-mono text-slate-500 mt-0.5">{imp.supplierPhone}</div>
                       </td>
-                      <td className="py-3 px-4 min-w-[190px]">
-                        <div className="text-xs font-medium text-slate-900">{imp.productName}</div>
-                        <div className="text-xs font-mono text-emerald-700 font-semibold">
+                      <td className="py-3 px-4 min-w-[220px] align-middle">
+                        <div className="text-xs font-medium text-slate-900 leading-snug">{imp.productName}</div>
+                        <div className="text-xs font-mono text-emerald-700 font-semibold mt-0.5">
                           +{imp.quantity} {imp.unit} (Giá nhập: {formatVND(imp.unitCost)})
                         </div>
                       </td>
-                      <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap">
+                      <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
                         {formatVND(imp.totalCost)}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                      <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                         {imp.debtAmount > 0 ? (
                           <div>
                             <div className="font-mono tabular-nums text-xs font-bold text-red-600">
                               Nợ: {formatVND(imp.debtAmount)}
                             </div>
                             <div
-                              className={`text-xs font-mono ${
+                              className={`text-xs font-mono mt-0.5 ${
                                 urgency === 'overdue'
                                   ? 'text-red-600 font-semibold'
                                   : 'text-amber-700'
@@ -3108,7 +3102,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap">
+                      <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
@@ -3171,6 +3165,22 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
+      <ExcelDataBar
+        moduleType="imports"
+        moduleTitle="Nhật Ký Nhập Hàng & Nhà Cung Cấp"
+        onImportRows={onImportWarehouseFromExcel}
+        onExportCurrentData={() =>
+          exportModuleDataExcel({
+            moduleType: 'imports',
+            products,
+            customers,
+            sales: [],
+            imports,
+          })
+        }
+      />
 
       {/* Manager-Only Edit Saved Import Receipt Modal */}
       {editingImport && canPerformRoleAction(role, 'edit_record') && (
