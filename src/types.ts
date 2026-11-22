@@ -58,6 +58,7 @@ export interface CustomerProfile {
   note: string;
   totalPurchased: number;
   totalDebt: number;
+  warehouseName?: string;
   ownerId: string;
   createdAt: string;
   updatedAt: string;
@@ -233,6 +234,7 @@ export interface SupplierProfile {
   phone: string;
   address: string;
   note: string;
+  warehouseName?: string;
   createdAt: string;
 }
 

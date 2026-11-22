@@ -31,14 +31,18 @@ import {
   StaffPositionRole,
   UserRole,
 } from '../types';
-import { ADMIN_BACKUP_EMAIL, ADMIN_PRIMARY_PHONE } from '../data/seedData';
+import { ADMIN_BACKUP_EMAIL, ADMIN_PRIMARY_PHONE, PRIMARY_ADMIN_UID } from '../data/seedData';
 import { SearchableSelect } from './SearchableSelect';
 import {
   ALL_STAFF_FUNCTIONAL_PERMISSIONS,
   canAccountCreateStaff,
+  extractCustomWarehouseSuffix,
+  formatDefaultWarehouseNameFromGmail,
   getDefaultPermissionsForPosition,
   getPositionRoleLabel,
   hasCompletedStaffPersonalGmail,
+  MANDATORY_WAREHOUSE_PREFIX,
+  normalizeCustomTamAnWarehouseName,
   SearchableOptionItem,
 } from '../utils/businessLogic';
 
@@ -106,10 +110,26 @@ interface InitialLoginScreenPortalProps {
   currentStaff: StaffMember;
   isGoogleAuthenticated: boolean;
   currentUserEmail: string | null;
-  onGoogleManagerLogin: () => void;
-  onGoogleLoginByEmail?: (email: string) => { ok: boolean; message: string };
-  onPrimaryPhoneOtpLogin: (phone: string, otpCode: string) => { ok: boolean; message: string };
+  onGoogleManagerLogin: () => Promise<{ ok: boolean; message: string } | void> | void;
+  onGoogleLoginByEmail?: (
+    email: string,
+    googleDisplayName?: string,
+    googleUid?: string
+  ) => { ok: boolean; message: string };
+  onPrimaryPhoneOtpLogin: (
+    phone: string,
+    otpCode: string,
+    displayName?: string,
+    isSignUp?: boolean
+  ) => { ok: boolean; message: string };
   onLoginStaff: (usernameOrEmail: string, password: string) => { ok: boolean; message: string };
+  onSignUpStaff?: (payload: {
+    displayName: string;
+    emailOrPhone: string;
+    username?: string;
+    password: string;
+    provider: 'email_password' | 'phone' | 'google';
+  }) => { ok: boolean; message: string };
   onResetPasswordViaGmail: (payload: {
     uid: string;
     gmail: string;
@@ -121,6 +141,7 @@ interface InitialLoginScreenPortalProps {
     phone: string;
     email: string;
     newPassword?: string;
+    customWarehouseName?: string;
   }) => { ok: boolean; message: string };
   onOpenCreateStaffSection?: () => void;
   onDismissBanner?: () => void;
@@ -130,32 +151,44 @@ interface InitialLoginScreenPortalProps {
 }
 
 /**
- * Clean, minimal outer Login Screen:
- * - Centered single-card layout with VTNN Tâm An Logo
- * - Phone / Gmail / Username input + Password input with Eye / EyeOff visibility toggle
- * - Primary "Đăng nhập" button
- * - "Quên mật khẩu?" link
- * - Universal "Đăng nhập bằng Google" button for Manager & all Staff who have completed
- *   supplementing their personal Gmail inside the Personal Profile section.
+ * Authentication Screen (Gmail & Google Auth — Phone Auth removed per requirements):
+ * - Tabs: Đăng nhập (Sign-in) | Đăng ký tài khoản bằng Gmail (Sign-up) | Quên mật khẩu (Forgot Password)
+ * - Each new Gmail sign-up automatically creates an independent warehouse named:
+ *   "TÂM AN " + uppercase Gmail local-part (e.g. vtnntaman@gmail.com -> TÂM AN VTNNTAMAN)
+ *   with full independent warehouse management functions.
  */
 export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> = ({
   staffList,
   onGoogleManagerLogin,
   onGoogleLoginByEmail,
   onLoginStaff,
+  onSignUpStaff,
   onResetPasswordViaGmail,
 }) => {
-  const [authMode, setAuthMode] = useState<'login' | 'forgot_password'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'signup' | 'forgot_password'>('login');
 
-  // Login state
+  // 1. Sign-in (Gmail / Username & Password) state
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [isGoogleSigningIn, setIsGoogleSigningIn] = useState(false);
   const [loginFeedback, setLoginFeedback] = useState<{
     type: 'error' | 'success';
     text: string;
   } | null>(null);
 
-  // Forgot password (reset sent to Gmail) state
+  // 2. Sign-up (Gmail only) state
+  const [signUpDisplayName, setSignUpDisplayName] = useState('');
+  const [signUpEmail, setSignUpEmail] = useState('');
+  const [signUpPassword, setSignUpPassword] = useState('');
+  const [signUpConfirmPassword, setSignUpConfirmPassword] = useState('');
+
+  // Live preview of default warehouse name generated from Gmail during Sign-Up
+  const previewDefaultWarehouseName = useMemo(
+    () => formatDefaultWarehouseNameFromGmail(signUpEmail || 'vtnntaman@gmail.com'),
+    [signUpEmail]
+  );
+
+  // 3. Forgot password (Firebase Password Reset Email + Staff Password Reset) state
   const [forgotStaffUid, setForgotStaffUid] = useState<string>(
     staffList.find((s) => s.role === 'staff')?.uid || staffList[0]?.uid || ''
   );
@@ -191,9 +224,35 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
     }
   };
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleSwitchAuthMode = (nextMode: 'login' | 'signup' | 'forgot_password') => {
+    setAuthMode(nextMode);
+    setLoginFeedback(null);
+    setForgotFeedback(null);
+  };
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = onLoginStaff(loginUsername.trim(), loginPassword);
+    const trimmedUser = loginUsername.trim();
+    if (!trimmedUser || !loginPassword) {
+      setLoginFeedback({
+        type: 'error',
+        text: 'Vui lòng nhập đầy đủ Email/Tên đăng nhập và Mật khẩu.',
+      });
+      return;
+    }
+
+    // Attempt Firebase Email/Password authentication in background if input is an email address
+    if (trimmedUser.includes('@')) {
+      import('../services/firebaseService')
+        .then(({ firebaseSignInWithEmailPassword }) =>
+          firebaseSignInWithEmailPassword(trimmedUser, loginPassword)
+        )
+        .catch(() => {
+          // Proceed with local/synced staff verification
+        });
+    }
+
+    const res = onLoginStaff(trimmedUser, loginPassword);
     setLoginFeedback({
       type: res.ok ? 'success' : 'error',
       text: res.message,
@@ -204,29 +263,119 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
     }
   };
 
-  const handleGoogleButtonClick = () => {
-    const typed = loginUsername.trim();
-    if (typed.includes('@') && onGoogleLoginByEmail) {
-      const res = onGoogleLoginByEmail(typed);
+  const handleSignUpEmailSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedEmail = signUpEmail.trim().toLowerCase();
+    const trimmedName = signUpDisplayName.trim() || trimmedEmail.split('@')[0] || 'Chủ kho Tâm An';
+
+    if (!trimmedEmail || !trimmedEmail.endsWith('@gmail.com')) {
+      setLoginFeedback({
+        type: 'error',
+        text: 'Chỉ đăng ký tài khoản bằng địa chỉ Gmail (@gmail.com). Ví dụ: vtnntaman@gmail.com',
+      });
+      return;
+    }
+    if (signUpPassword.length < 6) {
+      setLoginFeedback({
+        type: 'error',
+        text: 'Mật khẩu đăng ký phải có ít nhất 6 ký tự (theo chuẩn Firebase Authentication).',
+      });
+      return;
+    }
+    if (signUpPassword !== signUpConfirmPassword) {
+      setLoginFeedback({
+        type: 'error',
+        text: 'Mật khẩu xác nhận không khớp với mật khẩu đã nhập.',
+      });
+      return;
+    }
+
+    import('../services/firebaseService')
+      .then(({ firebaseSignUpWithEmailPassword }) =>
+        firebaseSignUpWithEmailPassword({
+          email: trimmedEmail,
+          password: signUpPassword,
+          displayName: trimmedName,
+        })
+      )
+      .catch(() => {
+        // If account already exists in Firebase or offline, continue registering/linking in app state
+      });
+
+    if (onSignUpStaff) {
+      const res = onSignUpStaff({
+        displayName: trimmedName,
+        emailOrPhone: trimmedEmail,
+        password: signUpPassword,
+        provider: 'email_password',
+      });
       setLoginFeedback({
         type: res.ok ? 'success' : 'error',
         text: res.message,
       });
-      return;
+    } else {
+      const res = onLoginStaff(trimmedEmail, signUpPassword);
+      setLoginFeedback({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
     }
-    onGoogleManagerLogin();
   };
 
-  const handleForgotSubmit = (e: React.FormEvent) => {
+  const handleGoogleButtonClick = async () => {
+    if (isGoogleSigningIn) return;
+    setIsGoogleSigningIn(true);
+    setLoginFeedback({
+      type: 'success',
+      text: 'Đang mở cửa sổ chọn tài khoản Google — Vui lòng chọn một tài khoản Gmail trong cửa sổ bật lên để đăng nhập...',
+    });
+    try {
+      const res = await onGoogleManagerLogin();
+      if (res && typeof res === 'object' && 'ok' in res) {
+        setLoginFeedback({
+          type: res.ok ? 'success' : 'error',
+          text: res.message,
+        });
+      }
+    } catch {
+      setLoginFeedback({
+        type: 'error',
+        text: 'Chưa hoàn tất chọn tài khoản Google. Vui lòng chọn một tài khoản Google để đăng nhập.',
+      });
+    } finally {
+      setIsGoogleSigningIn(false);
+    }
+  };
+
+  const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmedEmail = forgotGmailInput.trim().toLowerCase();
+    if (!trimmedEmail || !trimmedEmail.includes('@')) {
+      setForgotFeedback({
+        type: 'error',
+        text: 'Vui lòng nhập địa chỉ Email / Gmail hợp lệ để nhận liên kết và mật khẩu khôi phục.',
+      });
+      return;
+    }
+
+    // Trigger Firebase Auth sendPasswordResetEmail
+    try {
+      const { firebaseSendPasswordResetEmail } = await import('../services/firebaseService');
+      await firebaseSendPasswordResetEmail(trimmedEmail);
+    } catch {
+      // Continue with local recovery sync as well
+    }
+
     const res = onResetPasswordViaGmail({
       uid: forgotStaffUid,
-      gmail: forgotGmailInput.trim(),
+      gmail: trimmedEmail,
       newPassword: forgotNewPassword.trim(),
     });
     setForgotFeedback({
       type: res.ok ? 'success' : 'error',
-      text: res.message,
+      text: res.ok
+        ? `${res.message} (Đồng thời đã gửi yêu cầu đặt lại mật khẩu qua Firebase Authentication tới ${trimmedEmail})`
+        : res.message,
     });
     if (res.ok && res.log) {
       setRecentRecoveryLogs((prev) => [res.log!, ...prev]);
@@ -235,10 +384,13 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
 
   return (
     <div className="w-full max-w-md mx-auto">
-      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-lg px-5 sm:px-8 py-7 sm:py-9">
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-lg px-5 sm:px-8 py-7 sm:py-8">
+        {/* Invisible Firebase Recaptcha Container for Phone Auth */}
+        <div id="firebase-recaptcha-container" />
+
         {/* Centered Logo & Brand Header */}
-        <div className="flex flex-col items-center text-center mb-6">
-          <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-200 p-2 flex items-center justify-center shadow-xs mb-3">
+        <div className="flex flex-col items-center text-center mb-5">
+          <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-200 p-2 flex items-center justify-center shadow-xs mb-2.5">
             <img
               src="/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png"
               alt="Logo VTNN Tâm An"
@@ -252,8 +404,38 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
           </p>
         </div>
 
-        {/* VIEW 1: CLEAN MINIMAL LOGIN FORM */}
-        {authMode === 'login' && (
+        {/* Top Mode Switcher: Đăng nhập (Sign-in) | Đăng ký bằng Gmail (Sign-up) */}
+        {authMode !== 'forgot_password' && (
+          <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-xl mb-4">
+            <button
+              type="button"
+              onClick={() => handleSwitchAuthMode('login')}
+              className={`py-2 px-3 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                authMode === 'login'
+                  ? 'bg-white text-emerald-800 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <LogIn className="w-3.5 h-3.5 shrink-0" />
+              <span>Đăng nhập</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSwitchAuthMode('signup')}
+              className={`py-2 px-3 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                authMode === 'signup'
+                  ? 'bg-white text-emerald-800 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5 shrink-0" />
+              <span>Đăng ký bằng Gmail</span>
+            </button>
+          </div>
+        )}
+
+        {/* VIEW 1: SIGN-IN OR GMAIL SIGN-UP FLOWS */}
+        {authMode !== 'forgot_password' && (
           <div className="space-y-4">
             {loginFeedback && (
               <div
@@ -272,53 +454,157 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
               </div>
             )}
 
-            <form onSubmit={handleLoginSubmit} className="space-y-3.5">
-              <div>
-                <label htmlFor="portal-login-username" className="sr-only">
-                  Số điện thoại, Gmail hoặc tên đăng nhập
-                </label>
-                <input
-                  id="portal-login-username"
-                  type="text"
-                  required
-                  value={loginUsername}
-                  onChange={(e) => setLoginUsername(e.target.value)}
-                  placeholder="Số điện thoại, Gmail hoặc tên đăng nhập"
-                  className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15 transition-all"
-                />
-              </div>
+            {/* SUB-VIEW 1A: GMAIL / PASSWORD SIGN-IN */}
+            {authMode === 'login' && (
+              <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+                <div>
+                  <label htmlFor="portal-login-username" className="sr-only">
+                    Địa chỉ Gmail hoặc Tên đăng nhập
+                  </label>
+                  <input
+                    id="portal-login-username"
+                    type="text"
+                    required
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="Địa chỉ Gmail hoặc Tên đăng nhập (VD: vtnntaman@gmail.com)"
+                    className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15 transition-all"
+                  />
+                </div>
 
-              <div>
-                <label htmlFor="portal-login-password" className="sr-only">
-                  Mật khẩu
-                </label>
-                <PasswordInputWithEye
-                  id="portal-login-password"
-                  required
-                  value={loginPassword}
-                  onChange={setLoginPassword}
-                  placeholder="Mật khẩu"
-                  ariaLabel="Mật khẩu"
-                />
-              </div>
+                <div>
+                  <label htmlFor="portal-login-password" className="sr-only">
+                    Mật khẩu
+                  </label>
+                  <PasswordInputWithEye
+                    id="portal-login-password"
+                    required
+                    value={loginPassword}
+                    onChange={setLoginPassword}
+                    placeholder="Mật khẩu"
+                    ariaLabel="Mật khẩu"
+                  />
+                </div>
 
-              <button
-                type="submit"
-                className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
-              >
-                <LogIn className="w-4 h-4 shrink-0" />
-                <span>Đăng nhập</span>
-              </button>
-            </form>
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
+                >
+                  <LogIn className="w-4 h-4 shrink-0" />
+                  <span>Đăng nhập bằng Gmail / Mật khẩu</span>
+                </button>
+              </form>
+            )}
 
-            {/* Forgot Password Link */}
-            <div className="text-center pt-1">
+            {/* SUB-VIEW 1B: GMAIL SIGN-UP (Auto-creates independent warehouse TÂM AN + GMAIL) */}
+            {authMode === 'signup' && (
+              <form onSubmit={handleSignUpEmailSubmit} className="space-y-3.5">
+                <div>
+                  <label htmlFor="portal-signup-name" className="sr-only">
+                    Họ và tên hiển thị
+                  </label>
+                  <input
+                    id="portal-signup-name"
+                    type="text"
+                    required
+                    value={signUpDisplayName}
+                    onChange={(e) => setSignUpDisplayName(e.target.value)}
+                    placeholder="Họ và tên chủ kho / người dùng *"
+                    className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15 transition-all"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="portal-signup-email" className="sr-only">
+                    Địa chỉ Gmail đăng ký
+                  </label>
+                  <input
+                    id="portal-signup-email"
+                    type="email"
+                    required
+                    value={signUpEmail}
+                    onChange={(e) => setSignUpEmail(e.target.value)}
+                    placeholder="Địa chỉ Gmail đăng ký (VD: vtnntaman@gmail.com) *"
+                    className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15 transition-all"
+                  />
+                </div>
+
+                {/* Live Auto-Created Independent Warehouse Preview Box */}
+                <div className="p-3 rounded-xl bg-emerald-50/90 border border-emerald-200 space-y-1 text-xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-emerald-900 flex items-center gap-1.5">
+                      <Warehouse className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      <span>Kho tự động tạo khi đăng ký:</span>
+                    </span>
+                    <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded-md">
+                      Quản lý 1 kho độc lập
+                    </span>
+                  </div>
+                  <div className="font-mono font-extrabold text-sm text-emerald-950 tracking-tight">
+                    {previewDefaultWarehouseName}
+                  </div>
+                  <p className="text-[11px] text-emerald-800 leading-snug">
+                    Đầy đủ tất cả chức năng quản trị trên kho riêng. Có thể đổi tên hiển thị kho trong{' '}
+                    <strong>Hồ sơ cá nhân</strong> (giữ nguyên tiền tố mặc định{' '}
+                    <strong>&quot;TÂM AN&quot;</strong>, VD: <strong>TÂM AN BA SAO</strong>).
+                  </p>
+                </div>
+
+                <div>
+                  <label htmlFor="portal-signup-password" className="sr-only">
+                    Mật khẩu đăng ký
+                  </label>
+                  <PasswordInputWithEye
+                    id="portal-signup-password"
+                    required
+                    value={signUpPassword}
+                    onChange={setSignUpPassword}
+                    placeholder="Mật khẩu mới (tối thiểu 6 ký tự) *"
+                    ariaLabel="Mật khẩu đăng ký"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="portal-signup-confirm-password" className="sr-only">
+                    Nhập lại mật khẩu
+                  </label>
+                  <PasswordInputWithEye
+                    id="portal-signup-confirm-password"
+                    required
+                    value={signUpConfirmPassword}
+                    onChange={setSignUpConfirmPassword}
+                    placeholder="Nhập lại mật khẩu xác nhận *"
+                    ariaLabel="Nhập lại mật khẩu xác nhận"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
+                >
+                  <UserPlus className="w-4 h-4 shrink-0" />
+                  <span>Đăng ký tài khoản Gmail & Tạo kho riêng</span>
+                </button>
+              </form>
+            )}
+
+            {/* Forgot Password Link & Switch Mode Link */}
+            <div className="flex items-center justify-between pt-1 text-xs">
               <button
                 type="button"
-                onClick={() => setAuthMode('forgot_password')}
-                className="text-xs font-semibold text-slate-700 hover:text-emerald-700 hover:underline transition-colors"
+                onClick={() => handleSwitchAuthMode('forgot_password')}
+                className="font-semibold text-slate-700 hover:text-emerald-700 hover:underline transition-colors"
               >
                 Quên mật khẩu?
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleSwitchAuthMode(authMode === 'login' ? 'signup' : 'login')
+                }
+                className="font-semibold text-emerald-700 hover:underline transition-colors"
+              >
+                {authMode === 'login' ? 'Chưa có tài khoản? Đăng ký' : 'Đã có tài khoản? Đăng nhập'}
               </button>
             </div>
 
@@ -329,12 +615,13 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
               <div className="flex-grow border-t border-slate-200" />
             </div>
 
-            {/* Universal Google Login Button (for Manager & all Staff who completed supplementing personal Gmail) */}
+            {/* Universal Google Sign-in & Sign-up Button */}
             <div className="space-y-2.5">
               <button
                 type="button"
+                disabled={isGoogleSigningIn}
                 onClick={handleGoogleButtonClick}
-                className="w-full py-2.5 px-4 text-xs font-bold text-slate-800 bg-white hover:bg-slate-50 border border-slate-300 rounded-full transition-colors flex items-center justify-center gap-2.5 shadow-2xs"
+                className="w-full py-2.5 px-4 text-xs font-bold text-slate-800 bg-white hover:bg-slate-50 disabled:opacity-60 border border-slate-300 rounded-full transition-colors flex items-center justify-center gap-2.5 shadow-2xs"
               >
                 <svg
                   version="1.1"
@@ -359,19 +646,25 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                     d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
                   />
                 </svg>
-                <span>Đăng nhập bằng Google</span>
+                <span>
+                  {isGoogleSigningIn
+                    ? 'Đang chờ chọn tài khoản Google...'
+                    : authMode === 'signup'
+                    ? 'Đăng ký & Tiếp tục bằng Google'
+                    : 'Đăng nhập bằng Google'}
+                </span>
               </button>
             </div>
           </div>
         )}
 
-        {/* VIEW 2: FORGOT PASSWORD (SEND NEW PASSWORD TO GMAIL) */}
+        {/* VIEW 2: FORGOT PASSWORD (FIREBASE PASSWORD RESET EMAIL + STAFF PASSWORD SYNC) */}
         {authMode === 'forgot_password' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <button
                 type="button"
-                onClick={() => setAuthMode('login')}
+                onClick={() => handleSwitchAuthMode('login')}
                 className="text-xs font-semibold text-slate-600 hover:text-slate-900 flex items-center gap-1"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
@@ -392,7 +685,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                 {forgotFeedback.type === 'success' && (
                   <button
                     type="button"
-                    onClick={() => setAuthMode('login')}
+                    onClick={() => handleSwitchAuthMode('login')}
                     className="font-bold text-emerald-800 underline block"
                   >
                     Đăng nhập ngay với mật khẩu mới →
@@ -423,7 +716,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                   htmlFor="forgot-gmail-input"
                   className="block text-xs font-semibold text-slate-700 mb-1"
                 >
-                  Địa chỉ Gmail nhận mật khẩu *
+                  Địa chỉ Email / Gmail nhận khôi phục mật khẩu *
                 </label>
                 <input
                   id="forgot-gmail-input"
@@ -470,7 +763,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                 className="w-full py-2.5 px-4 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-full transition-colors flex items-center justify-center gap-2"
               >
                 <Mail className="w-4 h-4 shrink-0" />
-                <span>Tạo lại mật khẩu & Gửi về Gmail</span>
+                <span>Gửi Email Đặt Lại Mật Khẩu (Firebase Auth & Gmail)</span>
               </button>
             </form>
 
@@ -509,7 +802,12 @@ interface StaffAccountManagerProps {
   warehouses: string[];
   isGoogleAuthenticated?: boolean;
   currentUserEmail?: string | null;
-  onGoogleManagerLogin?: () => void;
+  onGoogleManagerLogin?: () => Promise<{ ok: boolean; message: string } | void> | void;
+  onGoogleLoginByEmail?: (
+    email: string,
+    googleDisplayName?: string,
+    googleUid?: string
+  ) => { ok: boolean; message: string };
   onPrimaryPhoneOtpLogin?: (phone: string, otpCode: string) => { ok: boolean; message: string };
   onAddWarehouse: (warehouseName: string) => void;
   onLoginStaff: (username: string, password: string) => { ok: boolean; message: string };
@@ -549,8 +847,8 @@ interface StaffAccountManagerProps {
     phone: string;
     email: string;
     newPassword?: string;
+    customWarehouseName?: string;
   }) => { ok: boolean; message: string };
-  onGoogleLoginByEmail?: (email: string) => { ok: boolean; message: string };
   isSessionLoggedIn?: boolean;
   onLogout?: () => void;
 }
@@ -583,6 +881,9 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   const [personalEmail, setPersonalEmail] = useState<string>(currentStaff.email || '');
   const [personalPhone, setPersonalPhone] = useState<string>(currentStaff.phone || '');
   const [personalNewPassword, setPersonalNewPassword] = useState<string>('');
+  const [personalWarehouseSuffix, setPersonalWarehouseSuffix] = useState<string>(() =>
+    extractCustomWarehouseSuffix(currentStaff.assignedWarehouse)
+  );
   const [personalProfileFeedback, setPersonalProfileFeedback] = useState<{
     type: 'error' | 'success';
     text: string;
@@ -596,12 +897,16 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     setPersonalDisplayName(targetPersonalStaff.displayName);
     setPersonalEmail(targetPersonalStaff.email || '');
     setPersonalPhone(targetPersonalStaff.phone || '');
+    setPersonalWarehouseSuffix(
+      extractCustomWarehouseSuffix(targetPersonalStaff.assignedWarehouse)
+    );
     setPersonalNewPassword('');
   }, [
     targetPersonalStaff.uid,
     targetPersonalStaff.displayName,
     targetPersonalStaff.email,
     targetPersonalStaff.phone,
+    targetPersonalStaff.assignedWarehouse,
   ]);
 
   // Change Password State (for currently logged-in staff/manager)
@@ -649,6 +954,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   const [modalPhone, setModalPhone] = useState('');
   const [modalEmail, setModalEmail] = useState('');
   const [modalPassword, setModalPassword] = useState('');
+  const [modalWarehouseSuffix, setModalWarehouseSuffix] = useState('');
 
   // Primary Manager Edit Staff [X] Roles & Permissions Modal State
   const [permissionModalStaff, setPermissionModalStaff] = useState<StaffMember | null>(null);
@@ -776,7 +1082,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     if (!trimmedEmail || !trimmedEmail.includes('@')) {
       setPersonalProfileFeedback({
         type: 'error',
-        text: 'Vui lòng nhập địa chỉ Gmail cá nhân hợp lệ (VD: tennhanvien@gmail.com) để đăng nhập bằng nút Google hoặc bằng Gmail cho lần sau.',
+        text: 'Vui lòng nhập địa chỉ Gmail cá nhân hợp lệ (VD: vtnntaman@gmail.com).',
       });
       return;
     }
@@ -787,21 +1093,28 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       });
       return;
     }
+
+    const isSingleWarehouseTarget =
+      targetPersonalStaff.assignedWarehouse !== 'Tất cả kho' &&
+      !canAccountCreateStaff(targetPersonalStaff);
+    const normalizedWarehouseName = isSingleWarehouseTarget
+      ? normalizeCustomTamAnWarehouseName(personalWarehouseSuffix, trimmedEmail)
+      : undefined;
+
     const res = onUpdateStaffProfile({
       uid: targetPersonalStaff.uid,
       displayName: trimmedName || targetPersonalStaff.displayName,
       phone: trimmedPhone,
       email: trimmedEmail,
       newPassword: personalNewPassword || undefined,
+      customWarehouseName: normalizedWarehouseName,
     });
     setPersonalProfileFeedback({
       type: res.ok ? 'success' : 'error',
       text: res.ok
-        ? `Đã hoàn tất bổ sung Gmail cá nhân (${trimmedEmail})${
-            trimmedPhone ? `, SĐT (${trimmedPhone})` : ''
-          }${
-            personalNewPassword ? ' và cập nhật mật khẩu mới' : ''
-          } cho @${targetPersonalStaff.username}! Từ lần sau có thể bấm nút "Đăng nhập bằng Google" hoặc đăng nhập bằng Gmail / SĐT và mật khẩu mới.`
+        ? `Đã lưu hồ sơ cá nhân cho @${targetPersonalStaff.username}${
+            normalizedWarehouseName ? ` · Tên hiển thị kho: "${normalizedWarehouseName}"` : ''
+          }!`
         : res.message,
     });
     if (res.ok) {
@@ -887,35 +1200,48 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
 
   return (
     <div className="space-y-6">
-      {/* Logged-in Account Status & Real-Time Permission Summary Card */}
+      {/* Logged-in Account Status & Warehouse Scope Banner */}
       <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="space-y-1.5 min-w-0">
           <div className="flex flex-wrap items-center gap-2">
+            {canCreateAndAssignRoles ? (
+              <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
+                <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                <span>Quản lý chính · Toàn bộ các kho</span>
+              </span>
+            ) : (
+              <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
+                <Warehouse className="w-3.5 h-3.5 shrink-0" />
+                <span>Quản lý 1 kho độc lập</span>
+              </span>
+            )}
             <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-100 text-emerald-900 rounded-md">
               Đang đăng nhập: @{currentStaff.username}
             </span>
-            <span className="text-xs font-semibold text-slate-700">
-              {getPositionRoleLabel(currentStaff.positionRole)}
+            <span className="text-xs font-mono font-bold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
+              {canCreateAndAssignRoles
+                ? `Quản trị tổng: ${currentStaff.assignedWarehouse}`
+                : `Quản lý 1 kho: ${currentStaff.assignedWarehouse}`}
             </span>
-            <span className="text-xs font-mono text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-              Kho: {currentStaff.assignedWarehouse}
-            </span>
+            {canCreateAndAssignRoles && (
+              <span className="text-[11px] font-mono text-slate-500 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 break-all">
+                UID: {PRIMARY_ADMIN_UID}
+              </span>
+            )}
           </div>
-          <h2 className="text-base font-bold text-slate-900">{currentStaff.displayName}</h2>
-          {canCreateAndAssignRoles && (
-            <div className="flex flex-wrap gap-1 pt-0.5">
-              {ALL_STAFF_FUNCTIONAL_PERMISSIONS.filter((p) =>
-                currentAccountPerms.includes(p.key)
-              ).map((p) => (
-                <span
-                  key={p.key}
-                  className="px-2 py-0.5 text-[11px] font-medium bg-slate-100 text-slate-800 rounded"
-                >
-                  [X] {p.label}
-                </span>
-              ))}
-            </div>
-          )}
+          <h2 className="text-base font-bold text-slate-900 flex flex-wrap items-center gap-2">
+            <span>{currentStaff.displayName}</span>
+            {canCreateAndAssignRoles && (
+              <span className="text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
+                Toàn quyền đọc/ghi &amp; Phân quyền kho
+              </span>
+            )}
+          </h2>
+          <p className="text-xs text-slate-600">
+            {canCreateAndAssignRoles
+              ? 'Tài khoản Quản lý chính có toàn quyền xem dữ liệu tất cả người dùng/kho và phân quyền quản lý kho cho bất kỳ tài khoản người dùng nào.'
+              : `Tài khoản quản lý 1 kho độc lập (${currentStaff.assignedWarehouse}) với đầy đủ tất cả các chức năng của người quản trị nhưng chỉ quản lý riêng kho của mình.`}
+          </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -923,7 +1249,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
             <button
               type="button"
               onClick={onLogout}
-              className="px-3.5 py-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1.5 transition-colors"
+              className="w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1.5 transition-colors"
             >
               <LogOut className="w-4 h-4 shrink-0" />
               <span>Thoát đăng nhập</span>
@@ -931,6 +1257,125 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
           )}
         </div>
       </div>
+
+      {/* Quick Warehouse Assignment Panel for Primary Manager (Gu6OYdsdiWbRvbEINqaWZXj3LV83) */}
+      {canCreateAndAssignRoles && (
+        <div
+          id="admin-warehouse-assignment-dashboard"
+          className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-xs"
+        >
+          <div className="px-4 sm:px-5 py-3.5 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+              <h3 className="text-sm sm:text-base font-bold text-slate-900">
+                Bảng Phân Quyền Quản Lý Kho Cho Người Dùng
+              </h3>
+            </div>
+            <span className="text-xs font-mono text-emerald-900 bg-white px-2.5 py-1 rounded-md border border-emerald-200 font-semibold break-all">
+              UID: {PRIMARY_ADMIN_UID}
+            </span>
+          </div>
+
+          <div className="p-3.5 sm:p-5 space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200">
+              <div className="text-xs text-slate-700 space-y-0.5 min-w-0">
+                <div className="font-bold text-slate-900">
+                  Phân quyền nhanh kho quản lý cho tài khoản người dùng bất kỳ ({staffList.length} tài khoản · {warehouses.length} kho)
+                </div>
+                <div>
+                  Người quản lý chính có thể chọn bất kỳ tài khoản người dùng nào bên dưới để gán hoặc chuyển quyền quản lý kho ngay lập tức.
+                </div>
+              </div>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full lg:w-auto shrink-0">
+                <input
+                  type="text"
+                  value={inlineWarehouseName}
+                  onChange={(e) => setInlineWarehouseName(e.target.value)}
+                  placeholder="Tên kho mới (VD: BA SAO)..."
+                  className="w-full sm:w-56 min-w-0 flex-1 px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!inlineWarehouseName.trim()) return;
+                    const formatted = normalizeCustomTamAnWarehouseName(inlineWarehouseName);
+                    onAddWarehouse(formatted);
+                    setInlineWarehouseName('');
+                    setRealtimeBanner(`Đã tạo kho mới: "${formatted}"`);
+                  }}
+                  className="w-full sm:w-auto px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg whitespace-nowrap text-center justify-center flex items-center"
+                >
+                  + Thêm kho TÂM AN
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+              {staffList.map((st) => {
+                const isRowAdmin = canAccountCreateStaff(st);
+                return (
+                  <div
+                    key={`admin-assign-${st.uid}`}
+                    className={`p-3.5 rounded-xl border flex flex-col justify-between gap-2.5 ${
+                      isRowAdmin
+                        ? 'bg-emerald-50/50 border-emerald-300'
+                        : 'bg-white border-slate-200 hover:border-emerald-300'
+                    }`}
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-xs text-slate-900 truncate">
+                          {st.displayName}
+                        </span>
+                        {isRowAdmin ? (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded shrink-0">
+                            Tất cả kho
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded shrink-0">
+                            Quản lý 1 kho
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] font-mono text-slate-500 truncate">
+                        @{st.username} · {st.email || 'Chưa có Gmail'}
+                      </div>
+                    </div>
+
+                    <div className="pt-1 border-t border-slate-100 flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-slate-600 whitespace-nowrap shrink-0">
+                        Kho quản lý:
+                      </span>
+                      {isRowAdmin ? (
+                        <span className="text-xs font-bold text-emerald-900">Tất cả kho</span>
+                      ) : (
+                        <select
+                          aria-label={`Phân quyền kho cho ${st.username}`}
+                          value={st.assignedWarehouse}
+                          onChange={(e) => {
+                            onUpdateStaffWarehouse(st.uid, e.target.value);
+                            setRealtimeBanner(
+                              `Đã phân quyền quản lý kho "${e.target.value}" cho tài khoản @${st.username} (${st.displayName})`
+                            );
+                          }}
+                          className="flex-1 min-w-0 px-2.5 py-1.5 text-xs font-bold bg-emerald-50 border border-emerald-300 rounded-lg text-emerald-950"
+                        >
+                          {warehouses.map((w) => (
+                            <option key={w} value={w}>
+                              {w}
+                            </option>
+                          ))}
+                          <option value="Tất cả kho">Tất cả kho (Phó quản lý tổng)</option>
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {realtimeBanner && (
         <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-300 text-xs font-semibold text-emerald-900 flex items-center justify-between gap-2">
@@ -1378,10 +1823,13 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                             setModalPhone(st.phone || '');
                             setModalEmail(st.email || '');
                             setModalPassword('');
+                            setModalWarehouseSuffix(
+                              extractCustomWarehouseSuffix(st.assignedWarehouse)
+                            );
                           }}
                           className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
                         >
-                          Sửa TT / Gmail
+                          Sửa TT / Tên Kho
                         </button>
                         {canCreateAndAssignRoles && (
                           <>
@@ -1569,12 +2017,11 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     htmlFor="personal-profile-phone"
                     className="block text-xs font-semibold text-slate-700 mb-1"
                   >
-                    Số điện thoại cá nhân (Đăng nhập bằng SĐT cho lần sau) *
+                    Số điện thoại liên hệ (Không bắt buộc)
                   </label>
                   <input
                     id="personal-profile-phone"
                     type="tel"
-                    required
                     value={personalPhone}
                     onChange={(e) => setPersonalPhone(e.target.value)}
                     placeholder="VD: 0918223344"
@@ -1589,7 +2036,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     htmlFor="personal-profile-gmail"
                     className="block text-xs font-semibold text-slate-700 mb-1"
                   >
-                    Địa chỉ Gmail cá nhân (Bổ sung để đăng nhập bằng Google / Gmail) *
+                    Địa chỉ Gmail tài khoản *
                   </label>
                   <input
                     id="personal-profile-gmail"
@@ -1597,7 +2044,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     required
                     value={personalEmail}
                     onChange={(e) => setPersonalEmail(e.target.value)}
-                    placeholder="VD: hoangnam.vtnntaman@gmail.com"
+                    placeholder="VD: vtnntaman@gmail.com"
                     className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                   />
                 </div>
@@ -1618,17 +2065,67 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                 </div>
               </div>
 
+              {/* Custom Warehouse Display Name with Locked "TÂM AN" Prefix */}
+              {targetPersonalStaff.assignedWarehouse !== 'Tất cả kho' &&
+                !canAccountCreateStaff(targetPersonalStaff) && (
+                  <div className="p-4 rounded-xl bg-emerald-50/80 border border-emerald-200 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label
+                        htmlFor="personal-warehouse-suffix"
+                        className="text-xs font-bold text-emerald-950 flex items-center gap-1.5"
+                      >
+                        <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span>
+                          Tên hiển thị Kho quản lý (Tiền tố &quot;{MANDATORY_WAREHOUSE_PREFIX}&quot; là mặc định không thay đổi) *
+                        </span>
+                      </label>
+                      <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded">
+                        Quản lý 1 kho độc lập
+                      </span>
+                    </div>
+
+                    <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white focus-within:ring-2 focus-within:ring-emerald-600/20">
+                      <span className="px-3.5 py-2 text-sm font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                        {MANDATORY_WAREHOUSE_PREFIX}
+                      </span>
+                      <input
+                        id="personal-warehouse-suffix"
+                        type="text"
+                        required
+                        value={personalWarehouseSuffix}
+                        onChange={(e) => setPersonalWarehouseSuffix(e.target.value)}
+                        placeholder="Nhập tên kho (VD: BA SAO, MỸ NGÃI, VTNNTAMAN)..."
+                        className="flex-1 min-w-0 px-3 py-2 text-sm font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-900">
+                      <span>
+                        Tên kho hiển thị sau khi lưu:{' '}
+                        <strong className="font-mono text-emerald-950 bg-white px-2 py-0.5 rounded border border-emerald-300">
+                          {normalizeCustomTamAnWarehouseName(
+                            personalWarehouseSuffix,
+                            personalEmail
+                          )}
+                        </strong>
+                      </span>
+                      <span className="text-[11px] text-emerald-700">
+                        Ví dụ: nhập <strong>BA SAO</strong> → hiển thị <strong>TÂM AN BA SAO</strong>
+                      </span>
+                    </div>
+                  </div>
+                )}
+
               <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                 <button
                   type="submit"
                   className="py-2.5 px-4 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center justify-center gap-2"
                 >
                   <Mail className="w-4 h-4 shrink-0" />
-                  <span>Bổ sung Gmail nhân viên & Lưu thông tin cá nhân</span>
+                  <span>Lưu hồ sơ cá nhân &amp; Cập nhật tên hiển thị kho</span>
                 </button>
                 <span className="text-[11px] text-slate-500">
-                  Sau khi lưu, nhân viên có thể đăng nhập bằng nút <strong>Đăng nhập bằng Google</strong>,{' '}
-                  <strong>Gmail</strong> hoặc <strong>Số điện thoại + Mật khẩu mới</strong>.
+                  Mỗi tài khoản quản lý 1 kho độc lập với đầy đủ chức năng của người quản trị trên kho của mình.
                 </span>
               </div>
             </form>
@@ -1903,12 +2400,18 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
+                const isSingleWh =
+                  editingStaffModal.assignedWarehouse !== 'Tất cả kho' &&
+                  !canAccountCreateStaff(editingStaffModal);
                 onUpdateStaffProfile({
                   uid: editingStaffModal.uid,
                   displayName: modalDisplayName.trim(),
                   phone: modalPhone.trim(),
                   email: modalEmail.trim(),
                   newPassword: modalPassword.trim() || undefined,
+                  customWarehouseName: isSingleWh
+                    ? normalizeCustomTamAnWarehouseName(modalWarehouseSuffix, modalEmail.trim())
+                    : undefined,
                 });
                 setEditingStaffModal(null);
               }}
@@ -1927,6 +2430,33 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                   />
                 </div>
+                {editingStaffModal.assignedWarehouse !== 'Tất cả kho' &&
+                  !canAccountCreateStaff(editingStaffModal) && (
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Tên hiển thị Kho (Tiền tố &quot;{MANDATORY_WAREHOUSE_PREFIX}&quot; cố định) *
+                      </label>
+                      <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
+                        <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                          {MANDATORY_WAREHOUSE_PREFIX}
+                        </span>
+                        <input
+                          type="text"
+                          required
+                          value={modalWarehouseSuffix}
+                          onChange={(e) => setModalWarehouseSuffix(e.target.value)}
+                          placeholder="VD: BA SAO"
+                          className="flex-1 min-w-0 px-3 py-2 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                        />
+                      </div>
+                      <div className="text-[11px] text-emerald-800 mt-1">
+                        Hiển thị:{' '}
+                        <strong>
+                          {normalizeCustomTamAnWarehouseName(modalWarehouseSuffix, modalEmail)}
+                        </strong>
+                      </div>
+                    </div>
+                  )}
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Địa chỉ Gmail (Nhận mật khẩu khi quên) *

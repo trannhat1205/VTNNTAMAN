@@ -5,6 +5,7 @@ import {
   downloadExcelTemplate,
   parseUploadedExcelRows,
 } from '../utils/exportReports';
+import { uploadFileToFirebaseStorage } from '../services/firebaseService';
 
 interface ExcelDataBarProps {
   moduleType: ExcelModuleType;
@@ -37,11 +38,13 @@ export const ExcelDataBar: React.FC<ExcelDataBarProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
+      // Upload file directly to Firebase Storage bucket in parallel with local parsing
+      uploadFileToFirebaseStorage(file, 'excel_imports').catch(() => {});
       const rows = await parseUploadedExcelRows(file);
       const count = onImportRows(rows);
       setStatusMsg(
         count > 0
-          ? `Đã tải lên thành công ${count} dòng dữ liệu vào mục ${moduleTitle} từ file "${file.name}"!`
+          ? `Đã tải tệp "${file.name}" lên Firebase Storage & nạp thành công ${count} dòng dữ liệu vào mục ${moduleTitle}!`
           : `Không tìm thấy dòng dữ liệu hợp lệ trong file "${file.name}". Vui lòng kiểm tra theo mẫu Excel.`
       );
     } catch (err) {

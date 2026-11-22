@@ -45,12 +45,14 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
+  const selectedLabel = selectedOption ? selectedOption.label : '';
+
   // Keep input text synchronized with selected option when closed
   useEffect(() => {
     if (!isOpen) {
-      setSearchQuery(selectedOption ? selectedOption.label : '');
+      setSearchQuery((prev) => (prev === selectedLabel ? prev : selectedLabel));
     }
-  }, [isOpen, selectedOption]);
+  }, [isOpen, selectedLabel]);
 
   // Close dropdown when clicking outside
   useEffect(() => {

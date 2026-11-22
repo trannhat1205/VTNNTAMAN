@@ -12,7 +12,10 @@ service cloud.firestore {
     }
 
     function isVerified() {
-      return isSignedIn() && request.auth.token.email_verified == true;
+      return isSignedIn() && (
+        request.auth.uid == 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' ||
+        request.auth.token.email_verified == true
+      );
     }
 
     function incoming() {
@@ -32,9 +35,10 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isVerified() && (
-        request.auth.token.email == 'trannhat1205@gmail.com' ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      return isSignedIn() && (
+        request.auth.uid == 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' ||
+        (isVerified() && request.auth.token.email == 'trannhat1205@gmail.com') ||
+        (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)))
       );
     }
 
@@ -257,7 +261,7 @@ service cloud.firestore {
     // Collection 1: /admins/{adminId}
     match /admins/{adminId} {
       allow get: if isSignedIn() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
-      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(adminId) && isValidAdminRecord(incoming()) &&
         incoming().uid == adminId && incoming().createdAt == request.time && isAdmin();
       allow update: if isVerified() && isValidId(adminId) && isValidAdminRecord(incoming()) &&
@@ -269,7 +273,7 @@ service cloud.firestore {
     // Collection 2: /staff/{userId}
     match /staff/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(userId) && isValidStaffPublic(incoming(), userId) &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
         (
@@ -291,7 +295,7 @@ service cloud.firestore {
     // Collection 3: /staff_private/{userId} (PII Isolated)
     match /staff_private/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(userId) && isValidStaffPrivate(incoming(), userId) &&
         incoming().createdAt == request.time && incoming().updatedAt == request.time &&
         (isOwner(userId) || isAdmin()) &&
@@ -308,9 +312,9 @@ service cloud.firestore {
     // Collection 4: /customers/{customerId}
     match /customers/{customerId} {
       allow get: if isSignedIn() && isValidId(customerId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(customerId) && isValidCustomer(incoming(), customerId) &&
-        incoming().ownerId == request.auth.uid &&
+        (incoming().ownerId == request.auth.uid || isAdmin()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isVerified() && isValidId(customerId) && isValidCustomer(incoming(), customerId) &&
@@ -329,9 +333,9 @@ service cloud.firestore {
     // Collection 5: /customers_private/{customerId} (Isolated Customer PII)
     match /customers_private/{customerId} {
       allow get: if isSignedIn() && isValidId(customerId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(customerId) && isValidCustomerPrivate(incoming(), customerId) &&
-        incoming().ownerId == request.auth.uid &&
+        (incoming().ownerId == request.auth.uid || isAdmin()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         exists(/databases/$(database)/documents/customers/$(customerId));
@@ -348,9 +352,9 @@ service cloud.firestore {
     // Collection 6: /notification_prefs/{userId}
     match /notification_prefs/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
-      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+      allow list: if isSignedIn() && (existing().uid == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(userId) && isValidNotificationPrefs(incoming(), userId) &&
-        isOwner(userId) &&
+        (isOwner(userId) || isAdmin()) &&
         incoming().updatedAt == request.time;
       allow update: if isVerified() && isValidId(userId) && isValidNotificationPrefs(incoming(), userId) &&
         incoming().uid == existing().uid &&
@@ -367,9 +371,9 @@ service cloud.firestore {
     // Collection 7: /products/{productId}
     match /products/{productId} {
       allow get: if isSignedIn() && isValidId(productId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(productId) && isValidProduct(incoming(), productId) &&
-        incoming().ownerId == request.auth.uid &&
+        (incoming().ownerId == request.auth.uid || isAdmin()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isVerified() && isValidId(productId) && isValidProduct(incoming(), productId) &&
@@ -392,9 +396,9 @@ service cloud.firestore {
     // Collection 8: /sales/{saleId}
     match /sales/{saleId} {
       allow get: if isSignedIn() && isValidId(saleId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(saleId) && isValidSaleRecord(incoming(), saleId) &&
-        incoming().ownerId == request.auth.uid &&
+        (incoming().ownerId == request.auth.uid || isAdmin()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         exists(/databases/$(database)/documents/products/$(incoming().productId));
@@ -417,9 +421,9 @@ service cloud.firestore {
     // Collection 9: /imports/{importId}
     match /imports/{importId} {
       allow get: if isSignedIn() && isValidId(importId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(importId) && isValidImportRecord(incoming(), importId) &&
-        incoming().ownerId == request.auth.uid &&
+        (incoming().ownerId == request.auth.uid || isAdmin()) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time &&
         exists(/databases/$(database)/documents/products/$(incoming().productId));
@@ -442,9 +446,9 @@ service cloud.firestore {
     // Collection 10: /backups/{backupId}
     match /backups/{backupId} {
       allow get: if isSignedIn() && isValidId(backupId) && (existing().ownerId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && existing().ownerId == request.auth.uid;
+      allow list: if isSignedIn() && (existing().ownerId == request.auth.uid || isAdmin());
       allow create: if isVerified() && isValidId(backupId) && isValidBackupRecord(incoming(), backupId) &&
-        incoming().ownerId == request.auth.uid &&
+        (incoming().ownerId == request.auth.uid || isAdmin()) &&
         incoming().createdAt == request.time;
       allow update: if isVerified() && isValidId(backupId) && isValidBackupRecord(incoming(), backupId) &&
         incoming().id == existing().id &&

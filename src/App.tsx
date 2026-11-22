@@ -69,6 +69,7 @@ import {
   INITIAL_STAFF,
   INITIAL_SUPPLIERS,
   INITIAL_WAREHOUSES,
+  PRIMARY_ADMIN_UID,
 } from './data/seedData';
 import {
   applyCustomerFifoDebtSettlement,
@@ -91,10 +92,14 @@ import {
   executeFiscalYearCloseAndCleanup,
   executeFullApplicationDataWipe,
   filterRecordsBySelectedWarehouses,
+  formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
   formatVND,
   generateSmartNotifications,
+  getDefaultPermissionsForPosition,
+  getIndependentWarehouseFullPermissions,
   getPositionRoleLabel,
+  normalizeCustomTamAnWarehouseName,
   resolveActiveWarehouses,
   updateImportRecord,
   updateSaleRecord,
@@ -179,13 +184,20 @@ export default function App() {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
           return parsed.map((st: StaffMember) => {
-            if (st.uid === 'staff_manager_01' || st.username === 'admin') {
+            if (
+              st.uid === 'staff_manager_01' ||
+              st.uid === PRIMARY_ADMIN_UID ||
+              st.username === 'admin'
+            ) {
               return {
                 ...st,
+                uid: PRIMARY_ADMIN_UID,
                 username: 'admin',
                 displayName:
-                  !st.displayName || st.displayName.startsWith('Trần Nhật')
-                    ? 'Trần Đình Nhất'
+                  !st.displayName ||
+                  st.displayName.startsWith('Trần Nhật') ||
+                  st.displayName.includes('Admin')
+                    ? 'Trần Đình Nhất (Quản lý chính)'
                     : st.displayName,
                 password:
                   !st.password || st.password === 'taman123' || st.password === '123456'
@@ -200,14 +212,16 @@ export default function App() {
                 active: true,
               };
             }
-            const existingPerms = Array.isArray(st.permissions) ? st.permissions : [];
-            const nextPerms: StaffFunctionalPermission[] = existingPerms.includes('view_assigned_reports')
-              ? existingPerms
-              : [...existingPerms, 'view_assigned_reports'];
-            return {
-              ...st,
-              permissions: nextPerms,
-            };
+            const isSingleWh = st.assignedWarehouse && st.assignedWarehouse !== 'Tất cả kho';
+            if (isSingleWh) {
+              return {
+                ...st,
+                role: 'manager',
+                positionRole: st.positionRole || 'warehouse_manager',
+                permissions: getIndependentWarehouseFullPermissions(),
+              };
+            }
+            return st;
           });
         }
       }
@@ -258,49 +272,40 @@ export default function App() {
     }
   }, [accessScope, activeTab, role]);
 
-  // Real-time cross-tab synchronization of staff permissions via localStorage + BroadcastChannel
+  // Real-time persistence of staff permissions via localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('vtnn_taman_staff_realtime_v1', JSON.stringify(staffList));
+      const nextJson = JSON.stringify(staffList);
+      if (localStorage.getItem('vtnn_taman_staff_realtime_v1') !== nextJson) {
+        localStorage.setItem('vtnn_taman_staff_realtime_v1', nextJson);
+      }
     } catch {
       // ignore storage quota errors
-    }
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        const bc = new BroadcastChannel('vtnn_taman_staff_channel');
-        bc.postMessage({ type: 'STAFF_UPDATED', staffList });
-        bc.close();
-      } catch {
-        // ignore BroadcastChannel errors
-      }
     }
   }, [staffList]);
 
-  // Real-time persistence & sync of operation audit history
+  // Real-time persistence of operation audit history via localStorage
   useEffect(() => {
     try {
-      localStorage.setItem('vtnn_taman_audit_logs_v1', JSON.stringify(auditLogs));
+      const nextJson = JSON.stringify(auditLogs);
+      if (localStorage.getItem('vtnn_taman_audit_logs_v1') !== nextJson) {
+        localStorage.setItem('vtnn_taman_audit_logs_v1', nextJson);
+      }
     } catch {
       // ignore storage quota errors
     }
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        const bc = new BroadcastChannel('vtnn_taman_staff_channel');
-        bc.postMessage({ type: 'AUDIT_LOGS_UPDATED', auditLogs });
-        bc.close();
-      } catch {
-        // ignore BroadcastChannel errors
-      }
-    }
   }, [auditLogs]);
 
+  // Cross-tab synchronization via storage event with strict deep-equality guard to prevent update loops
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
       if (e.key === 'vtnn_taman_staff_realtime_v1' && e.newValue) {
         try {
           const updated = JSON.parse(e.newValue);
           if (Array.isArray(updated) && updated.length > 0) {
-            setStaffList(updated);
+            setStaffList((prev) =>
+              JSON.stringify(prev) === e.newValue ? prev : updated
+            );
           }
         } catch {
           // ignore
@@ -310,7 +315,9 @@ export default function App() {
         try {
           const updatedLogs = JSON.parse(e.newValue);
           if (Array.isArray(updatedLogs) && updatedLogs.length > 0) {
-            setAuditLogs(updatedLogs);
+            setAuditLogs((prev) =>
+              JSON.stringify(prev) === e.newValue ? prev : updatedLogs
+            );
           }
         } catch {
           // ignore
@@ -318,27 +325,8 @@ export default function App() {
       }
     };
     window.addEventListener('storage', handleStorage);
-
-    let bc: BroadcastChannel | null = null;
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        bc = new BroadcastChannel('vtnn_taman_staff_channel');
-        bc.onmessage = (ev) => {
-          if (ev.data?.type === 'STAFF_UPDATED' && Array.isArray(ev.data.staffList)) {
-            setStaffList(ev.data.staffList);
-          }
-          if (ev.data?.type === 'AUDIT_LOGS_UPDATED' && Array.isArray(ev.data.auditLogs)) {
-            setAuditLogs(ev.data.auditLogs);
-          }
-        };
-      } catch {
-        // ignore
-      }
-    }
-
     return () => {
       window.removeEventListener('storage', handleStorage);
-      if (bc) bc.close();
     };
   }, []);
 
@@ -432,6 +420,59 @@ export default function App() {
     [paymentVouchers, currentStaff, warehouses, selectedFilterWarehouses]
   );
 
+  const visibleCustomers = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        customers,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [customers, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visibleSuppliers = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        suppliers,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [suppliers, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visibleSavedVouchers = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        savedVouchers,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [savedVouchers, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const isAdminAccount = useMemo(
+    () => canAccountCreateStaff(currentStaff),
+    [currentStaff]
+  );
+
+  const visibleAuditLogs = useMemo(() => {
+    if (canFilterMultiWarehouses) {
+      if (selectedFilterWarehouses.length === 0) return auditLogs;
+      return auditLogs.filter(
+        (log) =>
+          selectedFilterWarehouses.includes(log.warehouseName) ||
+          log.warehouseName === 'Tất cả kho'
+      );
+    }
+    const targetWh = currentStaff.assignedWarehouse;
+    return auditLogs.filter(
+      (log) => log.warehouseName === targetWh || log.actorUid === currentStaff.uid
+    );
+  }, [auditLogs, canFilterMultiWarehouses, selectedFilterWarehouses, currentStaff]);
+
   // Notification State
   const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(
     DEFAULT_NOTIFICATION_PREFS
@@ -465,7 +506,10 @@ export default function App() {
         setIsGoogleAuthenticated(true);
         setCurrentUserEmail(user.email || ADMIN_BACKUP_EMAIL);
         try {
-          const remote = await fetchUserFirestoreData(user.uid);
+          const isRemoteAdmin =
+            user.uid === PRIMARY_ADMIN_UID ||
+            user.email?.toLowerCase() === ADMIN_BACKUP_EMAIL.toLowerCase();
+          const remote = await fetchUserFirestoreData(user.uid, isRemoteAdmin);
           if (remote) {
             if (remote.products.length > 0) setProducts(remote.products);
             if (remote.sales.length > 0) setSales(remote.sales);
@@ -1010,13 +1054,20 @@ export default function App() {
   const handleCreateSupplierInline = (
     data: Omit<SupplierProfile, 'id' | 'createdAt'>
   ): SupplierProfile => {
+    const resolvedWh =
+      lockedWarehouse ||
+      data.warehouseName ||
+      (currentStaff.assignedWarehouse !== 'Tất cả kho'
+        ? currentStaff.assignedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
     const created: SupplierProfile = {
       ...data,
+      warehouseName: resolvedWh,
       id: `sup_${Date.now()}`,
       createdAt: new Date().toISOString(),
     };
     setSuppliers((prev) => [created, ...prev]);
-    showToast(`Đã thêm Nhà cung cấp mới: ${created.name}`);
+    showToast(`Đã thêm Nhà cung cấp mới: ${created.name} (${resolvedWh})`);
     return created;
   };
 
@@ -1119,13 +1170,24 @@ export default function App() {
     editingId?: string
   ): CustomerProfile => {
     const nowIso = new Date().toISOString();
+    const resolvedWh =
+      lockedWarehouse ||
+      data.warehouseName ||
+      (currentStaff.assignedWarehouse !== 'Tất cả kho'
+        ? currentStaff.assignedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
     if (editingId) {
       const existing = customers.find((c) => c.id === editingId);
       let updatedRef: CustomerProfile | null = null;
       setCustomers((prev) =>
         prev.map((c) => {
           if (c.id !== editingId) return c;
-          const updated = { ...c, ...data, updatedAt: nowIso };
+          const updated = {
+            ...c,
+            ...data,
+            warehouseName: c.warehouseName || resolvedWh,
+            updatedAt: nowIso,
+          };
           updatedRef = updated;
           if (isGoogleAuthenticated) {
             syncCustomerToFirestore(updated, false).catch(console.error);
@@ -1138,6 +1200,7 @@ export default function App() {
           actionCategory: 'update',
           targetEntity: 'customer',
           targetCode: data.code || existing.code,
+          warehouseName: existing.warehouseName || resolvedWh,
           summary: `Cập nhật hồ sơ khách hàng ${data.name} (${data.phone})`,
           details: `Nhóm KH: ${data.group} · Địa chỉ: ${data.address}`,
           snapshotData: JSON.stringify(existing),
@@ -1147,6 +1210,7 @@ export default function App() {
       return (
         updatedRef || {
           ...data,
+          warehouseName: resolvedWh,
           id: editingId,
           ownerId: 'demo_owner',
           createdAt: nowIso,
@@ -1156,6 +1220,7 @@ export default function App() {
     } else {
       const created: CustomerProfile = {
         ...data,
+        warehouseName: resolvedWh,
         id: `cust_${Date.now()}`,
         ownerId: 'demo_owner',
         createdAt: nowIso,
@@ -1166,11 +1231,12 @@ export default function App() {
         actionCategory: 'create',
         targetEntity: 'customer',
         targetCode: created.code,
+        warehouseName: resolvedWh,
         summary: `Thêm hồ sơ khách hàng mới ${created.name} (${created.phone})`,
         details: `Nhóm KH: ${created.group} · Địa chỉ: ${created.address}`,
         snapshotData: JSON.stringify(created),
       });
-      showToast(`Đã thêm khách hàng mới: ${created.name}`);
+      showToast(`Đã thêm khách hàng mới: ${created.name} (${resolvedWh})`);
       if (isGoogleAuthenticated) {
         syncCustomerToFirestore(created, true).catch(console.error);
       }
@@ -1202,10 +1268,17 @@ export default function App() {
     editingId?: string
   ): SavedVoucherRecord => {
     const nowIso = new Date().toISOString();
+    const resolvedWh =
+      lockedWarehouse ||
+      voucherData.warehouseName ||
+      (currentStaff.assignedWarehouse !== 'Tất cả kho'
+        ? currentStaff.assignedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
     if (editingId) {
       const existing = savedVouchers.find((v) => v.id === editingId);
       const updatedRecord: SavedVoucherRecord = {
         ...voucherData,
+        warehouseName: resolvedWh,
         id: editingId,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -1216,7 +1289,9 @@ export default function App() {
       }
       setSavedVouchers((prev) =>
         prev.map((v) =>
-          v.id === editingId ? { ...v, ...voucherData, updatedAt: nowIso } : v
+          v.id === editingId
+            ? { ...v, ...voucherData, warehouseName: resolvedWh, updatedAt: nowIso }
+            : v
         )
       );
       if (existing) {
@@ -1224,6 +1299,7 @@ export default function App() {
           actionCategory: 'update',
           targetEntity: 'voucher',
           targetCode: voucherData.voucherCode,
+          warehouseName: resolvedWh,
           summary: `Chỉnh sửa chứng từ in ${voucherData.voucherCode} (${voucherData.partnerName})`,
           details: `Tổng thanh toán: ${formatVND(voucherData.totalOrPrevDebt)} · Đã trả: ${formatVND(
             voucherData.paidOrCollected
@@ -1236,6 +1312,7 @@ export default function App() {
     } else {
       const created: SavedVoucherRecord = {
         ...voucherData,
+        warehouseName: resolvedWh,
         id: `vc_${Date.now()}`,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -1245,6 +1322,7 @@ export default function App() {
         actionCategory: 'create',
         targetEntity: 'voucher',
         targetCode: created.voucherCode,
+        warehouseName: resolvedWh,
         summary: `Lưu chứng từ in ${created.voucherCode} (${created.partnerName})`,
         details: `Loại phiếu: ${created.voucherType} · Tổng tiền: ${formatVND(
           created.totalOrPrevDebt
@@ -1791,6 +1869,11 @@ export default function App() {
   const handleImportCustomersFromExcel = (rows: Record<string, unknown>[]): number => {
     const nowIso = new Date().toISOString();
     const added: CustomerProfile[] = [];
+    const defaultWh =
+      lockedWarehouse ||
+      (currentStaff.assignedWarehouse !== 'Tất cả kho'
+        ? currentStaff.assignedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
     rows.forEach((r, idx) => {
       const name = String(r['Họ Tên Khách Hàng'] || r['Tên Khách Hàng'] || '').trim();
       const phone = String(r['Số Điện Thoại'] || r['Số Điện Thoại KH'] || '').trim();
@@ -1799,6 +1882,7 @@ export default function App() {
       if (grp && !customerGroups.includes(grp)) {
         setCustomerGroups((prev) => (prev.includes(grp) ? prev : [...prev, grp]));
       }
+      const wh = lockedWarehouse || String(r['Kho'] || defaultWh).trim();
       added.push({
         id: `cust_xl_${Date.now()}_${idx}`,
         code: String(r['Mã KH'] || `KH-XL${customers.length + idx + 1}`).trim(),
@@ -1810,6 +1894,7 @@ export default function App() {
         note: String(r['Ghi Chú'] || 'Nhập từ biểu mẫu Excel').trim(),
         totalPurchased: Math.max(0, Number(r['Tổng Mua (VNĐ)'] || 0)),
         totalDebt: Math.max(0, Number(r['Dư Nợ Hiện Tại (VNĐ)'] || 0)),
+        warehouseName: wh,
         ownerId: 'demo_owner',
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -1984,30 +2069,212 @@ export default function App() {
     };
   };
 
-  const handleGoogleLoginByEmail = (email: string) => {
-    const authRes = authenticateStaffByGoogleEmail(staffList, email);
-    if (!authRes.ok || !authRes.staff) {
+  const handleGoogleLoginByEmail = (
+    email: string,
+    googleDisplayName?: string,
+    googleUid?: string
+  ) => {
+    const trimmedEmail = email.trim().toLowerCase();
+    const authRes = authenticateStaffByGoogleEmail(staffList, trimmedEmail);
+    if (authRes.ok && authRes.staff) {
+      const matched = authRes.staff;
+      setCurrentStaffId(matched.uid);
+      setRole(matched.role);
+      setCurrentUserEmail(matched.email || ADMIN_BACKUP_EMAIL);
+      setIsGoogleAuthenticated(true);
+      setIsSessionLoggedIn(true);
+      showToast(
+        `Đã đăng nhập bằng Google (${matched.email}): ${matched.displayName} — Kho: ${matched.assignedWarehouse}`
+      );
       return {
-        ok: false,
+        ok: true,
         message: authRes.message,
       };
     }
-    const matched = authRes.staff;
-    setCurrentStaffId(matched.uid);
-    setRole(matched.role);
-    setCurrentUserEmail(matched.email || ADMIN_BACKUP_EMAIL);
+
+    // If a new Google Gmail signs up for the first time, auto-create default warehouse "TÂM AN " + Gmail name
+    const nowIso = new Date().toISOString();
+    const isAdminEmail =
+      trimmedEmail === ADMIN_BACKUP_EMAIL.toLowerCase() ||
+      googleUid === PRIMARY_ADMIN_UID;
+    const baseUser =
+      trimmedEmail.split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') ||
+      `user_${Date.now().toString().slice(-4)}`;
+    const autoWarehouseName = isAdminEmail
+      ? 'Tất cả kho'
+      : formatDefaultWarehouseNameFromGmail(trimmedEmail);
+
+    if (!isAdminEmail) {
+      setWarehouses((prev) =>
+        prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
+      );
+    }
+
+    const newStaff: StaffMember = {
+      uid: isAdminEmail ? PRIMARY_ADMIN_UID : googleUid || `staff_google_${Date.now()}`,
+      username: baseUser,
+      password: `taman_${Date.now().toString().slice(-4)}`,
+      displayName: (googleDisplayName && googleDisplayName.trim()) || baseUser,
+      phone: '',
+      email: trimmedEmail,
+      role: 'manager',
+      positionRole: isAdminEmail ? 'primary_manager' : 'warehouse_manager',
+      permissions: isAdminEmail
+        ? getDefaultPermissionsForPosition('primary_manager')
+        : getIndependentWarehouseFullPermissions(),
+      assignedWarehouse: autoWarehouseName,
+      active: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setStaffList((prev) => [...prev, newStaff]);
+    setCurrentStaffId(newStaff.uid);
+    setRole(newStaff.role);
+    setCurrentUserEmail(newStaff.email);
     setIsGoogleAuthenticated(true);
     setIsSessionLoggedIn(true);
     showToast(
-      `Đã đăng nhập bằng Google (${matched.email}): ${matched.displayName} — Kho: ${matched.assignedWarehouse}`
+      `Đã đăng ký & đăng nhập bằng Gmail (${newStaff.email}) — Tự động tạo kho độc lập: ${newStaff.assignedWarehouse}`
     );
     return {
       ok: true,
-      message: authRes.message,
+      message: `Đăng ký & đăng nhập Gmail thành công (${newStaff.email}) · Kho quản lý độc lập: ${newStaff.assignedWarehouse}!`,
     };
   };
 
-  const handlePrimaryPhoneOtpLogin = (phone: string, otpCode: string) => {
+  const handleSignUpStaff = (payload: {
+    displayName: string;
+    emailOrPhone: string;
+    username?: string;
+    password: string;
+    provider: 'email_password' | 'phone' | 'google';
+  }) => {
+    const query = payload.emailOrPhone.trim().toLowerCase();
+    const nowIso = new Date().toISOString();
+    const existing = staffList.find(
+      (s) =>
+        (s.email && s.email.toLowerCase() === query) ||
+        s.username.toLowerCase() === query ||
+        (s.phone &&
+          query.replace(/\D+/g, '').length >= 9 &&
+          s.phone.replace(/\D+/g, '') === query.replace(/\D+/g, ''))
+    );
+
+    if (existing) {
+      const updatedStaff: StaffMember = {
+        ...existing,
+        displayName: payload.displayName || existing.displayName,
+        password: payload.password || existing.password,
+        updatedAt: nowIso,
+      };
+      setStaffList((prev) =>
+        prev.map((s) => (s.uid === existing.uid ? updatedStaff : s))
+      );
+      setCurrentStaffId(updatedStaff.uid);
+      setRole(updatedStaff.role);
+      setCurrentUserEmail(updatedStaff.email || ADMIN_BACKUP_EMAIL);
+      setIsSessionLoggedIn(true);
+      showToast(
+        `Đã đồng bộ tài khoản & đăng nhập: ${updatedStaff.displayName} — Kho: ${updatedStaff.assignedWarehouse}`
+      );
+      return {
+        ok: true,
+        message: `Đã kích hoạt & đăng nhập tài khoản ${updatedStaff.displayName} (${query}) thành công!`,
+      };
+    }
+
+    const isPrimary =
+      query === ADMIN_BACKUP_EMAIL.toLowerCase() ||
+      query.replace(/\D+/g, '') === ADMIN_PRIMARY_PHONE;
+    const baseUsername =
+      (payload.username || query.split('@')[0] || `nv_${Date.now().toString().slice(-4)}`)
+        .replace(/[^a-zA-Z0-9._-]/g, '')
+        .toLowerCase() || `nv_${Date.now().toString().slice(-4)}`;
+    const uniqueUsername = staffList.some((s) => s.username.toLowerCase() === baseUsername)
+      ? `${baseUsername}_${Date.now().toString().slice(-3)}`
+      : baseUsername;
+    const posRole: StaffPositionRole = isPrimary ? 'primary_manager' : 'warehouse_manager';
+    const autoWarehouseName = isPrimary
+      ? 'Tất cả kho'
+      : formatDefaultWarehouseNameFromGmail(query);
+
+    if (!isPrimary) {
+      setWarehouses((prev) =>
+        prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
+      );
+    }
+
+    const created: StaffMember = {
+      uid: isPrimary ? PRIMARY_ADMIN_UID : `staff_${Date.now()}`,
+      username: uniqueUsername,
+      password: payload.password,
+      displayName: payload.displayName.trim() || uniqueUsername,
+      phone: query.includes('@') ? '' : payload.emailOrPhone.trim(),
+      email: query.includes('@') ? query : `${uniqueUsername}@gmail.com`,
+      role: 'manager',
+      positionRole: posRole,
+      permissions: isPrimary
+        ? getDefaultPermissionsForPosition('primary_manager')
+        : getIndependentWarehouseFullPermissions(),
+      assignedWarehouse: autoWarehouseName,
+      active: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+
+    setStaffList((prev) => [...prev, created]);
+    setCurrentStaffId(created.uid);
+    setRole(created.role);
+    setCurrentUserEmail(created.email);
+    setIsSessionLoggedIn(true);
+    showToast(
+      `Đã đăng ký tài khoản Gmail @${created.username} (${created.displayName}) — Tự động tạo kho độc lập: ${created.assignedWarehouse}`
+    );
+    return {
+      ok: true,
+      message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tự động tạo kho riêng "${created.assignedWarehouse}" với đầy đủ chức năng độc lập.`,
+    };
+  };
+
+  const handlePrimaryPhoneOtpLogin = (
+    phone: string,
+    otpCode: string,
+    displayName?: string,
+    isSignUp?: boolean
+  ) => {
+    const cleanDigits = phone.replace(/\D+/g, '');
+    const normalizedLocalPhone = cleanDigits.startsWith('84')
+      ? `0${cleanDigits.slice(2)}`
+      : cleanDigits;
+
+    const matchedByPhone = staffList.find(
+      (s) => s.phone && s.phone.replace(/\D+/g, '') === normalizedLocalPhone
+    );
+
+    if (matchedByPhone) {
+      setCurrentStaffId(matchedByPhone.uid);
+      setRole(matchedByPhone.role);
+      setCurrentUserEmail(matchedByPhone.email || ADMIN_BACKUP_EMAIL);
+      setIsSessionLoggedIn(true);
+      showToast(
+        `Đã xác thực OTP (${otpCode}) cho SĐT ${normalizedLocalPhone} — Đăng nhập ${matchedByPhone.displayName}!`
+      );
+      return {
+        ok: true,
+        message: `Xác thực mã OTP thành công! Đã đăng nhập tài khoản ${matchedByPhone.displayName} (${normalizedLocalPhone}).`,
+      };
+    }
+
+    if (isSignUp || normalizedLocalPhone !== ADMIN_PRIMARY_PHONE) {
+      return handleSignUpStaff({
+        displayName: displayName || `Nhân sự (${normalizedLocalPhone})`,
+        emailOrPhone: normalizedLocalPhone,
+        username: `sdt_${normalizedLocalPhone.slice(-6)}`,
+        password: otpCode || 'taman2026',
+        provider: 'phone',
+      });
+    }
+
     const primaryOwner =
       staffList.find(
         (s) =>
@@ -2098,12 +2365,95 @@ export default function App() {
     phone: string;
     email: string;
     newPassword?: string;
+    customWarehouseName?: string;
   }) => {
     const target = staffList.find((s) => s.uid === payload.uid);
     if (!target) {
       return { ok: false, message: 'Không tìm thấy tài khoản cần cập nhật.' };
     }
     const nowIso = new Date().toISOString();
+    const oldWarehouse = target.assignedWarehouse;
+    const isSingleWhAccount =
+      oldWarehouse !== 'Tất cả kho' && !canAccountCreateStaff(target);
+
+    const nextWarehouse =
+      isSingleWhAccount && payload.customWarehouseName
+        ? normalizeCustomTamAnWarehouseName(
+            payload.customWarehouseName,
+            payload.email || target.email
+          )
+        : oldWarehouse;
+
+    if (isSingleWhAccount && nextWarehouse && nextWarehouse !== oldWarehouse) {
+      setWarehouses((prev) => {
+        const replaced = prev.map((w) => (w === oldWarehouse ? nextWarehouse : w));
+        return replaced.includes(nextWarehouse) ? replaced : [...replaced, nextWarehouse];
+      });
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.warehouseName === oldWarehouse
+            ? { ...p, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : p
+        )
+      );
+      setSales((prev) =>
+        prev.map((s) =>
+          s.warehouseName === oldWarehouse
+            ? { ...s, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : s
+        )
+      );
+      setImports((prev) =>
+        prev.map((i) =>
+          i.warehouseName === oldWarehouse
+            ? { ...i, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : i
+        )
+      );
+      setReceiptVouchers((prev) =>
+        prev.map((rv) =>
+          rv.warehouseName === oldWarehouse
+            ? { ...rv, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : rv
+        )
+      );
+      setPaymentVouchers((prev) =>
+        prev.map((pv) =>
+          pv.warehouseName === oldWarehouse
+            ? { ...pv, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : pv
+        )
+      );
+      setCustomers((prev) =>
+        prev.map((c) =>
+          c.warehouseName === oldWarehouse
+            ? { ...c, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : c
+        )
+      );
+      setSuppliers((prev) =>
+        prev.map((sp) =>
+          sp.warehouseName === oldWarehouse
+            ? { ...sp, warehouseName: nextWarehouse }
+            : sp
+        )
+      );
+      setSavedVouchers((prev) =>
+        prev.map((vc) =>
+          vc.warehouseName === oldWarehouse
+            ? { ...vc, warehouseName: nextWarehouse, updatedAt: nowIso }
+            : vc
+        )
+      );
+      setAuditLogs((prev) =>
+        prev.map((log) =>
+          log.warehouseName === oldWarehouse
+            ? { ...log, warehouseName: nextWarehouse }
+            : log
+        )
+      );
+    }
+
     setStaffList((prev) =>
       prev.map((s) =>
         s.uid === payload.uid
@@ -2113,8 +2463,11 @@ export default function App() {
               phone: payload.phone || s.phone,
               email: payload.email || s.email,
               password: payload.newPassword ? payload.newPassword : s.password,
+              assignedWarehouse: nextWarehouse,
               updatedAt: nowIso,
             }
+          : isSingleWhAccount && nextWarehouse !== oldWarehouse && s.assignedWarehouse === oldWarehouse
+          ? { ...s, assignedWarehouse: nextWarehouse, updatedAt: nowIso }
           : s
       )
     );
@@ -2122,20 +2475,24 @@ export default function App() {
       actionCategory: 'update',
       targetEntity: 'staff',
       targetCode: `@${target.username}`,
-      warehouseName: target.assignedWarehouse,
-      summary: `Bổ sung Gmail cá nhân (${payload.email}) & cập nhật thông tin nhân viên @${target.username}`,
+      warehouseName: nextWarehouse,
+      summary: `Cập nhật hồ sơ cá nhân @${target.username}${
+        nextWarehouse !== oldWarehouse
+          ? ` & Đổi tên hiển thị kho: "${oldWarehouse}" → "${nextWarehouse}"`
+          : ''
+      }`,
       details: `Họ tên: ${payload.displayName || target.displayName} · Gmail: ${
         payload.email || target.email
-      } · SĐT: ${payload.phone || target.phone}${
+      } · Kho quản lý: ${nextWarehouse}${
         payload.newPassword ? ' · Đã cập nhật mật khẩu mới' : ''
       }`,
     });
     showToast(
-      `Đã lưu bổ sung Gmail (${payload.email}) & thông tin cá nhân cho @${target.username}!`
+      `Đã lưu hồ sơ cá nhân cho @${target.username} · Kho hiển thị: ${nextWarehouse}!`
     );
     return {
       ok: true,
-      message: `Đã cập nhật thông tin cá nhân & bổ sung Gmail (${payload.email}) cho tài khoản @${target.username} thành công!`,
+      message: `Đã cập nhật hồ sơ cá nhân & tên hiển thị kho (${nextWarehouse}) cho tài khoản @${target.username} thành công!`,
     };
   };
 
@@ -2348,25 +2705,26 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const defaultName =
       customFileName || `VTNN_TamAn_Backup_${nowIso.slice(0, 10)}_FullAudit.json`;
+    const isScopedWarehouseUser = !canFilterMultiWarehouses;
     return buildBackupSnapshotPayload({
       fileName: defaultName,
-      exportedByEmail: ADMIN_BACKUP_EMAIL,
+      exportedByEmail: currentStaff.email || ADMIN_BACKUP_EMAIL,
       exportedAt: nowIso.slice(0, 16).replace('T', ' '),
-      warehouses,
+      warehouses: isScopedWarehouseUser ? [currentStaff.assignedWarehouse] : warehouses,
       customerGroups,
       productCategories,
       receiptGroups,
       paymentGroups,
-      products,
-      customers,
-      suppliers,
-      sales,
-      imports,
-      receiptVouchers,
-      paymentVouchers,
-      savedVouchers,
-      staffList,
-      auditLogs,
+      products: isScopedWarehouseUser ? visibleProducts : products,
+      customers: isScopedWarehouseUser ? visibleCustomers : customers,
+      suppliers: isScopedWarehouseUser ? visibleSuppliers : suppliers,
+      sales: isScopedWarehouseUser ? visibleSales : sales,
+      imports: isScopedWarehouseUser ? visibleImports : imports,
+      receiptVouchers: isScopedWarehouseUser ? visibleReceiptVouchers : receiptVouchers,
+      paymentVouchers: isScopedWarehouseUser ? visiblePaymentVouchers : paymentVouchers,
+      savedVouchers: isScopedWarehouseUser ? visibleSavedVouchers : savedVouchers,
+      staffList: isScopedWarehouseUser ? [currentStaff] : staffList,
+      auditLogs: isScopedWarehouseUser ? visibleAuditLogs : auditLogs,
     });
   };
 
@@ -2446,10 +2804,8 @@ export default function App() {
   };
 
   const handleDownloadBackupFile = (backup?: BackupEntry) => {
-    if (!canViewAuditHistory(currentStaff)) {
-      showToast(
-        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền tải tệp sao lưu về máy tính.`
-      );
+    if (!canViewAuditHistory(currentStaff) && !accessScope.canAccessBackupHistory) {
+      showToast('Tài khoản của bạn không có quyền tải tệp sao lưu về máy tính.');
       return;
     }
     const fileName =
@@ -2487,10 +2843,8 @@ export default function App() {
   };
 
   const handleRestoreBackupPayload = (payload: BackupSnapshotPayload) => {
-    if (!canViewAuditHistory(currentStaff)) {
-      showToast(
-        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền khôi phục dữ liệu từ tệp sao lưu.`
-      );
+    if (!canViewAuditHistory(currentStaff) && !accessScope.canAccessBackupHistory) {
+      showToast('Tài khoản của bạn không có quyền khôi phục dữ liệu từ tệp sao lưu.');
       return;
     }
     if (Array.isArray(payload.products) && payload.products.length > 0) {
@@ -2523,7 +2877,7 @@ export default function App() {
     if (Array.isArray(payload.savedVouchers) && payload.savedVouchers.length > 0) {
       setSavedVouchers(payload.savedVouchers);
     }
-    if (Array.isArray(payload.staffList) && payload.staffList.length > 0) {
+    if (isAdminAccount && Array.isArray(payload.staffList) && payload.staffList.length > 0) {
       setStaffList(payload.staffList);
     }
 
@@ -2532,8 +2886,8 @@ export default function App() {
       category: 'backup_restore',
       targetEntity: 'backup',
       targetCode: `Backup_${payload.exportedAt.slice(0, 10)}`,
-      warehouseName: 'Tất cả kho',
-      actionTitle: `Khôi phục toàn bộ dữ liệu ứng dụng từ tệp sao lưu (${payload.exportedAt})`,
+      warehouseName: currentStaff.assignedWarehouse,
+      actionTitle: `Khôi phục dữ liệu từ tệp sao lưu (${payload.exportedAt})`,
       details: `Đã phục hồi: ${payload.products.length} vật tư, ${payload.customers.length} khách hàng, ${payload.sales.length} đơn bán, ${payload.imports.length} phiếu nhập và ${payload.auditLogs.length} bản ghi lịch sử thao tác.`,
     });
 
@@ -2548,10 +2902,8 @@ export default function App() {
   };
 
   const handleRestoreDeletedRecordFromAudit = (audit: AuditLogEntry) => {
-    if (!canViewAuditHistory(currentStaff)) {
-      showToast(
-        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền khôi phục dữ liệu từ lịch sử thao tác.`
-      );
+    if (!canViewAuditHistory(currentStaff) && !accessScope.canAccessBackupHistory) {
+      showToast('Tài khoản của bạn không có quyền khôi phục dữ liệu từ lịch sử thao tác.');
       return;
     }
     if (!audit.snapshotData) {
@@ -2622,10 +2974,8 @@ export default function App() {
     fiscalYear: number,
     autoDownloadBackup: boolean
   ) => {
-    if (!canViewAuditHistory(currentStaff)) {
-      showToast(
-        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền chốt sổ năm báo cáo tài chính và xóa dữ liệu cũ.`
-      );
+    if (!canViewAuditHistory(currentStaff) && !accessScope.canAccessBackupHistory) {
+      showToast('Tài khoản của bạn không có quyền chốt sổ năm báo cáo tài chính.');
       return;
     }
 
@@ -2637,11 +2987,11 @@ export default function App() {
       id: `bk_fiscal_${fiscalYear}_${Date.now()}`,
       fileName: backupFileName,
       driveFileId: `local_fiscal_${fiscalYear}_${Date.now()}`,
-      targetEmail: ADMIN_BACKUP_EMAIL,
+      targetEmail: currentStaff.email || ADMIN_BACKUP_EMAIL,
       triggerType: 'manual',
       recordCount: preCleanupPayload.recordCount,
-      auditLogCount: auditLogs.length,
-      ownerId: 'demo_owner',
+      auditLogCount: visibleAuditLogs.length,
+      ownerId: currentStaff.uid,
       createdAt: nowIso.slice(0, 16).replace('T', ' '),
       status: 'completed',
       snapshotPayload: preCleanupPayload,
@@ -2650,6 +3000,55 @@ export default function App() {
 
     if (autoDownloadBackup) {
       handleDownloadBackupFile(backupEntry);
+    }
+
+    const isScopedSingleWh = !canFilterMultiWarehouses && lockedWarehouse;
+
+    if (isScopedSingleWh) {
+      // Scope fiscal year close strictly to this user's independent warehouse
+      const otherWhProducts = products.filter((p) => p.warehouseName !== lockedWarehouse);
+      const otherWhCustomers = customers.filter((c) => c.warehouseName !== lockedWarehouse);
+      const otherWhSuppliers = suppliers.filter((sp) => sp.warehouseName !== lockedWarehouse);
+      const otherWhSales = sales.filter((s) => s.warehouseName !== lockedWarehouse);
+      const otherWhImports = imports.filter((i) => i.warehouseName !== lockedWarehouse);
+      const otherWhReceipts = receiptVouchers.filter((r) => r.warehouseName !== lockedWarehouse);
+      const otherWhPayments = paymentVouchers.filter((p) => p.warehouseName !== lockedWarehouse);
+      const otherWhSavedVouchers = savedVouchers.filter((v) => v.warehouseName !== lockedWarehouse);
+
+      const result = executeFiscalYearCloseAndCleanup({
+        fiscalYear,
+        products: visibleProducts,
+        customers: visibleCustomers,
+        suppliers: visibleSuppliers,
+        sales: visibleSales,
+        imports: visibleImports,
+        receiptVouchers: visibleReceiptVouchers,
+        paymentVouchers: visiblePaymentVouchers,
+        savedVouchers: visibleSavedVouchers,
+        nowIso,
+      });
+
+      setProducts([...result.remainingProducts, ...otherWhProducts]);
+      setCustomers([...result.updatedCustomers, ...otherWhCustomers]);
+      setSuppliers([...result.updatedSuppliers, ...otherWhSuppliers]);
+      setSales([...result.remainingSales, ...otherWhSales]);
+      setImports([...result.remainingImports, ...otherWhImports]);
+      setReceiptVouchers([...result.remainingReceiptVouchers, ...otherWhReceipts]);
+      setPaymentVouchers([...result.remainingPaymentVouchers, ...otherWhPayments]);
+      setSavedVouchers([...result.remainingSavedVouchers, ...otherWhSavedVouchers]);
+
+      recordAuditLog({
+        actionCategory: 'delete',
+        targetEntity: 'backup',
+        targetCode: `ChotSo_Nam_${fiscalYear}_Sang_${result.preview.newFiscalYear}`,
+        warehouseName: lockedWarehouse,
+        summary: `Chốt sổ năm ${fiscalYear} tại kho ${lockedWarehouse}: Đã xóa ${result.preview.totalRecordsToDelete} chứng từ cũ đã tất toán & chuyển tồn lưu sang năm ${result.preview.newFiscalYear}`,
+      });
+
+      showToast(
+        `Đã chốt sổ năm ${fiscalYear} cho kho ${lockedWarehouse}: Xóa ${result.preview.totalRecordsToDelete} chứng từ cũ đã tất toán và đưa Tồn kho + Công nợ còn lại sang năm ${result.preview.newFiscalYear}!`
+      );
+      return;
     }
 
     const result = executeFiscalYearCloseAndCleanup({
@@ -2689,10 +3088,8 @@ export default function App() {
   };
 
   const handleExecuteFullApplicationDataWipe = (autoDownloadBackup: boolean) => {
-    if (!canViewAuditHistory(currentStaff)) {
-      showToast(
-        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền xóa toàn bộ dữ liệu ứng dụng.`
-      );
+    if (!canViewAuditHistory(currentStaff) && !accessScope.canAccessBackupHistory) {
+      showToast('Tài khoản của bạn không có quyền xóa dữ liệu.');
       return;
     }
 
@@ -2704,11 +3101,11 @@ export default function App() {
       id: `bk_fullwipe_${Date.now()}`,
       fileName: backupFileName,
       driveFileId: `local_fullwipe_${Date.now()}`,
-      targetEmail: ADMIN_BACKUP_EMAIL,
+      targetEmail: currentStaff.email || ADMIN_BACKUP_EMAIL,
       triggerType: 'manual',
       recordCount: preWipePayload.recordCount,
-      auditLogCount: auditLogs.length,
-      ownerId: 'demo_owner',
+      auditLogCount: visibleAuditLogs.length,
+      ownerId: currentStaff.uid,
       createdAt: nowIso.slice(0, 16).replace('T', ' '),
       status: 'completed',
       snapshotPayload: preWipePayload,
@@ -2717,6 +3114,30 @@ export default function App() {
 
     if (autoDownloadBackup) {
       handleDownloadBackupFile(backupEntry);
+    }
+
+    const isScopedSingleWh = !canFilterMultiWarehouses && lockedWarehouse;
+    if (isScopedSingleWh) {
+      // Wipe only the current user's independent warehouse data, keeping other warehouses completely intact
+      setProducts((prev) => prev.filter((p) => p.warehouseName !== lockedWarehouse));
+      setCustomers((prev) => prev.filter((c) => c.warehouseName !== lockedWarehouse));
+      setSuppliers((prev) => prev.filter((sp) => sp.warehouseName !== lockedWarehouse));
+      setSales((prev) => prev.filter((s) => s.warehouseName !== lockedWarehouse));
+      setImports((prev) => prev.filter((i) => i.warehouseName !== lockedWarehouse));
+      setReceiptVouchers((prev) => prev.filter((r) => r.warehouseName !== lockedWarehouse));
+      setPaymentVouchers((prev) => prev.filter((p) => p.warehouseName !== lockedWarehouse));
+      setSavedVouchers((prev) => prev.filter((v) => v.warehouseName !== lockedWarehouse));
+      recordAuditLog({
+        actionCategory: 'delete',
+        targetEntity: 'backup',
+        targetCode: `XOA_DU_LIEU_KHO_${lockedWarehouse}`,
+        warehouseName: lockedWarehouse,
+        summary: `Xóa làm sạch toàn bộ dữ liệu kho độc lập "${lockedWarehouse}" (Đã lưu bản sao lưu ${backupFileName})`,
+      });
+      showToast(
+        `Đã xóa làm sạch toàn bộ dữ liệu của kho "${lockedWarehouse}"! Các kho khác không bị ảnh hưởng.`
+      );
+      return;
     }
 
     const wiped = executeFullApplicationDataWipe({ staffList });
@@ -2744,45 +3165,30 @@ export default function App() {
     );
   };
 
-  const handleGoogleLogin = async (requestedRole: UserRole) => {
-    // Immediately switch active session to the Primary Manager account (trannhat1205@gmail.com)
-    if (requestedRole === 'manager') {
-      const adminStaff =
-        staffList.find((s) => s.email.toLowerCase() === ADMIN_BACKUP_EMAIL) || staffList[0];
-      if (adminStaff) {
-        setCurrentStaffId(adminStaff.uid);
-        setRole('manager');
-        setCurrentUserEmail(ADMIN_BACKUP_EMAIL);
-      }
-    }
-    setIsSessionLoggedIn(true);
+  const handleGoogleLogin = async (
+    requestedRole: UserRole
+  ): Promise<{ ok: boolean; message: string }> => {
     try {
       const result = await googleSignInWithRole(requestedRole);
-      if (result) {
+      if (result && result.user && result.user.email) {
         setIsGoogleAuthenticated(true);
-        const signedInEmail = result.user.email || ADMIN_BACKUP_EMAIL;
-        const staffMatch = authenticateStaffByGoogleEmail(staffList, signedInEmail);
-        if (staffMatch.ok && staffMatch.staff) {
-          setCurrentStaffId(staffMatch.staff.uid);
-          setRole(staffMatch.staff.role);
-          setCurrentUserEmail(staffMatch.staff.email || signedInEmail);
-          showToast(
-            `Đăng nhập bằng Google thành công (${staffMatch.staff.displayName} — Kho: ${staffMatch.staff.assignedWarehouse})`
-          );
-        } else {
-          setCurrentUserEmail(signedInEmail);
-          setRole(result.resolvedRole);
-          showToast(
-            `Đăng nhập thành công (${signedInEmail}) với quyền ${
-              result.resolvedRole === 'manager' ? 'Quản lý chính' : 'Nhân viên'
-            }`
-          );
-        }
+        return handleGoogleLoginByEmail(
+          result.user.email,
+          result.user.displayName || undefined,
+          result.user.uid
+        );
       }
+      return {
+        ok: false,
+        message:
+          'Không nhận được địa chỉ Gmail từ tài khoản Google đã chọn. Vui lòng chọn một tài khoản Gmail hợp lệ.',
+      };
     } catch {
-      showToast(
-        `Đã kích hoạt phiên Quản lý chính (${ADMIN_BACKUP_EMAIL} / ${ADMIN_PRIMARY_PHONE}) — Toàn quyền quản lý tất cả kho & tạo tài khoản nhân sự!`
-      );
+      return {
+        ok: false,
+        message:
+          'Chưa hoàn tất chọn tài khoản Google hoặc cửa sổ đăng nhập đã đóng. Vui lòng chọn một tài khoản Google trong cửa sổ bật lên để đăng nhập.',
+      };
     }
   };
 
@@ -2823,8 +3229,8 @@ export default function App() {
     {
       id: 'staff_accounts',
       label: canAccountCreateStaff(currentStaff)
-        ? 'Tài khoản & Phân quyền Kho'
-        : 'Tài khoản cá nhân',
+        ? 'Quản trị & Phân quyền Kho'
+        : 'Hồ sơ & Tên Kho cá nhân',
       icon: <ShieldCheck className="w-4 h-4" />,
     },
     {
@@ -2840,8 +3246,15 @@ export default function App() {
   ];
 
   // Filter navigation tabs strictly by the logged-in account's real-time [X] permissions
+  // STRICT RULE: "Sao lưu & Lịch sử" (backup_history) is ONLY visible to the 1 primary admin account (trannhat1205@gmail.com / Gu6OYdsdiWbRvbEINqaWZXj3LV83)
   const navItems = useMemo(
-    () => allNavItems.filter((item) => accessScope.allowedTabs.includes(item.id)),
+    () =>
+      allNavItems.filter((item) => {
+        if (item.id === 'backup_history' && !canAccountCreateStaff(currentStaff)) {
+          return false;
+        }
+        return accessScope.allowedTabs.includes(item.id);
+      }),
     [accessScope, currentStaff]
   );
 
@@ -2860,6 +3273,7 @@ export default function App() {
           onGoogleLoginByEmail={handleGoogleLoginByEmail}
           onPrimaryPhoneOtpLogin={handlePrimaryPhoneOtpLogin}
           onLoginStaff={handleLoginStaff}
+          onSignUpStaff={handleSignUpStaff}
           onResetPasswordViaGmail={handleResetPasswordViaGmail}
           onUpdateStaffProfile={handleUpdateStaffProfile}
           isSessionLoggedIn={isSessionLoggedIn}
@@ -2870,7 +3284,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col lg:flex-row">
+    <div className="min-h-screen w-full max-w-full overflow-x-hidden bg-slate-50 text-slate-900 flex flex-col lg:flex-row">
       {/* Desktop Sidebar (264px width) — Sticky on vertical scroll */}
       <aside className="hidden lg:flex lg:flex-col lg:w-[264px] lg:shrink-0 lg:sticky lg:top-0 lg:h-screen lg:overflow-y-auto bg-white border-r border-slate-200 justify-between">
         <div>
@@ -2894,19 +3308,32 @@ export default function App() {
 
           {/* Active Staff & Assigned Warehouse Status Card */}
           <div className="mx-3 mt-3 p-3 rounded-lg bg-emerald-50/70 border border-emerald-200 text-xs space-y-1.5">
-            <div className="font-semibold text-slate-900 truncate">
-              {isSessionLoggedIn ? currentStaff.displayName : 'Chưa đăng nhập'}
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="font-semibold text-slate-900 truncate">
+                {isSessionLoggedIn ? currentStaff.displayName : 'Chưa đăng nhập'}
+              </div>
+              {isAdminAccount ? (
+                <span className="px-1.5 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded shrink-0">
+                  Tất cả kho
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded shrink-0">
+                  1 Kho
+                </span>
+              )}
             </div>
             <div className="text-[11px] text-emerald-700 font-medium truncate">
               {isSessionLoggedIn
-                ? getPositionRoleLabel(currentStaff.positionRole)
+                ? isAdminAccount
+                  ? 'Quản lý tất cả các kho · Đầy đủ chức năng'
+                  : 'Quản lý 1 kho độc lập · Đầy đủ chức năng'
                 : 'Vui lòng đăng nhập tài khoản'}
             </div>
             <div className="flex items-center justify-between gap-2 pt-0.5">
               <div className="flex items-center gap-1 text-emerald-800 font-semibold min-w-0">
                 <Warehouse className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">
-                  Kho: {activeWarehouseLabel}
+                  {isAdminAccount ? `Kho: ${activeWarehouseLabel}` : `Quản lý 1 kho: ${activeWarehouseLabel}`}
                 </span>
               </div>
               {isSessionLoggedIn && (
@@ -2980,19 +3407,16 @@ export default function App() {
           </nav>
         </div>
 
-        {/* Bottom Auto-Backup & Account Role Footer */}
+        {/* Bottom Auto-Storage & Account Role Footer */}
         <div className="p-4 border-t border-slate-200 space-y-3 bg-slate-50/60">
           {canViewAuditHistory(currentStaff) && (
             <div className="text-xs text-slate-600 space-y-1 pb-2 border-b border-slate-200">
               <div className="flex items-center gap-1.5 font-semibold text-emerald-800">
                 <CloudCheck className="w-3.5 h-3.5 shrink-0" />
-                <span>Sao lưu Google Drive</span>
+                <span>Lưu trữ tự động Firebase Storage</span>
               </div>
               <div className="font-mono text-[11px] text-slate-500 truncate">
                 {ADMIN_BACKUP_EMAIL}
-              </div>
-              <div className="text-[11px] text-slate-500">
-                Trạng thái: {autoDailyBackupEnabled ? 'Tự động 06:00 mỗi ngày' : 'Thủ công'}
               </div>
             </div>
           )}
@@ -3025,11 +3449,11 @@ export default function App() {
       </aside>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 max-w-full">
         {/* Top Bar Contract: Always pinned at top when scrolling vertically down */}
-        <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200 sticky top-0 z-40 shadow-2xs">
-          <div className="px-2.5 sm:px-6 py-2.5 sm:py-3 flex items-center justify-between gap-1.5 sm:gap-3">
-            <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 shrink-0">
+        <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200 sticky top-0 z-40 shadow-2xs w-full max-w-full">
+          <div className="px-2 sm:px-6 py-2 sm:py-3 flex items-center justify-between gap-1.5 sm:gap-3">
+            <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen((prev) => !prev)}
@@ -3040,9 +3464,14 @@ export default function App() {
               </button>
 
               <div className="flex items-center gap-1.5 text-xs sm:text-sm min-w-0">
-                <span className="font-bold text-emerald-800 whitespace-nowrap shrink-0">
+                <span className="font-bold text-emerald-800 whitespace-nowrap truncate">
                   VTNN Tâm An
                 </span>
+                {!isAdminAccount && (
+                  <span className="hidden sm:inline-flex px-2 py-0.5 text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-md whitespace-nowrap shrink-0">
+                    Quản lý 1 kho: {currentStaff.assignedWarehouse}
+                  </span>
+                )}
                 <span className="hidden md:inline text-slate-300 shrink-0" aria-hidden="true">
                   /
                 </span>
@@ -3128,7 +3557,7 @@ export default function App() {
                     setMobileMenuOpen(false);
                     scrollToTopOfPage();
                   }}
-                  className="px-2 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <span className="sm:hidden">+ Đơn bán</span>
                   <span className="hidden sm:inline">+ Tạo đơn bán</span>
@@ -3214,8 +3643,8 @@ export default function App() {
         <main className="flex-1 p-3.5 sm:p-6 max-w-[1400px] w-full mx-auto space-y-6 overflow-x-hidden">
           {activeTab === 'dashboard' && (
             <div className="space-y-6">
-              {/* Brand Hero Banner */}
-              <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-5">
+              {/* Brand Hero Banner + Admin / Single-Warehouse Status Indicator */}
+              <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div className="flex items-start sm:items-center gap-3.5 sm:gap-4">
                   <img
                     src="/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png"
@@ -3223,13 +3652,115 @@ export default function App() {
                     referrerPolicy="no-referrer"
                     className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-contain border border-slate-200 p-1 shrink-0 bg-white"
                   />
-                  <div className="min-w-0">
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isAdminAccount ? (
+                        <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
+                          <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                          <span>Quản lý chính · Toàn bộ các kho</span>
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
+                          <Warehouse className="w-3.5 h-3.5 shrink-0" />
+                          <span>Quản lý 1 kho: {currentStaff.assignedWarehouse}</span>
+                        </span>
+                      )}
+                      <span className="text-xs font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 break-all">
+                        {isAdminAccount
+                          ? `UID: ${PRIMARY_ADMIN_UID}`
+                          : `Độc lập · Đầy đủ chức năng quản trị trên kho riêng`}
+                      </span>
+                    </div>
                     <h1 className="text-lg sm:text-2xl font-bold text-slate-900">
                       VTNN Tâm An — Vật tư Tâm An, Nhà Nông an tâm
                     </h1>
                   </div>
                 </div>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('staff_accounts')}
+                    className="w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-bold rounded-lg border transition-colors flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-300"
+                  >
+                    <ShieldCheck className="w-4 h-4 shrink-0" />
+                    <span>
+                      {isAdminAccount
+                        ? 'Mở Bảng Phân Quyền Kho'
+                        : `Đổi tên hiển thị kho (${currentStaff.assignedWarehouse})`}
+                    </span>
+                  </button>
+                </div>
               </div>
+
+              {/* Quick Warehouse Assignment Dashboard (Visible when Primary Manager Gu6OYdsdiWbRvbEINqaWZXj3LV83 is logged in) */}
+              {isAdminAccount && (
+                <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-2xs">
+                  <div className="px-4 sm:px-5 py-3 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
+                      <h2 className="text-xs sm:text-sm font-bold text-slate-900">
+                        Bảng Phân Quyền Quản Lý Kho Cho Người Dùng
+                      </h2>
+                    </div>
+                    <span className="text-[11px] font-mono text-emerald-900 bg-white px-2 py-0.5 rounded border border-emerald-200 font-semibold break-all">
+                      UID: {PRIMARY_ADMIN_UID}
+                    </span>
+                  </div>
+                  <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                    {staffList.map((st) => {
+                      const isRowAdmin = canAccountCreateStaff(st);
+                      return (
+                        <div
+                          key={`dash-admin-${st.uid}`}
+                          className={`p-3 rounded-xl border flex flex-col justify-between gap-2 text-xs ${
+                            isRowAdmin
+                              ? 'bg-emerald-50/50 border-emerald-300'
+                              : 'bg-slate-50/70 border-slate-200'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center justify-between gap-1.5">
+                              <span className="font-bold text-slate-900 truncate">
+                                {st.displayName}
+                              </span>
+                              <span className="px-1.5 py-0.5 text-[10px] font-bold rounded shrink-0 bg-emerald-100 text-emerald-900">
+                                {isRowAdmin ? 'Tất cả kho' : '1 Kho'}
+                              </span>
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500 truncate mt-0.5">
+                              @{st.username} · {st.email}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-200/80">
+                            <span className="text-[11px] font-semibold text-slate-600 shrink-0">
+                              Kho:
+                            </span>
+                            {isRowAdmin ? (
+                              <span className="font-bold text-emerald-900">Tất cả kho</span>
+                            ) : (
+                              <select
+                                aria-label={`Phân quyền kho cho ${st.username}`}
+                                value={st.assignedWarehouse}
+                                onChange={(e) => handleUpdateStaffWarehouse(st.uid, e.target.value)}
+                                className="flex-1 min-w-0 px-2 py-1 text-xs font-bold bg-white border border-emerald-300 rounded-md text-emerald-950"
+                              >
+                                {warehouses.map((w) => (
+                                  <option key={w} value={w}>
+                                    {w}
+                                  </option>
+                                ))}
+                                <option value="Tất cả kho">Tất cả kho</option>
+                              </select>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {/* 4 KPI Strip */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -3257,7 +3788,7 @@ export default function App() {
                     {formatVND(totalCustomerDebt)}
                   </div>
                   <div className="text-xs text-slate-500 mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
-                    <span>{customers.length} hồ sơ khách hàng</span>
+                    <span>{visibleCustomers.length} hồ sơ khách hàng</span>
                     <span aria-hidden="true">·</span>
                     <button
                       type="button"
@@ -3493,7 +4024,7 @@ export default function App() {
                       const file = exportPeriodicReportExcel({
                         periodLabel: 'Tháng 11/2026',
                         products: visibleProducts,
-                        customers,
+                        customers: visibleCustomers,
                         sales: visibleSales,
                         imports: visibleImports,
                       });
@@ -3509,7 +4040,7 @@ export default function App() {
                       const file = exportPeriodicReportPDF({
                         periodLabel: 'Tháng 11/2026',
                         products: visibleProducts,
-                        customers,
+                        customers: visibleCustomers,
                         sales: visibleSales,
                         imports: visibleImports,
                       });
@@ -3534,7 +4065,7 @@ export default function App() {
           {isSessionLoggedIn && activeTab === 'sales' && (
             <SalesLogView
               products={visibleProducts}
-              customers={customers}
+              customers={visibleCustomers}
               sales={visibleSales}
               role={role}
               resetKey={saleFormResetKey}
@@ -3563,9 +4094,9 @@ export default function App() {
           {isSessionLoggedIn && activeTab === 'imports' && (
             <ImportLogView
               products={visibleProducts}
-              customers={customers}
+              customers={visibleCustomers}
               imports={visibleImports}
-              suppliers={suppliers}
+              suppliers={visibleSuppliers}
               role={role}
               warehouses={warehouses}
               onAddWarehouse={handleAddWarehouse}
@@ -3588,7 +4119,7 @@ export default function App() {
           {isSessionLoggedIn && activeTab === 'inventory' && (
             <InventoryView
               products={visibleProducts}
-              customers={customers}
+              customers={visibleCustomers}
               sales={visibleSales}
               imports={visibleImports}
               role={role}
@@ -3611,7 +4142,7 @@ export default function App() {
 
           {isSessionLoggedIn && activeTab === 'customers' && (
             <CustomerModule
-              customers={customers}
+              customers={visibleCustomers}
               sales={visibleSales}
               products={visibleProducts}
               imports={visibleImports}
@@ -3637,7 +4168,7 @@ export default function App() {
               sales={visibleSales}
               imports={visibleImports}
               products={visibleProducts}
-              customers={customers}
+              customers={visibleCustomers}
               role={role}
               canAccessCustomerDebts={accessScope.canAccessCustomerDebts}
               canAccessSupplierDebts={accessScope.canAccessSupplierDebts}
@@ -3663,7 +4194,7 @@ export default function App() {
               receiptVouchers={visibleReceiptVouchers}
               receiptGroups={receiptGroups}
               onAddReceiptGroup={handleAddReceiptGroup}
-              customers={customers}
+              customers={visibleCustomers}
               customerGroups={customerGroups}
               onAddCustomerGroup={handleAddCustomerGroup}
               onAddCustomer={(input) =>
@@ -3691,7 +4222,7 @@ export default function App() {
               paymentVouchers={visiblePaymentVouchers}
               paymentGroups={paymentGroups}
               onAddPaymentGroup={handleAddPaymentGroup}
-              suppliers={suppliers}
+              suppliers={visibleSuppliers}
               onAddSupplier={handleCreateSupplierInline}
               imports={visibleImports}
               warehouses={warehouses}
@@ -3709,13 +4240,14 @@ export default function App() {
             <VoucherPrintCenter
               sales={visibleSales}
               imports={visibleImports}
-              customers={customers}
+              customers={visibleCustomers}
               products={visibleProducts}
               role={role}
-              savedVouchers={savedVouchers}
+              savedVouchers={visibleSavedVouchers}
               onSaveVoucher={handleSaveVoucher}
               onDeleteVoucher={handleDeleteVoucher}
               currentStaffName={currentStaff.displayName}
+              lockedWarehouse={lockedWarehouse}
               onNotifyToast={showToast}
             />
           )}
@@ -3750,16 +4282,16 @@ export default function App() {
               mode={activeTab === 'backup_history' ? 'backup_history' : 'reports'}
               activeWarehouseLabel={detailedWarehouseLabel}
               products={visibleProducts}
-              customers={customers}
+              customers={visibleCustomers}
               sales={visibleSales}
               imports={visibleImports}
               receiptVouchers={visibleReceiptVouchers}
               paymentVouchers={visiblePaymentVouchers}
-              savedVouchers={savedVouchers}
+              savedVouchers={visibleSavedVouchers}
               backups={backups}
               staffList={staffList}
               currentStaff={currentStaff}
-              auditLogs={auditLogs}
+              auditLogs={visibleAuditLogs}
               role={role}
               isGoogleAuthenticated={isGoogleAuthenticated}
               currentUserEmail={currentUserEmail}

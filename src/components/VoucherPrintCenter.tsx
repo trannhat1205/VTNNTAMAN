@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Calendar,
   CheckCircle2,
@@ -60,6 +60,7 @@ interface VoucherPrintCenterProps {
   ) => SavedVoucherRecord;
   onDeleteVoucher: (voucherId: string) => void;
   currentStaffName: string;
+  lockedWarehouse?: string | null;
   onNotifyToast: (msg: string) => void;
 }
 
@@ -73,6 +74,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   onSaveVoucher,
   onDeleteVoucher,
   currentStaffName,
+  lockedWarehouse,
   onNotifyToast,
 }) => {
   const [activeVoucher, setActiveVoucher] = useState<VoucherType>('sale_invoice');
@@ -85,7 +87,15 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
 
   // Blank-by-default form state so fields always clear after saving/exporting
   const [voucherCode, setVoucherCode] = useState<string>('');
-  const [warehouseName, setWarehouseName] = useState<string>('Tâm An Mỹ Ngãi');
+  const [warehouseName, setWarehouseName] = useState<string>(
+    lockedWarehouse || 'Tâm An Mỹ Ngãi'
+  );
+
+  useEffect(() => {
+    if (lockedWarehouse) {
+      setWarehouseName(lockedWarehouse);
+    }
+  }, [lockedWarehouse]);
   const [partnerName, setPartnerName] = useState<string>('');
   const [partnerPhone, setPartnerPhone] = useState<string>('');
   const [partnerAddress, setPartnerAddress] = useState<string>('');
@@ -126,7 +136,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   const resetAllFieldsToBlank = () => {
     setEditingVoucherId(null);
     setVoucherCode('');
-    setWarehouseName('Tâm An Mỹ Ngãi');
+    setWarehouseName(lockedWarehouse || 'Tâm An Mỹ Ngãi');
     setPartnerName('');
     setPartnerPhone('');
     setPartnerAddress('');
@@ -341,7 +351,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
       {
         voucherCode: finalCode,
         voucherType: activeVoucher,
-        warehouseName: warehouseName.trim() || 'Tâm An Mỹ Ngãi',
+        warehouseName: lockedWarehouse || warehouseName.trim() || 'Tâm An Mỹ Ngãi',
         partnerName: partnerName.trim() || 'Khách hàng / Đối tác',
         partnerPhone: partnerPhone.trim(),
         partnerAddress: partnerAddress.trim(),

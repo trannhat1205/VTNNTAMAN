@@ -825,13 +825,13 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   <div className="text-xs font-bold text-emerald-900">
                     Bổ sung kho mới trực tiếp
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <input
                       type="text"
                       value={newWarehouseName}
                       onChange={(e) => setNewWarehouseName(e.target.value)}
                       placeholder="VD: Tâm An Tháp Mười"
-                      className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                     />
                     <button
                       type="button"
@@ -2891,13 +2891,13 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   <div className="text-xs font-bold text-emerald-900">
                     Bổ sung kho mới trực tiếp
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <input
                       type="text"
                       value={newWarehouseName}
                       onChange={(e) => setNewWarehouseName(e.target.value)}
                       placeholder="VD: Tâm An Tháp Mười"
-                      className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                     />
                     <button
                       type="button"

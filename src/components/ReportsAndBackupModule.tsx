@@ -76,6 +76,7 @@ import {
   exportTaxAuthorityFinancialReportExcel,
   exportTaxAuthorityFinancialReportPDF,
 } from '../utils/exportReports';
+import { uploadFileToFirebaseStorage } from '../services/firebaseService';
 
 export type ReportsOrBackupViewMode = 'reports' | 'backup_history';
 
@@ -103,7 +104,7 @@ interface ReportsAndBackupModuleProps {
   onDownloadBackupFile: (backup?: BackupEntry) => void;
   onRestoreBackupPayload: (payload: BackupSnapshotPayload) => void;
   onRestoreDeletedRecordFromAudit: (audit: AuditLogEntry) => void;
-  onGoogleLogin: (role: UserRole) => Promise<void>;
+  onGoogleLogin: (role: UserRole) => Promise<unknown>;
   onSwitchRolePreview: (role: UserRole) => void;
   onNotifyToast: (message: string) => void;
   onCollectCustomerDebt?: (saleId: string, amount: number, note: string) => void;
@@ -221,9 +222,10 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
   onExecuteFullApplicationDataWipe,
   onNavigateToModule,
 }) => {
-  // Exclusive check: ONLY trannhat1205@gmail.com (or 0393120246) can view audit history, backup & financial profit
+  // STRICT RULE: Only Admin (Gu6OYdsdiWbRvbEINqaWZXj3LV83 / trannhat1205@gmail.com) sees & accesses "Sao lưu & Lịch sử"
   const isPrimaryAdmin = canViewAuditHistory(currentStaff);
   const accessScope = useMemo(() => evaluateStaffAccessScope(currentStaff), [currentStaff]);
+  const canAccessWarehouseAdminFeatures = isPrimaryAdmin;
   const allowedCategories = accessScope.allowedReportCategories;
 
   // Date range state (Từ ngày ... Đến ngày ...)
@@ -322,8 +324,11 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
 
   // Ensure activeCategory is always within the staff member's allowedReportCategories
   useEffect(() => {
-    if (!allowedCategories.includes(activeCategory)) {
-      setActiveCategory(allowedCategories[0] || 'overview');
+    if (allowedCategories.length > 0 && !allowedCategories.includes(activeCategory)) {
+      const fallback = allowedCategories[0] || 'overview';
+      if (activeCategory !== fallback) {
+        setActiveCategory(fallback);
+      }
     }
   }, [allowedCategories, activeCategory]);
 
@@ -607,14 +612,16 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    if (!isPrimaryAdmin) {
+    if (!canAccessWarehouseAdminFeatures) {
       onNotifyToast(
-        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền khôi phục dữ liệu từ tệp sao lưu.`
+        'Tài khoản của bạn không có quyền khôi phục dữ liệu từ tệp sao lưu.'
       );
       return;
     }
 
     try {
+      // Upload backup file directly to Firebase Storage bucket in production
+      uploadFileToFirebaseStorage(file, 'backups').catch(() => {});
       const rawText = await file.text();
       const validated = parseAndValidateBackupPayload(rawText);
       if (!validated.ok) {
@@ -967,13 +974,19 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 </div>
               )}
 
-              {isPrimaryAdmin && allowedCategories.includes('financial_profit') && (
+              {canAccessWarehouseAdminFeatures && allowedCategories.includes('financial_profit') && (
                 <div
                   onClick={() => setActiveCategory('financial_profit')}
                   className="bg-emerald-50/70 p-4 rounded-xl border border-emerald-200 hover:border-emerald-500 cursor-pointer transition-colors space-y-1 sm:col-span-2"
                 >
                   <div className="flex items-center justify-between text-xs font-semibold text-emerald-900">
-                    <span>Báo cáo Tài chính & Lợi nhuận Ròng (Độc quyền Quản lý chính)</span>
+                    <span>
+                      Báo cáo Tài chính &amp; Lợi nhuận Ròng (
+                      {isPrimaryAdmin
+                        ? 'Quản lý chính · Tất cả kho'
+                        : `Kho độc lập: ${currentStaff.assignedWarehouse}`}
+                      )
+                    </span>
                     <ShieldCheck className="w-4 h-4 text-emerald-700" />
                   </div>
                   <div className="text-lg font-bold font-mono text-emerald-800">
@@ -2148,7 +2161,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
             TAB 8: BÁO CÁO TÀI CHÍNH NĂM CHUẨN BIỂU MẪU CƠ QUAN THUẾ (B02-DN / B01-DN / B03-DN)
             CHỌN TỪNG NĂM (2024 -> 2032... 2040+), IN BCTC THUẾ & BẤM VÀO TỪNG MỤC ĐỂ KIỂM TRA CHI TIẾT
            ==================================================================== */}
-        {isPrimaryAdmin &&
+        {canAccessWarehouseAdminFeatures &&
           activeCategory === 'financial_profit' &&
           allowedCategories.includes('financial_profit') && (
             <div className="bg-white rounded-xl border-2 border-emerald-200 overflow-hidden shadow-sm space-y-0">
@@ -4063,38 +4076,17 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
   // ============================================================================
   return (
     <div className="space-y-6">
-      {isPrimaryAdmin && (
+      {canAccessWarehouseAdminFeatures && (
         <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 space-y-5">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <label className="flex items-center gap-2 text-xs font-medium text-slate-700 bg-slate-50 px-3 py-2 rounded-lg border border-slate-200 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoDailyBackupEnabled}
-                onChange={(e) => onToggleAutoDailyBackup(e.target.checked)}
-                aria-label="Tự động sao lưu hàng ngày lên Google Drive"
-                className="w-4 h-4 accent-emerald-700 rounded cursor-pointer"
-              />
-              <span>Tự động sao lưu mỗi ngày (06:00 sáng)</span>
-            </label>
-
-            <button
-              type="button"
-              disabled={isBackingUp}
-              onClick={() => setConfirmBackupModal(true)}
-              className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
-            >
-              <CloudUpload className="w-4 h-4 shrink-0" />
-              <span>
-                {isBackingUp ? 'Đang tải lên Drive...' : 'Sao lưu ngay lên Google Drive'}
-              </span>
-            </button>
-          </div>
-
-          {/* Exclusive Primary Manager Box: Download Backup to Computer, Upload Backup to Restore, Fiscal Year Rollover & Full Data Wipe */}
+          {/* Backup to Computer, Upload Backup to Restore (connected to Firebase Storage), Fiscal Year Rollover & Full Data Wipe */}
           <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl flex flex-col gap-3">
             <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
               <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>Quyền Quản Lý Chính</span>
+              <span>
+                {isPrimaryAdmin
+                  ? 'Quản lý chính · Toàn bộ các kho'
+                  : `Quản Lý 1 Kho Độc Lập (${currentStaff.assignedWarehouse}) — Đầy Đủ Chức Năng Quản Trị`}
+              </span>
             </div>
 
             <div className="flex flex-wrap items-center gap-2.5">
@@ -4162,8 +4154,11 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-50 border border-amber-200 text-xs font-bold text-amber-900 self-start">
                 <Calendar className="w-3.5 h-3.5 text-amber-700 shrink-0" />
                 <span>
-                  Mục 1 · Quyền Quản Lý Chính ({ADMIN_BACKUP_EMAIL}): Chốt Sổ Năm Báo Cáo Tài Chính
-                  & Kết Chuyển Tồn Lưu Sang Năm Mới
+                  Mục 1 ·{' '}
+                  {isPrimaryAdmin
+                    ? `Quản lý chính (${ADMIN_BACKUP_EMAIL})`
+                    : `Quản lý kho (${currentStaff.assignedWarehouse})`}
+                  : Chốt Sổ Năm Báo Cáo Tài Chính &amp; Kết Chuyển Tồn Lưu Sang Năm Mới
                 </span>
               </div>
 
@@ -4360,7 +4355,10 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-rose-100 border border-rose-200 text-xs font-bold text-rose-900 self-start">
                 <Trash2 className="w-3.5 h-3.5 text-rose-700 shrink-0" />
                 <span>
-                  Mục 2 · Quyền Quản Lý Chính ({ADMIN_BACKUP_EMAIL}): Xóa Toàn Bộ Dữ Liệu Ứng Dụng
+                  Mục 2 ·{' '}
+                  {isPrimaryAdmin
+                    ? `Quản lý chính (${ADMIN_BACKUP_EMAIL}): Xóa Toàn Bộ Dữ Liệu Ứng Dụng`
+                    : `Quản lý kho (${currentStaff.assignedWarehouse}): Xóa Toàn Bộ Dữ Liệu Kho ${currentStaff.assignedWarehouse}`}
                 </span>
               </div>
 
@@ -4533,14 +4531,16 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
         </div>
       )}
 
-      {/* Operation Audit Log (Lịch sử các thao tác đã thực hiện — EXCLUSIVE to trannhat1205@gmail.com) */}
-      {isPrimaryAdmin && (
+      {/* Operation Audit Log (Lịch sử các thao tác đã thực hiện) */}
+      {canAccessWarehouseAdminFeatures && (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="p-4 sm:p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-slate-50/60">
             <div className="flex items-center gap-2">
               <History className="w-4 h-4 text-emerald-700 shrink-0" />
               <span className="text-xs font-bold uppercase tracking-wider text-emerald-800">
-                Giám Sát Độc Quyền Quản Lý Chính
+                {isPrimaryAdmin
+                  ? 'Giám Sát Lịch Sử Thao Tác Hệ Thống'
+                  : `Lịch Sử Thao Tác Kho Độc Lập (${currentStaff.assignedWarehouse})`}
               </span>
             </div>
 

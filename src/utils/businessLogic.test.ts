@@ -47,6 +47,11 @@ import {
   resolveActiveWarehouses,
   updateImportRecord,
   updateSaleRecord,
+  PRIMARY_ADMIN_UID,
+  formatDefaultWarehouseNameFromGmail,
+  extractCustomWarehouseSuffix,
+  normalizeCustomTamAnWarehouseName,
+  getIndependentWarehouseFullPermissions,
 } from './businessLogic';
 import {
   CustomerProfile,
@@ -56,6 +61,11 @@ import {
   SaleTransaction,
   StaffMember,
 } from '../types';
+import {
+  INITIAL_CUSTOMERS,
+  INITIAL_SAVED_VOUCHERS,
+  INITIAL_SUPPLIERS,
+} from '../data/seedData';
 
 const mockProducts: ProductItem[] = [
   {
@@ -1618,5 +1628,159 @@ test('canStaffFilterMultiWarehouses, resolveActiveWarehouses, filterRecordsBySel
     ['Tâm An Mỹ Ngãi']
   );
 });
+
+test('Gmail registration default warehouse naming, immutable TÂM AN prefix rename, Admin UID, and independent warehouse full admin features', () => {
+  // 1. Default warehouse name from Gmail registration: vtnntaman@gmail.com -> TÂM AN VTNNTAMAN
+  assert.equal(
+    formatDefaultWarehouseNameFromGmail('vtnntaman@gmail.com'),
+    'TÂM AN VTNNTAMAN'
+  );
+  assert.equal(
+    formatDefaultWarehouseNameFromGmail('  DaiLyBaSao@gmail.com '),
+    'TÂM AN DAILYBASAO'
+  );
+
+  // 2. Extracting and normalizing custom warehouse display name with immutable "TÂM AN" prefix
+  assert.equal(
+    extractCustomWarehouseSuffix('TÂM AN VTNNTAMAN'),
+    'VTNNTAMAN'
+  );
+  assert.equal(
+    normalizeCustomTamAnWarehouseName('Ba Sao', 'TÂM AN VTNNTAMAN'),
+    'TÂM AN BA SAO'
+  );
+  assert.equal(
+    normalizeCustomTamAnWarehouseName('TÂM AN BA SAO', 'TÂM AN VTNNTAMAN'),
+    'TÂM AN BA SAO'
+  );
+  assert.equal(
+    normalizeCustomTamAnWarehouseName('   ', 'TÂM AN VTNNTAMAN'),
+    'TÂM AN VTNNTAMAN'
+  );
+
+  // 3. Admin UID Gu6OYdsdiWbRvbEINqaWZXj3LV83 recognition
+  assert.equal(PRIMARY_ADMIN_UID, 'Gu6OYdsdiWbRvbEINqaWZXj3LV83');
+  const adminAccount: StaffMember = {
+    uid: PRIMARY_ADMIN_UID,
+    username: 'admin.firebase',
+    password: '123456',
+    displayName: 'Quản Trị Viên Hệ Thống',
+    role: 'manager',
+    positionRole: 'primary_manager',
+    assignedWarehouse: 'Tất cả kho',
+    permissions: getDefaultPermissionsForPosition('primary_manager'),
+    phone: '0909123456',
+    email: 'admin@gmail.com',
+    active: true,
+    createdAt: '2026-11-20',
+    updatedAt: '2026-11-20',
+  };
+  assert.equal(canAccountCreateStaff(adminAccount), true);
+  const adminScope = evaluateStaffAccessScope(adminAccount);
+  assert.equal(adminScope.isPrimaryOwner, true);
+  assert.equal(adminScope.canAccessBackupHistory, true);
+  assert.equal(adminScope.allowedTabs.includes('backup_history'), true);
+  assert.equal(adminScope.allowedTabs.length, 12);
+
+  // 4. Independent single-warehouse user account has 11 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
+  const newGmailUser: StaffMember = {
+    uid: 'user_uid_vtnntaman',
+    username: 'vtnntaman',
+    password: '123456',
+    displayName: 'Đại Lý Ba Sao',
+    role: 'staff',
+    positionRole: 'warehouse_manager',
+    assignedWarehouse: 'TÂM AN VTNNTAMAN',
+    permissions: getIndependentWarehouseFullPermissions(),
+    phone: '',
+    email: 'vtnntaman@gmail.com',
+    active: true,
+    createdAt: '2026-11-22',
+    updatedAt: '2026-11-22',
+  };
+
+  assert.equal(canAccountCreateStaff(newGmailUser), false);
+  const userScope = evaluateStaffAccessScope(newGmailUser);
+  assert.equal(userScope.isPrimaryOwner, false);
+  assert.equal(userScope.canAccessBackupHistory, false);
+  assert.equal(userScope.allowedTabs.length, 11);
+  assert.equal(userScope.allowedTabs.includes('reports'), true);
+  assert.equal(userScope.allowedTabs.includes('backup_history'), false);
+  assert.equal(userScope.allowedReportCategories.includes('financial_profit'), true);
+  assert.equal(userScope.allowedReportCategories.length, 8);
+
+  // 5. Complete warehouse isolation for customers, suppliers, and saved vouchers:
+  // A newly created account (@nhattamnhanqua1 -> TÂM AN NHATTAMNHANQUA1) sees 0 customers, 0 suppliers, and 0 saved vouchers from other warehouses.
+  const allWarehouses = [
+    'Tâm An Mỹ Ngãi',
+    'Tâm An Cao Lãnh',
+    'Tâm An Mỹ Trà',
+    'TÂM AN NHATTAMNHANQUA1',
+  ];
+  const nhatTamUser: StaffMember = {
+    uid: 'staff_nhattamnhanqua1',
+    username: 'nhattamnhanqua1',
+    password: '123456',
+    displayName: 'nhattamnhanqua1',
+    role: 'manager',
+    positionRole: 'warehouse_manager',
+    assignedWarehouse: 'TÂM AN NHATTAMNHANQUA1',
+    permissions: getIndependentWarehouseFullPermissions(),
+    phone: '',
+    email: 'nhattamnhanqua1@gmail.com',
+    active: true,
+    createdAt: '2026-11-22',
+    updatedAt: '2026-11-22',
+  };
+
+  assert.equal(
+    filterRecordsBySelectedWarehouses(INITIAL_CUSTOMERS, nhatTamUser, allWarehouses, []).length,
+    0
+  );
+  assert.equal(
+    filterRecordsBySelectedWarehouses(INITIAL_SUPPLIERS, nhatTamUser, allWarehouses, []).length,
+    0
+  );
+  assert.equal(
+    filterRecordsBySelectedWarehouses(INITIAL_SAVED_VOUCHERS, nhatTamUser, allWarehouses, [])
+      .length,
+    0
+  );
+
+  // When Primary Admin assigns that user to 'Tâm An Mỹ Ngãi', they see only 'Tâm An Mỹ Ngãi' customers (2), suppliers (2), and saved vouchers (2)
+  const adminAssignedMyNgaiUser: StaffMember = {
+    ...nhatTamUser,
+    assignedWarehouse: 'Tâm An Mỹ Ngãi',
+  };
+  assert.equal(
+    filterRecordsBySelectedWarehouses(
+      INITIAL_CUSTOMERS,
+      adminAssignedMyNgaiUser,
+      allWarehouses,
+      []
+    ).length,
+    2
+  );
+  assert.equal(
+    filterRecordsBySelectedWarehouses(
+      INITIAL_SUPPLIERS,
+      adminAssignedMyNgaiUser,
+      allWarehouses,
+      []
+    ).length,
+    2
+  );
+  assert.equal(
+    filterRecordsBySelectedWarehouses(
+      INITIAL_SAVED_VOUCHERS,
+      adminAssignedMyNgaiUser,
+      allWarehouses,
+      []
+    ).length,
+    2
+  );
+});
+
+
 
 

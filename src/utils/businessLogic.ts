@@ -556,17 +556,97 @@ export function canPerformRoleAction(role: UserRole, action: RoleAction): boolea
   return staffAllowed.includes(action);
 }
 
+export const PRIMARY_ADMIN_UID = 'Gu6OYdsdiWbRvbEINqaWZXj3LV83';
 export const PRIMARY_MANAGER_EMAIL = 'trannhat1205@gmail.com';
 export const PRIMARY_MANAGER_PHONE = '0393120246';
+export const MANDATORY_WAREHOUSE_PREFIX = 'TÂM AN';
 
 /**
- * ONLY the primary account (Gmail trannhat1205@gmail.com or Phone 0393120246 via SMS OTP)
- * has the authority to create accounts and assign permissions to personnel.
+ * Generates the default warehouse display name for a newly registered Gmail account:
+ * "TÂM AN " + uppercase Gmail prefix before "@".
+ * Example: "vtnntaman@gmail.com" -> "TÂM AN VTNNTAMAN"
+ */
+export function formatDefaultWarehouseNameFromGmail(email: string): string {
+  const trimmed = (email || '').trim().toLowerCase();
+  const localPart = (trimmed.split('@')[0] || '')
+    .replace(/[^a-zA-Z0-9À-ỹ_\s-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+  if (!localPart) {
+    return `${MANDATORY_WAREHOUSE_PREFIX} KHO MỚI`;
+  }
+  const stripped = localPart.replace(/^TÂM\s+AN\s+/i, '').replace(/^TAM\s+AN\s+/i, '').trim();
+  return `${MANDATORY_WAREHOUSE_PREFIX} ${stripped || localPart}`;
+}
+
+/**
+ * Extracts the editable suffix after the mandatory "TÂM AN" prefix.
+ * Example: "TÂM AN VTNNTAMAN" -> "VTNNTAMAN", "Tâm An Ba Sao" -> "BA SAO"
+ */
+export function extractCustomWarehouseSuffix(warehouseName: string): string {
+  const trimmed = (warehouseName || '').trim();
+  const withoutPrefix = trimmed
+    .replace(/^TÂM\s+AN\s*/i, '')
+    .replace(/^TAM\s+AN\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return withoutPrefix.toUpperCase();
+}
+
+/**
+ * Normalizes any custom warehouse name input so the mandatory "TÂM AN" prefix
+ * is always preserved in uppercase (e.g., "Ba Sao" or "Tâm An Ba Sao" -> "TÂM AN BA SAO").
+ */
+export function normalizeCustomTamAnWarehouseName(
+  customInput: string,
+  fallbackEmail?: string
+): string {
+  const suffix = extractCustomWarehouseSuffix(customInput);
+  if (!suffix) {
+    return fallbackEmail
+      ? formatDefaultWarehouseNameFromGmail(fallbackEmail)
+      : `${MANDATORY_WAREHOUSE_PREFIX} KHO MỚI`;
+  }
+  return `${MANDATORY_WAREHOUSE_PREFIX} ${suffix}`;
+}
+
+/**
+ * Full functional permissions for an independent single-warehouse user account.
+ * Grants all administrative & operational capabilities within their own assigned warehouse.
+ */
+export function getIndependentWarehouseFullPermissions(): StaffFunctionalPermission[] {
+  return [
+    'manage_single_warehouse',
+    'warehouse_accounting',
+    'sales_accounting',
+    'customer_debt_accounting',
+    'supplier_debt_accounting',
+    'cash_treasurer',
+    'bank_treasurer',
+    'sales_and_invoicing',
+    'import_and_supplier',
+    'edit_delete_vouchers',
+    'export_import_excel',
+    'view_assigned_reports',
+  ];
+}
+
+/**
+ * ONLY the primary Admin account (Firebase UID Gu6OYdsdiWbRvbEINqaWZXj3LV83,
+ * Gmail trannhat1205@gmail.com, or Phone 0393120246)
+ * is the system-wide Admin with authority to manage all warehouses and assign warehouse permissions.
  */
 export function canAccountCreateStaff(
-  staff: Pick<StaffMember, 'email' | 'phone' | 'positionRole'> | null | undefined
+  staff:
+    | (Pick<StaffMember, 'email' | 'phone' | 'positionRole'> & { uid?: string })
+    | null
+    | undefined
 ): boolean {
   if (!staff) return false;
+  if (staff.uid === PRIMARY_ADMIN_UID || staff.uid === 'staff_manager_01') {
+    return true;
+  }
   const normalizedEmail = (staff.email || '').trim().toLowerCase();
   const normalizedPhone = (staff.phone || '').replace(/\D+/g, '');
   if (stackMatchesPrimaryOwner(normalizedEmail, normalizedPhone)) {
@@ -1090,6 +1170,13 @@ export function evaluateStaffAccessScope(
     perms.includes('export_import_excel') ||
     perms.includes('warehouse_accounting');
 
+  const hasFullSingleWarehouseAdmin =
+    isPrimaryOwner ||
+    (perms.includes('manage_single_warehouse') &&
+      perms.includes('warehouse_accounting') &&
+      perms.includes('edit_delete_vouchers'));
+
+  // STRICT RULE: Only the 1 primary admin account (trannhat1205@gmail.com / Gu6OYdsdiWbRvbEINqaWZXj3LV83) sees "Sao lưu & Lịch sử"
   const canAccessBackupHistory = isPrimaryOwner;
 
   const canEditDeleteVouchers =
@@ -1106,7 +1193,9 @@ export function evaluateStaffAccessScope(
     if (canAccessInventory) allowedReportCategories.push('inventory_stock');
     if (canAccessDebts) allowedReportCategories.push('debts_receivable_payable');
     if (canAccessCashflow) allowedReportCategories.push('cashflow_treasury');
-    if (isPrimaryOwner) allowedReportCategories.push('financial_profit');
+    if (isPrimaryOwner || hasFullSingleWarehouseAdmin) {
+      allowedReportCategories.push('financial_profit');
+    }
   }
 
   const allowedTabs: string[] = ['dashboard'];

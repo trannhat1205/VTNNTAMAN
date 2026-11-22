@@ -562,13 +562,13 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                 placeholder="Gõ tên kho..."
               />
               {showNewWarehouseInput && (
-                <div className="mt-2 p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200 flex items-center gap-2">
+                <div className="mt-2 p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   <input
                     type="text"
                     value={newWarehouseInput}
                     onChange={(e) => setNewWarehouseInput(e.target.value)}
                     placeholder="Nhập tên kho mới..."
-                    className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-emerald-300 rounded-md"
+                    className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-emerald-300 rounded-md"
                   />
                   <button
                     type="button"
@@ -580,7 +580,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                       setNewWarehouseInput('');
                       setShowNewWarehouseInput(false);
                     }}
-                    className="px-3 py-1.5 text-xs font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900"
+                    className="px-3 py-1.5 text-xs font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900 whitespace-nowrap"
                   >
                     Lưu kho
                   </button>
@@ -614,18 +614,18 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                   <p className="text-[11px] font-semibold text-emerald-900">
                     Tạo Nhóm Phiếu Thu Mới (VD: Thu nợ vụ Đông Xuân, Thu lãi tiền gửi, Thu bán phế liệu...)
                   </p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <input
                       type="text"
                       value={newGroupInput}
                       onChange={(e) => setNewGroupInput(e.target.value)}
                       placeholder="Nhập tên nhóm phiếu thu mới..."
-                      className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-emerald-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-emerald-300 rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-700"
                     />
                     <button
                       type="button"
                       onClick={handleCreateNewGroup}
-                      className="px-3 py-1.5 text-xs font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900 shrink-0"
+                      className="px-3 py-1.5 text-xs font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900 shrink-0 whitespace-nowrap"
                     >
                       Lưu nhóm
                     </button>
@@ -1786,13 +1786,13 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                 placeholder="Gõ tên kho..."
               />
               {showNewWarehouseInput && (
-                <div className="mt-2 p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200 flex items-center gap-2">
+                <div className="mt-2 p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   <input
                     type="text"
                     value={newWarehouseInput}
                     onChange={(e) => setNewWarehouseInput(e.target.value)}
                     placeholder="Nhập tên kho mới..."
-                    className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-emerald-300 rounded-md"
+                    className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-emerald-300 rounded-md"
                   />
                   <button
                     type="button"
@@ -1804,7 +1804,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                       setNewWarehouseInput('');
                       setShowNewWarehouseInput(false);
                     }}
-                    className="px-3 py-1.5 text-xs font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900"
+                    className="px-3 py-1.5 text-xs font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900 whitespace-nowrap"
                   >
                     Lưu kho
                   </button>
@@ -1838,18 +1838,18 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                   <p className="text-[11px] font-semibold text-amber-950">
                     Tạo Nhóm Phiếu Chi Mới (VD: Chi xăng xe giao hàng, Chi thưởng doanh số, Chi sửa chữa kho...)
                   </p>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                     <input
                       type="text"
                       value={newGroupInput}
                       onChange={(e) => setNewGroupInput(e.target.value)}
                       placeholder="Nhập tên nhóm phiếu chi mới..."
-                      className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-amber-300 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-700"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-amber-300 rounded-md focus:outline-none focus:ring-2 focus:ring-amber-700"
                     />
                     <button
                       type="button"
                       onClick={handleCreateNewGroup}
-                      className="px-3 py-1.5 text-xs font-semibold bg-amber-800 text-white rounded-md hover:bg-amber-900 shrink-0"
+                      className="px-3 py-1.5 text-xs font-semibold bg-amber-800 text-white rounded-md hover:bg-amber-900 shrink-0 whitespace-nowrap"
                     >
                       Lưu nhóm
                     </button>
