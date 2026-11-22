@@ -27,6 +27,8 @@ interface NotificationCenterProps {
       | 'imports'
       | 'inventory'
       | 'debts'
+      | 'receipt_vouchers'
+      | 'payment_vouchers'
       | 'customers'
       | 'reports'
       | 'vouchers'

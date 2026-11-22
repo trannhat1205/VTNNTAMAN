@@ -5,6 +5,8 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ArrowDownCircle,
+  ArrowUpCircle,
   Bell,
   Boxes,
   CloudCheck,
@@ -31,10 +33,13 @@ import {
   AuditTargetEntity,
   BackupEntry,
   BackupSnapshotPayload,
+  CashPaymentVoucher,
+  CashReceiptVoucher,
   CustomerProfile,
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
+  SalePromotionType,
   SaleTransaction,
   SavedVoucherRecord,
   StaffFunctionalPermission,
@@ -53,8 +58,12 @@ import {
   INITIAL_CUSTOMER_GROUPS,
   INITIAL_CUSTOMERS,
   INITIAL_IMPORTS,
+  INITIAL_PAYMENT_GROUPS,
+  INITIAL_PAYMENT_VOUCHERS,
   INITIAL_PRODUCT_CATEGORIES,
   INITIAL_PRODUCTS,
+  INITIAL_RECEIPT_GROUPS,
+  INITIAL_RECEIPT_VOUCHERS,
   INITIAL_SALES,
   INITIAL_SAVED_VOUCHERS,
   INITIAL_STAFF,
@@ -62,23 +71,31 @@ import {
   INITIAL_WAREHOUSES,
 } from './data/seedData';
 import {
+  applyCustomerFifoDebtSettlement,
   applyDebtPayment,
   applyImportToInventory,
   applySaleToInventory,
+  applySupplierFifoDebtSettlement,
   authenticateStaffByGoogleEmail,
   buildBackupSnapshotPayload,
   calculateImportSummary,
   calculateSaleSummary,
   canAccountCreateStaff,
   canPerformRoleAction,
+  canStaffFilterMultiWarehouses,
   canViewAuditHistory,
   createAuditLogEntry,
   evaluateDebtUrgency,
   evaluateStaffAccessScope,
   evaluateStockAlert,
+  executeFiscalYearCloseAndCleanup,
+  executeFullApplicationDataWipe,
+  filterRecordsBySelectedWarehouses,
+  formatSelectedWarehousesBadge,
   formatVND,
   generateSmartNotifications,
   getPositionRoleLabel,
+  resolveActiveWarehouses,
   updateImportRecord,
   updateSaleRecord,
 } from './utils/businessLogic';
@@ -101,7 +118,14 @@ import { DebtModule } from './components/DebtModule';
 import { ReportsAndBackupModule } from './components/ReportsAndBackupModule';
 import { ImportLogView, SalesLogView } from './components/SalesImportViews';
 import { InventoryView } from './components/InventoryView';
+import { MultiWarehouseFilterPopover } from './components/MultiWarehouseFilterPopover';
 import { VoucherPrintCenter } from './components/VoucherPrintCenter';
+import {
+  CreatePaymentVoucherInput,
+  CreateReceiptVoucherInput,
+  PaymentVoucherLogView,
+  ReceiptVoucherLogView,
+} from './components/CashFlowVouchersView';
 import {
   GmailRecoveryLog,
   InitialLoginScreenPortal,
@@ -116,6 +140,8 @@ type ActiveTab =
   | 'inventory'
   | 'customers'
   | 'debts'
+  | 'receipt_vouchers'
+  | 'payment_vouchers'
   | 'vouchers'
   | 'staff_accounts'
   | 'reports'
@@ -140,6 +166,12 @@ export default function App() {
   const [productCategories, setProductCategories] = useState<string[]>(
     INITIAL_PRODUCT_CATEGORIES
   );
+  const [receiptGroups, setReceiptGroups] = useState<string[]>(INITIAL_RECEIPT_GROUPS);
+  const [paymentGroups, setPaymentGroups] = useState<string[]>(INITIAL_PAYMENT_GROUPS);
+  const [receiptVouchers, setReceiptVouchers] =
+    useState<CashReceiptVoucher[]>(INITIAL_RECEIPT_VOUCHERS);
+  const [paymentVouchers, setPaymentVouchers] =
+    useState<CashPaymentVoucher[]>(INITIAL_PAYMENT_VOUCHERS);
   const [staffList, setStaffList] = useState<StaffMember[]>(() => {
     try {
       const saved = localStorage.getItem('vtnn_taman_staff_realtime_v1');
@@ -310,36 +342,95 @@ export default function App() {
     };
   }, []);
 
+  // Global Multi-Warehouse Filter state for Primary Manager & Deputy General Manager
+  const [selectedFilterWarehouses, setSelectedFilterWarehouses] = useState<string[]>([]);
+
+  const canFilterMultiWarehouses = useMemo(
+    () => canStaffFilterMultiWarehouses(currentStaff),
+    [currentStaff]
+  );
+
   // Determine warehouse lock:
-  // Primary Manager ('primary_manager'), Deputy General Manager ('deputy_general_manager'),
-  // or anyone with 'manage_all_warehouses' or assignedWarehouse === 'Tất cả kho' can view all warehouses.
+  // If staff cannot filter multi-warehouses, they are locked to their single assigned warehouse.
+  // If they CAN filter multi-warehouses and picked exactly 1 warehouse, lock forms/views to that 1 warehouse.
   const lockedWarehouse = useMemo<string | null>(() => {
-    if (
-      currentStaff.positionRole === 'primary_manager' ||
-      currentStaff.positionRole === 'deputy_general_manager' ||
-      currentStaff.permissions?.includes('manage_all_warehouses') ||
-      currentStaff.assignedWarehouse === 'Tất cả kho'
-    ) {
-      return null;
+    if (!canFilterMultiWarehouses) {
+      return currentStaff.assignedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
     }
-    return currentStaff.assignedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
-  }, [currentStaff, warehouses]);
+    const active = resolveActiveWarehouses(currentStaff, warehouses, selectedFilterWarehouses);
+    if (active.length === 1 && warehouses.length > 1) {
+      return active[0];
+    }
+    return null;
+  }, [canFilterMultiWarehouses, currentStaff, warehouses, selectedFilterWarehouses]);
 
-  // Visible data scoped by per-staff warehouse permission
-  const visibleProducts = useMemo(() => {
-    if (!lockedWarehouse) return products;
-    return products.filter((p) => (p.warehouseName || 'Tâm An Mỹ Ngãi') === lockedWarehouse);
-  }, [products, lockedWarehouse]);
+  const activeWarehouseLabel = useMemo(
+    () =>
+      formatSelectedWarehousesBadge(currentStaff, warehouses, selectedFilterWarehouses, false),
+    [currentStaff, warehouses, selectedFilterWarehouses]
+  );
 
-  const visibleSales = useMemo(() => {
-    if (!lockedWarehouse) return sales;
-    return sales.filter((s) => (s.warehouseName || 'Tâm An Mỹ Ngãi') === lockedWarehouse);
-  }, [sales, lockedWarehouse]);
+  const detailedWarehouseLabel = useMemo(
+    () =>
+      formatSelectedWarehousesBadge(currentStaff, warehouses, selectedFilterWarehouses, true),
+    [currentStaff, warehouses, selectedFilterWarehouses]
+  );
 
-  const visibleImports = useMemo(() => {
-    if (!lockedWarehouse) return imports;
-    return imports.filter((i) => (i.warehouseName || 'Tâm An Mỹ Ngãi') === lockedWarehouse);
-  }, [imports, lockedWarehouse]);
+  // Visible data scoped by per-staff warehouse permission OR manager's selected warehouse filter
+  const visibleProducts = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        products,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [products, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visibleSales = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        sales,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [sales, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visibleImports = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        imports,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [imports, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visibleReceiptVouchers = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        receiptVouchers,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [receiptVouchers, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visiblePaymentVouchers = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        paymentVouchers,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [paymentVouchers, currentStaff, warehouses, selectedFilterWarehouses]
+  );
 
   // Notification State
   const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(
@@ -483,6 +574,20 @@ export default function App() {
     showToast(`Đã tạo nhóm vật tư mới: ${trimmed}`);
   };
 
+  const handleAddReceiptGroup = (groupName: string) => {
+    const trimmed = groupName.trim();
+    if (!trimmed) return;
+    setReceiptGroups((prev) => (prev.includes(trimmed) ? prev : [...prev, trimmed]));
+    showToast(`Đã tạo nhóm phiếu thu mới: ${trimmed}`);
+  };
+
+  const handleAddPaymentGroup = (groupName: string) => {
+    const trimmed = groupName.trim();
+    if (!trimmed) return;
+    setPaymentGroups((prev) => (prev.includes(trimmed) ? prev : [...prev, trimmed]));
+    showToast(`Đã tạo nhóm phiếu chi mới: ${trimmed}`);
+  };
+
   const recordAuditLog = (params: {
     actionCategory:
       | 'create'
@@ -549,19 +654,40 @@ export default function App() {
     dueDate: string;
     note: string;
     warehouseName: string;
+    promotionType?: SalePromotionType;
+    discountAmount?: number;
+    discountPercent?: number;
+    giftProductId?: string;
+    giftProductName?: string;
+    giftUnit?: string;
+    giftQuantity?: number;
+    giftUnitCost?: number;
   }): SaleTransaction => {
     const nowIso = new Date().toISOString();
-    const { updatedProducts, updatedProduct } = applySaleToInventory(
+    const { updatedProducts, updatedProduct, updatedGiftProduct } = applySaleToInventory(
       products,
       payload.productId,
       payload.quantity,
-      nowIso
+      nowIso,
+      payload.giftProductId,
+      payload.giftQuantity || 0
     );
     const summary = calculateSaleSummary(
       payload.quantity,
       payload.unitPrice,
-      payload.paidAmount
+      payload.paidAmount,
+      payload.discountAmount || 0
     );
+
+    const promoNotes: string[] = [];
+    if (summary.discountAmount > 0) {
+      promoNotes.push(`Giảm giá: -${formatVND(summary.discountAmount)}`);
+    }
+    if (payload.giftProductName && (payload.giftQuantity || 0) > 0) {
+      promoNotes.push(
+        `Quà tặng KM: ${payload.giftQuantity} ${payload.giftUnit || ''} ${payload.giftProductName}`
+      );
+    }
 
     const newSale: SaleTransaction = {
       id: `sale_${Date.now()}`,
@@ -579,6 +705,16 @@ export default function App() {
       debtAmount: summary.debtAmount,
       dueDate: payload.dueDate,
       status: summary.status,
+      promotionType: payload.promotionType || 'none',
+      discountAmount: summary.discountAmount,
+      discountPercent: payload.discountPercent || 0,
+      giftProductId: payload.giftProductId,
+      giftProductName: payload.giftProductName,
+      giftUnit: payload.giftUnit,
+      giftQuantity: payload.giftQuantity || 0,
+      giftUnitCost:
+        payload.giftUnitCost ??
+        (updatedGiftProduct ? updatedGiftProduct.importPrice : 0),
       note: payload.note,
       warehouseName:
         lockedWarehouse ||
@@ -602,9 +738,9 @@ export default function App() {
       summary: `Tạo hóa đơn bán hàng ${newSale.invoiceCode} cho ${newSale.customerName} (${formatVND(
         newSale.totalAmount
       )})`,
-      details: `Vật tư: ${newSale.quantity} ${newSale.unit} ${newSale.productName} · Đã thu: ${formatVND(
-        newSale.paidAmount
-      )} · Ghi nợ: ${formatVND(newSale.debtAmount)}`,
+      details: `Vật tư: ${newSale.quantity} ${newSale.unit} ${newSale.productName}${
+        promoNotes.length > 0 ? ' · ' + promoNotes.join(' · ') : ''
+      } · Đã thu: ${formatVND(newSale.paidAmount)} · Ghi nợ: ${formatVND(newSale.debtAmount)}`,
       snapshotData: JSON.stringify(newSale),
     });
 
@@ -637,6 +773,9 @@ export default function App() {
 
     if (isGoogleAuthenticated) {
       syncProductToFirestore(updatedProduct, false).catch(console.error);
+      if (updatedGiftProduct && updatedGiftProduct.id !== updatedProduct.id) {
+        syncProductToFirestore(updatedGiftProduct, false).catch(console.error);
+      }
       syncSaleToFirestore(newSale, true).catch(console.error);
     }
     return newSale;
@@ -656,6 +795,14 @@ export default function App() {
       paidAmount: number;
       dueDate: string;
       note: string;
+      promotionType?: SalePromotionType;
+      discountAmount?: number;
+      discountPercent?: number;
+      giftProductId?: string;
+      giftProductName?: string;
+      giftUnit?: string;
+      giftQuantity?: number;
+      giftUnitCost?: number;
     }
   ) => {
     if (!canPerformRoleAction(role, 'edit_record')) {
@@ -1195,6 +1342,407 @@ export default function App() {
       });
     }
     showToast(`Đã thanh toán công nợ Nhà cung cấp: ${formatVND(amount)}`);
+  };
+
+  // Automatic FIFO Debt Settlement for Customer (ordered by oldest debt date first)
+  const handleSettleCustomerTotalDebtFifo = (params: {
+    customerId?: string;
+    customerName: string;
+    customerPhone: string;
+    totalAmount: number;
+    groupName: string;
+    paymentMethod: string;
+    note: string;
+    warehouseName?: string;
+  }) => {
+    if (params.totalAmount <= 0) return;
+    const nowIso = new Date().toISOString();
+    try {
+      const fifoResult = applyCustomerFifoDebtSettlement(
+        sales,
+        {
+          customerId: params.customerId,
+          customerName: params.customerName,
+          customerPhone: params.customerPhone,
+        },
+        params.totalAmount,
+        params.note,
+        nowIso
+      );
+
+      if (fifoResult.settledAllocations.length === 0) {
+        showToast('Khách hàng này hiện không còn hóa đơn nợ nào cần quyết toán.');
+        return;
+      }
+
+      setSales(fifoResult.updatedSales);
+
+      // Update customer's totalDebt in customers state
+      setCustomers((prev) =>
+        prev.map((c) => {
+          const isMatched =
+            (params.customerId && c.id === params.customerId) ||
+            (params.customerPhone && c.phone === params.customerPhone) ||
+            c.name.trim().toLowerCase() === params.customerName.trim().toLowerCase();
+          if (!isMatched) return c;
+          return {
+            ...c,
+            totalDebt: fifoResult.totalRemainingDebt,
+            updatedAt: nowIso,
+          };
+        })
+      );
+
+      const resolvedWarehouse =
+        lockedWarehouse ||
+        params.warehouseName ||
+        fifoResult.unpaidInvoicesOrdered[0]?.warehouseName ||
+        'Tâm An Mỹ Ngãi';
+
+      const voucherCode = `PT-2611-00${receiptVouchers.length + 1}`;
+      const allocDesc = fifoResult.settledAllocations
+        .map((a) => `${a.code} (${a.date}: -${formatVND(a.allocatedAmount)})`)
+        .join(' · ');
+
+      const newReceiptVoucher: CashReceiptVoucher = {
+        id: `rv_${Date.now()}`,
+        voucherCode,
+        groupName: params.groupName || 'Thu nợ bán hàng khách hàng',
+        warehouseName: resolvedWarehouse,
+        partnerId: params.customerId,
+        partnerName: params.customerName,
+        partnerPhone: params.customerPhone || '',
+        amount: fifoResult.totalAllocated,
+        paymentMethod: params.paymentMethod || 'Chuyển khoản ngân hàng',
+        isDebtSettlement: true,
+        settledAllocations: fifoResult.settledAllocations,
+        totalPreviousDebt: fifoResult.totalPreviousDebt,
+        totalRemainingDebt: fifoResult.totalRemainingDebt,
+        countsTowardOtherIncome: false,
+        note:
+          params.note.trim() ||
+          `Quyết toán tổng công nợ phải thu theo thứ tự ngày nợ (${fifoResult.settledAllocations.length} HĐ)`,
+        staffName: currentStaff.displayName,
+        ownerId: 'demo_owner',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      setReceiptVouchers((prev) => [newReceiptVoucher, ...prev]);
+
+      recordAuditLog({
+        actionCategory: 'debt_payment',
+        targetEntity: 'debt',
+        targetCode: voucherCode,
+        warehouseName: resolvedWarehouse,
+        summary: `Thu quyết toán tổng công nợ KH ${newReceiptVoucher.partnerName} (+${formatVND(
+          fifoResult.totalAllocated
+        )}) tự động trừ vào ${fifoResult.settledAllocations.length} HĐ theo thứ tự ngày nợ`,
+        details: `Thứ tự trừ nợ theo ngày: ${allocDesc} · Tổng nợ trước thu: ${formatVND(
+          fifoResult.totalPreviousDebt
+        )} -> Còn nợ: ${formatVND(fifoResult.totalRemainingDebt)}`,
+        snapshotData: JSON.stringify(newReceiptVoucher),
+      });
+
+      showToast(
+        `Đã thu tổng nợ +${formatVND(fifoResult.totalAllocated)} (${
+          newReceiptVoucher.partnerName
+        }) và tự động trừ quyết toán vào ${fifoResult.settledAllocations.length} hóa đơn theo thứ tự ngày nợ!`
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'Không thể quyết toán tổng công nợ khách hàng.'
+      );
+    }
+  };
+
+  // Automatic FIFO Debt Settlement for Supplier (ordered by oldest debt date first)
+  const handleSettleSupplierTotalDebtFifo = (params: {
+    supplierName: string;
+    supplierPhone: string;
+    totalAmount: number;
+    groupName: string;
+    paymentMethod: string;
+    note: string;
+    warehouseName?: string;
+  }) => {
+    if (params.totalAmount <= 0) return;
+    const nowIso = new Date().toISOString();
+    try {
+      const fifoResult = applySupplierFifoDebtSettlement(
+        imports,
+        {
+          supplierName: params.supplierName,
+          supplierPhone: params.supplierPhone,
+        },
+        params.totalAmount,
+        params.note,
+        nowIso
+      );
+
+      if (fifoResult.settledAllocations.length === 0) {
+        showToast('Nhà cung cấp này hiện không còn phiếu nhập nợ nào cần quyết toán.');
+        return;
+      }
+
+      setImports(fifoResult.updatedImports);
+
+      const resolvedWarehouse =
+        lockedWarehouse ||
+        params.warehouseName ||
+        fifoResult.unpaidReceiptsOrdered[0]?.warehouseName ||
+        'Tâm An Mỹ Ngãi';
+
+      const voucherCode = `PC-2611-00${paymentVouchers.length + 1}`;
+      const allocDesc = fifoResult.settledAllocations
+        .map((a) => `${a.code} (${a.date}: -${formatVND(a.allocatedAmount)})`)
+        .join(' · ');
+
+      const newPaymentVoucher: CashPaymentVoucher = {
+        id: `pv_${Date.now()}`,
+        voucherCode,
+        groupName: params.groupName || 'Chi trả nợ Nhà cung cấp',
+        warehouseName: resolvedWarehouse,
+        partnerName: params.supplierName,
+        partnerPhone: params.supplierPhone || '',
+        amount: fifoResult.totalAllocated,
+        paymentMethod: params.paymentMethod || 'Chuyển khoản ngân hàng',
+        isDebtSettlement: true,
+        settledAllocations: fifoResult.settledAllocations,
+        totalPreviousDebt: fifoResult.totalPreviousDebt,
+        totalRemainingDebt: fifoResult.totalRemainingDebt,
+        countsTowardOperatingExpense: false,
+        note:
+          params.note.trim() ||
+          `Quyết toán tổng công nợ phải trả NCC theo thứ tự ngày nợ (${fifoResult.settledAllocations.length} phiếu nhập)`,
+        staffName: currentStaff.displayName,
+        ownerId: 'demo_owner',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      setPaymentVouchers((prev) => [newPaymentVoucher, ...prev]);
+
+      recordAuditLog({
+        actionCategory: 'debt_payment',
+        targetEntity: 'debt',
+        targetCode: voucherCode,
+        warehouseName: resolvedWarehouse,
+        summary: `Chi quyết toán tổng công nợ NCC ${params.supplierName} (-${formatVND(
+          fifoResult.totalAllocated
+        )}) tự động trừ vào ${fifoResult.settledAllocations.length} phiếu nhập theo thứ tự ngày nợ`,
+        details: `Thứ tự trừ nợ theo ngày: ${allocDesc} · Tổng nợ trước trả: ${formatVND(
+          fifoResult.totalPreviousDebt
+        )} -> Còn nợ: ${formatVND(fifoResult.totalRemainingDebt)}`,
+        snapshotData: JSON.stringify(newPaymentVoucher),
+      });
+
+      showToast(
+        `Đã chi trả tổng nợ -${formatVND(fifoResult.totalAllocated)} (${params.supplierName}) và tự động trừ quyết toán vào ${fifoResult.settledAllocations.length} phiếu nhập theo thứ tự ngày nợ!`
+      );
+    } catch (err) {
+      showToast(
+        err instanceof Error
+          ? err.message
+          : 'Không thể quyết toán tổng công nợ Nhà cung cấp.'
+      );
+    }
+  };
+
+  // Receipt Voucher CRUD Handlers
+  const handleCreateReceiptVoucher = (payload: CreateReceiptVoucherInput) => {
+    if (payload.isDebtSettlement && (payload.customerId || payload.partnerName)) {
+      handleSettleCustomerTotalDebtFifo({
+        customerId: payload.customerId,
+        customerName: payload.partnerName,
+        customerPhone: payload.partnerPhone,
+        totalAmount: payload.amount,
+        groupName: payload.groupName,
+        paymentMethod: payload.paymentMethod,
+        note: payload.note,
+        warehouseName: payload.warehouseName,
+      });
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const resolvedWh =
+      lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const created: CashReceiptVoucher = {
+      id: `rv_${Date.now()}`,
+      voucherCode: `PT-2611-00${receiptVouchers.length + 1}`,
+      groupName: payload.groupName || 'Thu khác',
+      warehouseName: resolvedWh,
+      partnerId: payload.customerId,
+      partnerName: payload.partnerName,
+      partnerPhone: payload.partnerPhone,
+      amount: payload.amount,
+      paymentMethod: payload.paymentMethod || 'Chuyển khoản ngân hàng',
+      isDebtSettlement: false,
+      settledAllocations: [],
+      countsTowardOtherIncome: payload.countsTowardOtherIncome !== false,
+      note: payload.note || `Phiếu thu nhóm ${payload.groupName}`,
+      staffName: currentStaff.displayName,
+      ownerId: 'demo_owner',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setReceiptVouchers((prev) => [created, ...prev]);
+    recordAuditLog({
+      actionCategory: 'create',
+      targetEntity: 'voucher',
+      targetCode: created.voucherCode,
+      warehouseName: resolvedWh,
+      summary: `Lập phiếu thu tiền ${created.voucherCode} (${created.groupName}) — +${formatVND(
+        created.amount
+      )}`,
+      details: `Người nộp: ${created.partnerName} (${created.partnerPhone || 'Không SĐT'}) · Diễn giải: ${
+        created.note
+      }`,
+      snapshotData: JSON.stringify(created),
+    });
+    showToast(
+      `Đã lưu phiếu thu tiền ${created.voucherCode} (+${formatVND(created.amount)}) vào Nhật ký Phiếu thu & Báo cáo tài chính!`
+    );
+  };
+
+  const handleUpdateReceiptVoucher = (
+    id: string,
+    changes: {
+      voucherCode: string;
+      groupName: string;
+      warehouseName: string;
+      partnerName: string;
+      partnerPhone: string;
+      amount: number;
+      paymentMethod: string;
+      note: string;
+    }
+  ) => {
+    if (!canPerformRoleAction(role, 'edit_record')) {
+      showToast('Chỉ Quản lý mới có quyền sửa phiếu thu tiền đã lưu.');
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    setReceiptVouchers((prev) =>
+      prev.map((rv) => (rv.id === id ? { ...rv, ...changes, updatedAt: nowIso } : rv))
+    );
+    showToast(`Đã cập nhật phiếu thu tiền ${changes.voucherCode}.`);
+  };
+
+  const handleDeleteReceiptVoucher = (id: string) => {
+    if (!canPerformRoleAction(role, 'delete_record')) return;
+    const target = receiptVouchers.find((rv) => rv.id === id);
+    setReceiptVouchers((prev) => prev.filter((rv) => rv.id !== id));
+    if (target) {
+      recordAuditLog({
+        actionCategory: 'delete',
+        targetEntity: 'voucher',
+        targetCode: target.voucherCode,
+        warehouseName: target.warehouseName,
+        summary: `Xóa phiếu thu tiền ${target.voucherCode} (+${formatVND(target.amount)})`,
+        details: `Nhóm phiếu thu: ${target.groupName} · Đối tác: ${target.partnerName}`,
+        snapshotData: JSON.stringify(target),
+      });
+    }
+    showToast('Đã xóa phiếu thu tiền khỏi nhật ký.');
+  };
+
+  // Payment Voucher CRUD Handlers
+  const handleCreatePaymentVoucher = (payload: CreatePaymentVoucherInput) => {
+    if (payload.isDebtSettlement && payload.partnerName) {
+      handleSettleSupplierTotalDebtFifo({
+        supplierName: payload.partnerName,
+        supplierPhone: payload.partnerPhone,
+        totalAmount: payload.amount,
+        groupName: payload.groupName,
+        paymentMethod: payload.paymentMethod,
+        note: payload.note,
+        warehouseName: payload.warehouseName,
+      });
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const resolvedWh =
+      lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const created: CashPaymentVoucher = {
+      id: `pv_${Date.now()}`,
+      voucherCode: `PC-2611-00${paymentVouchers.length + 1}`,
+      groupName: payload.groupName || 'Chi phí vận hành khác',
+      warehouseName: resolvedWh,
+      partnerName: payload.partnerName,
+      partnerPhone: payload.partnerPhone,
+      amount: payload.amount,
+      paymentMethod: payload.paymentMethod || 'Chuyển khoản ngân hàng',
+      isDebtSettlement: false,
+      settledAllocations: [],
+      countsTowardOperatingExpense: payload.countsTowardOperatingExpense !== false,
+      note: payload.note || `Phiếu chi nhóm ${payload.groupName}`,
+      staffName: currentStaff.displayName,
+      ownerId: 'demo_owner',
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setPaymentVouchers((prev) => [created, ...prev]);
+    recordAuditLog({
+      actionCategory: 'create',
+      targetEntity: 'voucher',
+      targetCode: created.voucherCode,
+      warehouseName: resolvedWh,
+      summary: `Lập phiếu chi tiền ${created.voucherCode} (${created.groupName}) — -${formatVND(
+        created.amount
+      )}`,
+      details: `Người nhận: ${created.partnerName} (${created.partnerPhone || 'Không SĐT'}) · Diễn giải: ${
+        created.note
+      }`,
+      snapshotData: JSON.stringify(created),
+    });
+    showToast(
+      `Đã lưu phiếu chi tiền ${created.voucherCode} (-${formatVND(created.amount)}) vào Nhật ký Phiếu chi & Báo cáo tài chính!`
+    );
+  };
+
+  const handleUpdatePaymentVoucher = (
+    id: string,
+    changes: {
+      voucherCode: string;
+      groupName: string;
+      warehouseName: string;
+      partnerName: string;
+      partnerPhone: string;
+      amount: number;
+      paymentMethod: string;
+      note: string;
+    }
+  ) => {
+    if (!canPerformRoleAction(role, 'edit_record')) {
+      showToast('Chỉ Quản lý mới có quyền sửa phiếu chi tiền đã lưu.');
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    setPaymentVouchers((prev) =>
+      prev.map((pv) => (pv.id === id ? { ...pv, ...changes, updatedAt: nowIso } : pv))
+    );
+    showToast(`Đã cập nhật phiếu chi tiền ${changes.voucherCode}.`);
+  };
+
+  const handleDeletePaymentVoucher = (id: string) => {
+    if (!canPerformRoleAction(role, 'delete_record')) return;
+    const target = paymentVouchers.find((pv) => pv.id === id);
+    setPaymentVouchers((prev) => prev.filter((pv) => pv.id !== id));
+    if (target) {
+      recordAuditLog({
+        actionCategory: 'delete',
+        targetEntity: 'voucher',
+        targetCode: target.voucherCode,
+        warehouseName: target.warehouseName,
+        summary: `Xóa phiếu chi tiền ${target.voucherCode} (-${formatVND(target.amount)})`,
+        details: `Nhóm phiếu chi: ${target.groupName} · Đối tác: ${target.partnerName}`,
+        snapshotData: JSON.stringify(target),
+      });
+    }
+    showToast('Đã xóa phiếu chi tiền khỏi nhật ký.');
   };
 
   // Excel Direct Import Handlers across all 5 modules
@@ -1807,11 +2355,15 @@ export default function App() {
       warehouses,
       customerGroups,
       productCategories,
+      receiptGroups,
+      paymentGroups,
       products,
       customers,
       suppliers,
       sales,
       imports,
+      receiptVouchers,
+      paymentVouchers,
       savedVouchers,
       staffList,
       auditLogs,
@@ -1956,6 +2508,18 @@ export default function App() {
     if (Array.isArray(payload.imports)) {
       setImports(payload.imports);
     }
+    if (Array.isArray(payload.receiptGroups) && payload.receiptGroups.length > 0) {
+      setReceiptGroups(payload.receiptGroups);
+    }
+    if (Array.isArray(payload.paymentGroups) && payload.paymentGroups.length > 0) {
+      setPaymentGroups(payload.paymentGroups);
+    }
+    if (Array.isArray(payload.receiptVouchers)) {
+      setReceiptVouchers(payload.receiptVouchers);
+    }
+    if (Array.isArray(payload.paymentVouchers)) {
+      setPaymentVouchers(payload.paymentVouchers);
+    }
     if (Array.isArray(payload.savedVouchers) && payload.savedVouchers.length > 0) {
       setSavedVouchers(payload.savedVouchers);
     }
@@ -2054,6 +2618,132 @@ export default function App() {
     }
   };
 
+  const handleExecuteFiscalYearCloseAndCleanup = (
+    fiscalYear: number,
+    autoDownloadBackup: boolean
+  ) => {
+    if (!canViewAuditHistory(currentStaff)) {
+      showToast(
+        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền chốt sổ năm báo cáo tài chính và xóa dữ liệu cũ.`
+      );
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const backupFileName = `VTNN_TamAn_ChotSoNam_${fiscalYear}_BeforeCleanup_${nowIso.slice(0, 10)}.json`;
+    const preCleanupPayload = buildCurrentBackupPayload(backupFileName);
+
+    const backupEntry: BackupEntry = {
+      id: `bk_fiscal_${fiscalYear}_${Date.now()}`,
+      fileName: backupFileName,
+      driveFileId: `local_fiscal_${fiscalYear}_${Date.now()}`,
+      targetEmail: ADMIN_BACKUP_EMAIL,
+      triggerType: 'manual',
+      recordCount: preCleanupPayload.recordCount,
+      auditLogCount: auditLogs.length,
+      ownerId: 'demo_owner',
+      createdAt: nowIso.slice(0, 16).replace('T', ' '),
+      status: 'completed',
+      snapshotPayload: preCleanupPayload,
+    };
+    setBackups((prev) => [backupEntry, ...prev]);
+
+    if (autoDownloadBackup) {
+      handleDownloadBackupFile(backupEntry);
+    }
+
+    const result = executeFiscalYearCloseAndCleanup({
+      fiscalYear,
+      products,
+      customers,
+      suppliers,
+      sales,
+      imports,
+      receiptVouchers,
+      paymentVouchers,
+      savedVouchers,
+      nowIso,
+    });
+
+    setProducts(result.remainingProducts);
+    setCustomers(result.updatedCustomers);
+    setSuppliers(result.updatedSuppliers);
+    setSales(result.remainingSales);
+    setImports(result.remainingImports);
+    setReceiptVouchers(result.remainingReceiptVouchers);
+    setPaymentVouchers(result.remainingPaymentVouchers);
+    setSavedVouchers(result.remainingSavedVouchers);
+
+    recordAuditLog({
+      actionCategory: 'delete',
+      targetEntity: 'backup',
+      targetCode: `ChotSo_Nam_${fiscalYear}_Sang_${result.preview.newFiscalYear}`,
+      warehouseName: 'Tất cả kho',
+      summary: `Chốt sổ năm báo cáo tài chính ${fiscalYear}: Đã xóa ${result.preview.totalRecordsToDelete} chứng từ cũ đã tất toán & chuyển tồn lưu sang năm tài chính mới ${result.preview.newFiscalYear}`,
+      details: `Đã xóa: ${result.preview.settledSalesToDelete.length} HĐ bán đã hết nợ, ${result.preview.settledImportsToDelete.length} phiếu nhập đã hết nợ NCC, ${result.preview.receiptVouchersToDelete.length} phiếu thu, ${result.preview.paymentVouchersToDelete.length} phiếu chi, ${result.preview.savedVouchersToDelete.length} chứng từ in. Đã chuyển tồn lưu qua năm ${result.preview.newFiscalYear}: ${result.preview.carriedInventoryCount} vật tư tồn kho (${formatVND(result.preview.carriedInventoryTotalValue)}), nợ KH còn lại ${formatVND(result.preview.carriedCustomerDebtTotal)} (${result.preview.carriedCustomerDebtCount} HĐ), nợ NCC còn lại ${formatVND(result.preview.carriedSupplierDebtTotal)} (${result.preview.carriedSupplierDebtCount} phiếu).`,
+    });
+
+    showToast(
+      `Đã chốt sổ năm ${fiscalYear}: Xóa ${result.preview.totalRecordsToDelete} chứng từ cũ đã tất toán và đưa toàn bộ Tồn kho + Công nợ còn lại sang năm tài chính mới ${result.preview.newFiscalYear}!`
+    );
+  };
+
+  const handleExecuteFullApplicationDataWipe = (autoDownloadBackup: boolean) => {
+    if (!canViewAuditHistory(currentStaff)) {
+      showToast(
+        `Chỉ tài khoản Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền xóa toàn bộ dữ liệu ứng dụng.`
+      );
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const backupFileName = `VTNN_TamAn_FullBackup_BeforeWipe_${nowIso.slice(0, 10)}.json`;
+    const preWipePayload = buildCurrentBackupPayload(backupFileName);
+
+    const backupEntry: BackupEntry = {
+      id: `bk_fullwipe_${Date.now()}`,
+      fileName: backupFileName,
+      driveFileId: `local_fullwipe_${Date.now()}`,
+      targetEmail: ADMIN_BACKUP_EMAIL,
+      triggerType: 'manual',
+      recordCount: preWipePayload.recordCount,
+      auditLogCount: auditLogs.length,
+      ownerId: 'demo_owner',
+      createdAt: nowIso.slice(0, 16).replace('T', ' '),
+      status: 'completed',
+      snapshotPayload: preWipePayload,
+    };
+    setBackups((prev) => [backupEntry, ...prev]);
+
+    if (autoDownloadBackup) {
+      handleDownloadBackupFile(backupEntry);
+    }
+
+    const wiped = executeFullApplicationDataWipe({ staffList });
+    setProducts(wiped.products);
+    setCustomers(wiped.customers);
+    setSuppliers(wiped.suppliers);
+    setSales(wiped.sales);
+    setImports(wiped.imports);
+    setReceiptVouchers(wiped.receiptVouchers);
+    setPaymentVouchers(wiped.paymentVouchers);
+    setSavedVouchers(wiped.savedVouchers);
+    setStaffList(wiped.preservedStaffList);
+
+    recordAuditLog({
+      actionCategory: 'delete',
+      targetEntity: 'backup',
+      targetCode: 'XOA_TOAN_BO_DU_LIEU',
+      warehouseName: 'Tất cả kho',
+      summary: `Quản lý chính (${ADMIN_BACKUP_EMAIL}) đã xóa làm sạch toàn bộ dữ liệu ứng dụng (Đã lưu bản sao lưu ${backupFileName} trước khi xóa)`,
+      details: `Đã xóa toàn bộ dữ liệu vật tư, khách hàng, nhà cung cấp, hóa đơn xuất/nhập và phiếu thu/chi. Có thể khôi phục nguyên trạng từ tệp ${backupFileName}.`,
+    });
+
+    showToast(
+      `Đã xóa làm sạch toàn bộ dữ liệu ứng dụng! Bản sao lưu trước khi xóa (${backupFileName}) đã được lưu trong danh sách Sao lưu.`
+    );
+  };
+
   const handleGoogleLogin = async (requestedRole: UserRole) => {
     // Immediately switch active session to the Primary Manager account (trannhat1205@gmail.com)
     if (requestedRole === 'manager') {
@@ -2119,6 +2809,16 @@ export default function App() {
     { id: 'inventory', label: 'Quản lý Tồn kho', icon: <Boxes className="w-4 h-4" /> },
     { id: 'customers', label: 'Quản lý Khách hàng', icon: <Users className="w-4 h-4" /> },
     { id: 'debts', label: 'Quản lý Công nợ', icon: <Wallet className="w-4 h-4" /> },
+    {
+      id: 'receipt_vouchers',
+      label: 'Nhật ký Phiếu thu',
+      icon: <ArrowDownCircle className="w-4 h-4" />,
+    },
+    {
+      id: 'payment_vouchers',
+      label: 'Nhật ký Phiếu chi',
+      icon: <ArrowUpCircle className="w-4 h-4" />,
+    },
     { id: 'vouchers', label: 'Phiếu In & Xuất PDF', icon: <Printer className="w-4 h-4" /> },
     {
       id: 'staff_accounts',
@@ -2206,7 +2906,7 @@ export default function App() {
               <div className="flex items-center gap-1 text-emerald-800 font-semibold min-w-0">
                 <Warehouse className="w-3.5 h-3.5 shrink-0" />
                 <span className="truncate">
-                  Kho: {lockedWarehouse || 'Tất cả kho (' + warehouses.length + ')'}
+                  Kho: {activeWarehouseLabel}
                 </span>
               </div>
               {isSessionLoggedIn && (
@@ -2353,6 +3053,20 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+              {/* Desktop Multi-Warehouse Selector for Primary Manager & Deputy General Manager */}
+              <div className="hidden md:block">
+                <MultiWarehouseFilterPopover
+                  triggerId="desktop-multi-warehouse-filter"
+                  allWarehouses={warehouses}
+                  selectedWarehouses={selectedFilterWarehouses}
+                  onChangeSelectedWarehouses={(next) => {
+                    setSelectedFilterWarehouses(next);
+                  }}
+                  canFilterMultiWarehouses={canFilterMultiWarehouses}
+                  lockedWarehouseLabel={activeWarehouseLabel}
+                />
+              </div>
+
               {/* Staff / Warehouse Quick Switcher — ONLY for Primary Manager */}
               {canAccountCreateStaff(currentStaff) && (
                 <select
@@ -2423,13 +3137,20 @@ export default function App() {
             </div>
           </div>
 
-          {/* Mobile Sub-Bar showing current screen & warehouse clearly */}
+          {/* Mobile Sub-Bar showing current screen & interactive multi-warehouse filter clearly */}
           <div className="md:hidden px-3 py-1.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between gap-2 text-[11px]">
             <span className="font-semibold text-slate-800 truncate">{activeNavLabel}</span>
-            <span className="text-emerald-800 font-semibold whitespace-nowrap shrink-0 flex items-center gap-1">
-              <Warehouse className="w-3 h-3 shrink-0" />
-              <span>{lockedWarehouse || `Tất cả kho (${warehouses.length})`}</span>
-            </span>
+            <MultiWarehouseFilterPopover
+              triggerId="mobile-multi-warehouse-filter"
+              allWarehouses={warehouses}
+              selectedWarehouses={selectedFilterWarehouses}
+              onChangeSelectedWarehouses={(next) => {
+                setSelectedFilterWarehouses(next);
+              }}
+              canFilterMultiWarehouses={canFilterMultiWarehouses}
+              lockedWarehouseLabel={activeWarehouseLabel}
+              compact
+            />
           </div>
 
           {/* Mobile Navigation Drawer — Kept inside sticky header so it opens at top even when scrolled down */}
@@ -2614,11 +3335,8 @@ export default function App() {
                   <div className="px-4 sm:px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <h2 className="text-sm font-bold text-slate-900">
-                        Nhắc Hẹn Công Nợ Nhà Cung Cấp Đến Hạn (Bấm để mở chứng từ)
+                        Nhắc Hẹn Công Nợ Nhà Cung Cấp Đến Hạn
                       </h2>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        Bấm trực tiếp vào từng thông báo nhắc nợ để mở ngay phiếu nhập chứng từ đó
-                      </p>
                     </div>
                     <button
                       type="button"
@@ -2691,11 +3409,8 @@ export default function App() {
                   <div className="px-4 sm:px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
                     <div className="min-w-0">
                       <h2 className="text-sm font-bold text-slate-900">
-                        Cảnh Báo Hàng Sắp Hết Trong Kho (Bấm để mở vật tư)
+                        Cảnh Báo Hàng Sắp Hết Trong Kho
                       </h2>
-                      <p className="text-xs text-slate-500 mt-0.5">
-                        Các mặt hàng có số lượng tồn kho thấp hơn hoặc bằng định mức tối thiểu
-                      </p>
                     </div>
                     <button
                       type="button"
@@ -2907,6 +3622,7 @@ export default function App() {
               onDeleteCustomer={handleDeleteCustomer}
               onImportCustomersFromExcel={handleImportCustomersFromExcel}
               onCollectCustomerDebt={handleCollectCustomerDebt}
+              onSettleCustomerTotalDebtFifo={handleSettleCustomerTotalDebtFifo}
               onCreateSaleForCustomer={(custId) => {
                 setPreselectedCustomerId(custId);
                 setActiveTab('sales');
@@ -2930,11 +3646,62 @@ export default function App() {
               onClearFocusedRecord={() => setFocusedDebtRecordId(null)}
               onCollectCustomerDebt={handleCollectCustomerDebt}
               onPaySupplierDebt={handlePaySupplierDebt}
+              receiptGroups={receiptGroups}
+              paymentGroups={paymentGroups}
+              onSettleCustomerTotalDebtFifo={handleSettleCustomerTotalDebtFifo}
+              onSettleSupplierTotalDebtFifo={handleSettleSupplierTotalDebtFifo}
               onImportDebtPaymentsFromExcel={handleImportDebtPaymentsFromExcel}
               onUpdateSale={handleUpdateSale}
               onDeleteSale={handleDeleteSale}
               onUpdateImport={handleUpdateImport}
               onDeleteImport={handleDeleteImport}
+            />
+          )}
+
+          {isSessionLoggedIn && activeTab === 'receipt_vouchers' && (
+            <ReceiptVoucherLogView
+              receiptVouchers={visibleReceiptVouchers}
+              receiptGroups={receiptGroups}
+              onAddReceiptGroup={handleAddReceiptGroup}
+              customers={customers}
+              customerGroups={customerGroups}
+              onAddCustomerGroup={handleAddCustomerGroup}
+              onAddCustomer={(input) =>
+                handleSaveCustomer({
+                  ...input,
+                  code: `KH-00${customers.length + 1}`,
+                  totalPurchased: 0,
+                  totalDebt: 0,
+                })
+              }
+              sales={visibleSales}
+              warehouses={warehouses}
+              selectedWarehouse={lockedWarehouse}
+              onAddWarehouse={handleAddWarehouse}
+              role={role}
+              canEditDelete={accessScope.canEditDeleteVouchers}
+              onCreateReceiptVoucher={handleCreateReceiptVoucher}
+              onUpdateReceiptVoucher={handleUpdateReceiptVoucher}
+              onDeleteReceiptVoucher={handleDeleteReceiptVoucher}
+            />
+          )}
+
+          {isSessionLoggedIn && activeTab === 'payment_vouchers' && (
+            <PaymentVoucherLogView
+              paymentVouchers={visiblePaymentVouchers}
+              paymentGroups={paymentGroups}
+              onAddPaymentGroup={handleAddPaymentGroup}
+              suppliers={suppliers}
+              onAddSupplier={handleCreateSupplierInline}
+              imports={visibleImports}
+              warehouses={warehouses}
+              selectedWarehouse={lockedWarehouse}
+              onAddWarehouse={handleAddWarehouse}
+              role={role}
+              canEditDelete={accessScope.canEditDeleteVouchers}
+              onCreatePaymentVoucher={handleCreatePaymentVoucher}
+              onUpdatePaymentVoucher={handleUpdatePaymentVoucher}
+              onDeletePaymentVoucher={handleDeletePaymentVoucher}
             />
           )}
 
@@ -2981,10 +3748,13 @@ export default function App() {
           {isSessionLoggedIn && (activeTab === 'reports' || activeTab === 'backup_history') && (
             <ReportsAndBackupModule
               mode={activeTab === 'backup_history' ? 'backup_history' : 'reports'}
+              activeWarehouseLabel={detailedWarehouseLabel}
               products={visibleProducts}
               customers={customers}
               sales={visibleSales}
               imports={visibleImports}
+              receiptVouchers={visibleReceiptVouchers}
+              paymentVouchers={visiblePaymentVouchers}
               savedVouchers={savedVouchers}
               backups={backups}
               staffList={staffList}
@@ -3003,6 +3773,9 @@ export default function App() {
               onGoogleLogin={handleGoogleLogin}
               onSwitchRolePreview={setRole}
               onCollectCustomerDebt={handleCollectCustomerDebt}
+              onSettleCustomerTotalDebtFifo={handleSettleCustomerTotalDebtFifo}
+              onExecuteFiscalYearCloseAndCleanup={handleExecuteFiscalYearCloseAndCleanup}
+              onExecuteFullApplicationDataWipe={handleExecuteFullApplicationDataWipe}
               onNavigateToModule={(tab, recordId) => {
                 if (tab === 'debts' && recordId) {
                   setFocusedDebtRecordId(recordId);

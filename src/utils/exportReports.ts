@@ -14,6 +14,7 @@ import {
   formatVND,
   ReceivedItemReportRow,
   SmartReportRecommendation,
+  TaxAuthorityFinancialStatementResult,
 } from './businessLogic';
 
 const FONT_FAMILY = '"Plus Jakarta Sans", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
@@ -327,6 +328,10 @@ export function exportSaleInvoicePDF(sale: {
   unit: string;
   quantity: number;
   unitPrice: number;
+  discountAmount?: number;
+  giftProductName?: string;
+  giftUnit?: string;
+  giftQuantity?: number;
   totalAmount: number;
   paidAmount: number;
   debtAmount: number;
@@ -379,29 +384,47 @@ export function exportSaleInvoicePDF(sale: {
         { header: 'Thành Tiền (VNĐ)', width: 110, align: 'right' },
       ];
 
-      const tableEndY = drawCanvasTable(
-        ctx,
-        marginX,
-        y,
-        columns,
+      const grossAmount = sale.quantity * sale.unitPrice;
+      const rows: string[][] = [
         [
-          [
-            '1',
-            sale.productName,
-            sale.unit,
-            String(sale.quantity),
-            sale.unitPrice.toLocaleString('vi-VN'),
-            sale.totalAmount.toLocaleString('vi-VN'),
-          ],
+          '1',
+          sale.productName,
+          sale.unit,
+          String(sale.quantity),
+          sale.unitPrice.toLocaleString('vi-VN'),
+          grossAmount.toLocaleString('vi-VN'),
         ],
-        '#15803D'
-      );
+      ];
 
-      const summaryY = tableEndY + 32;
+      if (sale.giftProductName && (sale.giftQuantity || 0) > 0) {
+        rows.push([
+          '2',
+          `[QUÀ TẶNG KM] ${sale.giftProductName}`,
+          sale.giftUnit || 'CÁI',
+          String(sale.giftQuantity),
+          '0',
+          '0 (Tặng KM)',
+        ]);
+      }
+
+      const tableEndY = drawCanvasTable(ctx, marginX, y, columns, rows, '#15803D');
+
+      let summaryY = tableEndY + 32;
       const rightEdge = pageWidth - marginX;
 
       ctx.textAlign = 'right';
       ctx.font = `700 14.5px ${FONT_FAMILY}`;
+
+      if ((sale.discountAmount || 0) > 0) {
+        ctx.fillStyle = '#B45309';
+        ctx.fillText(
+          `Giảm giá bán khuyến mãi: -${formatCurrencyPlain(sale.discountAmount || 0)}`,
+          rightEdge,
+          summaryY
+        );
+        summaryY += 24;
+      }
+
       ctx.fillStyle = '#0F172A';
       ctx.fillText(`Tổng thành tiền: ${formatCurrencyPlain(sale.totalAmount)}`, rightEdge, summaryY);
 
@@ -1927,4 +1950,449 @@ export function exportComprehensiveDateRangeReportPDF(params: {
     }
   );
 }
+
+// 9. In Báo Cáo Tài Chính Năm theo chuẩn Biểu mẫu Cơ Quan Thuế (Mẫu B02-DN / B01-DN / B03-DN) — PDF A4
+export function exportTaxAuthorityFinancialReportPDF(params: {
+  statement: TaxAuthorityFinancialStatementResult;
+  staffName: string;
+  warehouseLabel: string;
+}): string {
+  const { statement, staffName, warehouseLabel } = params;
+  const today = new Date().toISOString().slice(0, 10);
+  const periodLabel = `Năm tài chính ${statement.fiscalYear} (Từ ${statement.fromDate || `${statement.fiscalYear}-01-01`} đến ${statement.toDate || `${statement.fiscalYear}-12-31`})`;
+  const fileName = `BaoCao_TaiChinh_Thue_Nam_${statement.fiscalYear}_VTNN_TamAn.pdf`;
+
+  return saveCanvasAsA4PDF(
+    'portrait',
+    fileName,
+    `BÁO CÁO TÀI CHÍNH NĂM ${statement.fiscalYear} (MẪU CƠ QUAN THUẾ)`,
+    (ctx, pageWidth) => {
+      const marginX = 36;
+      const contentWidth = pageWidth - marginX * 2; // 722px
+
+      // Top Header: Left (Reporting Unit) & Right (National Motto + Tax Form Code)
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#15803D';
+      ctx.font = `800 13.5px ${FONT_FAMILY}`;
+      ctx.fillText('ĐƠN VỊ: CỬA HÀNG VẬT TƯ NÔNG NGHIỆP TÂM AN', marginX, 34);
+
+      ctx.fillStyle = '#334155';
+      ctx.font = `600 11px ${FONT_FAMILY}`;
+      ctx.fillText(`Phạm vi kho: ${warehouseLabel}`, marginX, 51);
+      ctx.fillText('Lĩnh vực: Phân phối Phân bón, Thuốc BVTV & Giống cây trồng', marginX, 66);
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `800 12px ${FONT_FAMILY}`;
+      ctx.fillText('CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM', pageWidth - marginX, 34);
+      ctx.font = `700 11.5px ${FONT_FAMILY}`;
+      ctx.fillText('Độc lập - Tự do - Hạnh phúc', pageWidth - marginX, 50);
+      ctx.fillStyle = '#475569';
+      ctx.font = `600 10.5px ${FONT_FAMILY}`;
+      ctx.fillText(
+        'Mẫu số: B02-DN / B01-DN (Biểu mẫu Báo cáo Tài chính Thuế)',
+        pageWidth - marginX,
+        66
+      );
+
+      // Divider
+      ctx.strokeStyle = '#CBD5E1';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(marginX, 78);
+      ctx.lineTo(pageWidth - marginX, 78);
+      ctx.stroke();
+
+      // Main Title
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `800 17.5px ${FONT_FAMILY}`;
+      ctx.fillText(
+        `BÁO CÁO TÀI CHÍNH & KẾT QUẢ HOẠT ĐỘNG KINH DOANH NĂM ${statement.fiscalYear}`,
+        pageWidth / 2,
+        102
+      );
+      ctx.fillStyle = '#334155';
+      ctx.font = `600 11.5px ${FONT_FAMILY}`;
+      ctx.fillText(
+        `Kỳ báo cáo: Từ ngày ${statement.fromDate || `${statement.fiscalYear}-01-01`} đến ngày ${
+          statement.toDate || `${statement.fiscalYear}-12-31`
+        }  |  Đơn vị tính: Đồng Việt Nam (VNĐ)`,
+        pageWidth / 2,
+        120
+      );
+
+      // Compact Table Helper with multi-line text wrapping for full 16-row fit on A4 Portrait without any column overlap
+      const drawCompactTaxTable = (
+        startY: number,
+        headerBg: string,
+        columns: { header: string; width: number; align: 'left' | 'center' | 'right' }[],
+        rows: { cells: string[]; highlight?: boolean }[]
+      ): number => {
+        const padX = 7;
+        const padY = 5;
+        const lineH = 13.5;
+        const headerH = 26;
+        ctx.fillStyle = headerBg;
+        ctx.fillRect(marginX, startY, contentWidth, headerH);
+
+        let colX = marginX;
+        columns.forEach((col) => {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.font = `700 10.5px ${FONT_FAMILY}`;
+          const textY = startY + 17;
+          if (col.align === 'right') {
+            ctx.textAlign = 'right';
+            ctx.fillText(col.header, colX + col.width - padX, textY);
+          } else if (col.align === 'center') {
+            ctx.textAlign = 'center';
+            ctx.fillText(col.header, colX + col.width / 2, textY);
+          } else {
+            ctx.textAlign = 'left';
+            ctx.fillText(col.header, colX + padX, textY);
+          }
+          colX += col.width;
+        });
+
+        let curY = startY + headerH;
+        rows.forEach((r, idx) => {
+          ctx.font = `${r.highlight ? '700' : '500'} 10.5px ${FONT_FAMILY}`;
+          let maxRowLines = 1;
+          const wrappedRowCells = columns.map((col, cIdx) => {
+            const rawText = r.cells[cIdx] ?? '';
+            const lines = wrapCanvasText(ctx, rawText, Math.max(20, col.width - padX * 2));
+            if (lines.length > maxRowLines) maxRowLines = lines.length;
+            return lines;
+          });
+
+          const rowH = Math.max(24, maxRowLines * lineH + padY * 2 + 1);
+          ctx.fillStyle = r.highlight
+            ? '#ECFDF5'
+            : idx % 2 === 1
+            ? '#F8FAFC'
+            : '#FFFFFF';
+          ctx.fillRect(marginX, curY, contentWidth, rowH);
+
+          let cX = marginX;
+          columns.forEach((col, cIdx) => {
+            ctx.strokeStyle = '#CBD5E1';
+            ctx.lineWidth = 0.8;
+            ctx.strokeRect(cX, curY, col.width, rowH);
+
+            ctx.fillStyle = r.highlight ? '#065F46' : '#0F172A';
+            ctx.font = `${r.highlight ? '700' : '500'} 10.5px ${FONT_FAMILY}`;
+            const cellLines = wrappedRowCells[cIdx];
+            const blockHeight = (cellLines.length - 1) * lineH;
+            const firstLineY = curY + rowH / 2 - blockHeight / 2 + 3.5;
+
+            cellLines.forEach((lineStr, lIdx) => {
+              const textY = firstLineY + lIdx * lineH;
+              if (col.align === 'right') {
+                ctx.textAlign = 'right';
+                ctx.fillText(lineStr, cX + col.width - padX, textY);
+              } else if (col.align === 'center') {
+                ctx.textAlign = 'center';
+                ctx.fillText(lineStr, cX + col.width / 2, textY);
+              } else {
+                ctx.textAlign = 'left';
+                ctx.fillText(lineStr, cX + padX, textY);
+              }
+            });
+            cX += col.width;
+          });
+          curY += rowH;
+        });
+
+        ctx.textAlign = 'left';
+        return curY;
+      };
+
+      // Section I: BÁO CÁO KẾT QUẢ HOẠT ĐỘNG KINH DOANH (MẪU B02-DN)
+      let y = 138;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `800 12px ${FONT_FAMILY}`;
+      ctx.fillText(
+        'PHẦN I. BÁO CÁO KẾT QUẢ HOẠT ĐỘNG KINH DOANH NĂM (MẪU B02-DN / KÊ KHAI THUẾ)',
+        marginX,
+        y
+      );
+      y += 7;
+
+      const cols: { header: string; width: number; align: 'left' | 'center' | 'right' }[] = [
+        { header: 'Mã số', width: 44, align: 'center' },
+        { header: 'Chỉ tiêu Báo cáo Tài chính', width: 350, align: 'left' },
+        { header: 'T.Minh', width: 52, align: 'center' },
+        { header: 'Căn cứ chứng từ', width: 108, align: 'center' },
+        { header: 'Số tiền (VNĐ)', width: 116, align: 'right' },
+        { header: 'Tỷ lệ', width: 52, align: 'right' },
+      ];
+
+      y = drawCompactTaxTable(
+        y,
+        '#15803D',
+        cols,
+        statement.incomeStatementLines.map((line) => ({
+          highlight: line.isHighlightRow,
+          cells: [
+            line.code,
+            line.title,
+            line.noteCode,
+            line.recordCountLabel,
+            Math.round(line.amount).toLocaleString('vi-VN'),
+            `${line.ratioToNetRevenuePct}%`,
+          ],
+        }))
+      );
+
+      // Section II: BẢNG CÂN ĐỐI TÀI SẢN, TỒN KHO, CÔNG NỢ & DÒNG TIỀN (MẪU B01-DN & B03-DN)
+      y += 18;
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `800 12px ${FONT_FAMILY}`;
+      ctx.fillText(
+        'PHẦN II. BẢNG CÂN ĐỐI TÀI SẢN, HÀNG TỒN KHO, CÔNG NỢ & DÒNG TIỀN CUỐI KỲ (MẪU B01-DN / B03-DN)',
+        marginX,
+        y
+      );
+      y += 7;
+
+      y = drawCompactTaxTable(
+        y,
+        '#0F172A',
+        cols,
+        statement.balanceAndCashflowLines.map((line) => ({
+          highlight: line.isHighlightRow,
+          cells: [
+            line.code,
+            line.title,
+            line.noteCode,
+            line.recordCountLabel,
+            Math.round(line.amount).toLocaleString('vi-VN'),
+            `${line.ratioToNetRevenuePct}%`,
+          ],
+        }))
+      );
+
+      // Summary Verification Note
+      y += 16;
+      ctx.fillStyle = '#334155';
+      ctx.font = `600 10.5px ${FONT_FAMILY}`;
+      const commitNotes = wrapCanvasText(
+        ctx,
+        `• Cam kết đối chiếu số liệu: Báo cáo được tổng hợp trực tiếp từ ${statement.filteredSales.length} hóa đơn bán, ${statement.filteredImports.length} phiếu nhập kho, ${statement.allFilteredReceiptVouchers.length} phiếu thu, ${statement.allFilteredPaymentVouchers.length} phiếu chi và ${statement.inventoryValuationRows.length} danh mục tồn kho.`,
+        contentWidth
+      );
+      commitNotes.forEach((line) => {
+        ctx.fillText(line, marginX, y);
+        y += 14;
+      });
+      ctx.fillText(
+        `• Kỳ báo cáo: ${periodLabel}  |  Ngày lập biểu: ${today}`,
+        marginX,
+        y
+      );
+
+      // 3-Column Official Tax Authority Signature Block
+      const sigY = Math.min(990, y + 28);
+      const col1X = pageWidth * 0.2;
+      const col2X = pageWidth * 0.5;
+      const col3X = pageWidth * 0.8;
+
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `700 12.5px ${FONT_FAMILY}`;
+      ctx.fillText('NGƯỜI LẬP BIỂU', col1X, sigY);
+      ctx.fillText('KẾ TOÁN / KIỂM SOÁT', col2X, sigY);
+      ctx.fillText('ĐẠI DIỆN ĐƠN VỊ / CHỦ HỘ KD', col3X, sigY);
+
+      ctx.fillStyle = '#64748B';
+      ctx.font = `400 11px ${FONT_FAMILY}`;
+      ctx.fillText('(Ký, ghi rõ họ tên)', col1X, sigY + 17);
+      ctx.fillText('(Ký, ghi rõ họ tên)', col2X, sigY + 17);
+      ctx.fillText('(Ký, ghi rõ họ tên và đóng dấu)', col3X, sigY + 17);
+
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `700 12.5px ${FONT_FAMILY}`;
+      ctx.fillText(staffName, col1X, sigY + 86);
+      ctx.fillText(staffName, col3X, sigY + 86);
+      ctx.textAlign = 'left';
+    }
+  );
+}
+
+// 10. Xuất Hồ Sơ Báo Cáo Tài Chính Năm theo chuẩn Cơ Quan Thuế (Excel .xlsx 5 Sheet chi tiết)
+export function exportTaxAuthorityFinancialReportExcel(params: {
+  statement: TaxAuthorityFinancialStatementResult;
+  staffName: string;
+  warehouseLabel: string;
+}): string {
+  const { statement, staffName, warehouseLabel } = params;
+  const today = new Date().toISOString().slice(0, 10);
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Báo cáo Tài chính Tổng hợp (Mẫu B02-DN & B01-DN / B03-DN)
+  const mainSheetRows: (string | number)[][] = [
+    ['CỬA HÀNG VẬT TƯ NÔNG NGHIỆP TÂM AN — CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM'],
+    [`BÁO CÁO TÀI CHÍNH & KẾT QUẢ HOẠT ĐỘNG KINH DOANH NĂM ${statement.fiscalYear} (MẪU B02-DN / B01-DN / B03-DN)`],
+    [
+      `Kỳ báo cáo: Từ ngày ${statement.fromDate || `${statement.fiscalYear}-01-01`} đến ngày ${
+        statement.toDate || `${statement.fiscalYear}-12-31`
+      } | Kho: ${warehouseLabel} | Người lập: ${staffName} | Ngày xuất: ${today}`,
+    ],
+    [],
+    ['PHẦN I. BÁO CÁO KẾT QUẢ HOẠT ĐỘNG KINH DOANH NĂM (MẪU B02-DN)'],
+    [
+      'Mã Số',
+      'Chỉ Tiêu Báo Cáo Tài Chính',
+      'Thuyết Minh',
+      'Công Thức & Phương Pháp Tính',
+      'Số Lượng Chứng Từ Gốc',
+      'Số Tiền Kỳ Báo Cáo (VNĐ)',
+      'Tỷ Trọng / Doanh Thu Thuần (%)',
+    ],
+    ...statement.incomeStatementLines.map((l) => [
+      l.code,
+      l.title,
+      l.noteCode,
+      l.formulaText,
+      l.recordCountLabel,
+      l.amount,
+      `${l.ratioToNetRevenuePct}%`,
+    ]),
+    [],
+    ['PHẦN II. BẢNG CÂN ĐỐI TÀI SẢN, HÀNG TỒN KHO, CÔNG NỢ & LƯU CHUYỂN DÒNG TIỀN (MẪU B01-DN / B03-DN)'],
+    [
+      'Mã Số',
+      'Chỉ Tiêu Tài Sản - Tồn Kho - Công Nợ - Dòng Tiền',
+      'Tài Khoản / Mẫu',
+      'Công Thức & Phương Pháp Tính',
+      'Số Lượng Chứng Từ Gốc',
+      'Số Dư Cuối Kỳ (VNĐ)',
+      'Tỷ Trọng / Doanh Thu Thuần (%)',
+    ],
+    ...statement.balanceAndCashflowLines.map((l) => [
+      l.code,
+      l.title,
+      l.noteCode,
+      l.formulaText,
+      l.recordCountLabel,
+      l.amount,
+      `${l.ratioToNetRevenuePct}%`,
+    ]),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mainSheetRows), 'BCTC_Thue_B02_B01');
+
+  // Sheet 2: Bảng kê chi tiết Doanh thu, Giảm trừ, Giá vốn & Lãi gộp từng hóa đơn (Mã 01, 02, 10, 11, 20, 131)
+  const saleAuditSheet = statement.saleCogsBreakdown.map((row, idx) => ({
+    STT: idx + 1,
+    'Ngày Hóa Đơn': (row.sale.createdAt || '').slice(0, 10),
+    'Mã Hóa Đơn': row.sale.invoiceCode,
+    'Kho Xuất Bán': row.sale.warehouseName || 'Tâm An Mỹ Ngãi',
+    'Khách Hàng': row.sale.customerName,
+    'SĐT Khách Hàng': row.sale.customerPhone,
+    'Mặt Hàng Vật Tư': row.sale.productName,
+    'Số Lượng': `${row.sale.quantity} ${row.sale.unit}`,
+    'Đơn Giá Bán (VNĐ)': row.sale.unitPrice,
+    'Doanh Thu Gộp [Mã 01] (VNĐ)': row.grossAmountBeforeDiscount,
+    'Giảm Giá KM [Mã 02] (VNĐ)': row.discountAmount,
+    'Doanh Thu Thuần [Mã 10] (VNĐ)': row.netRevenueAmount,
+    'Giá Vốn Hàng Bán [Mã 11a] (VNĐ)': row.productCogsAmount,
+    'Quà Tặng Khuyến Mãi': row.sale.giftProductName
+      ? `${row.sale.giftProductName} (${row.sale.giftQuantity || 0} ${row.sale.giftUnit || ''})`
+      : 'Không',
+    'Giá Vốn Quà KM [Mã 11b] (VNĐ)': row.giftCogsAmount,
+    'Tổng Giá Vốn [Mã 11] (VNĐ)': row.totalCogsAmount,
+    'Lợi Nhuận Gộp [Mã 20] (VNĐ)': row.grossProfitAmount,
+    'Tỷ Suất Lãi Gộp (%)': `${row.grossMarginPct}%`,
+    'Thực Thu (VNĐ)': row.sale.paidAmount,
+    'Còn Nợ KH [Mã 131] (VNĐ)': row.sale.debtAmount,
+  }));
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(saleAuditSheet),
+    'ChiTiet_DoanhThu_GiaVon'
+  );
+
+  // Sheet 3: Bảng kê chi tiết Hàng tồn kho cuối kỳ theo giá vốn (Mã 156)
+  const inventoryAuditSheet = statement.inventoryValuationRows.map((row, idx) => ({
+    STT: idx + 1,
+    'Mã Vật Tư': row.product.code,
+    'Tên Vật Tư Nông Nghiệp': row.product.name,
+    'Nhóm Hàng': row.product.category,
+    'Kho Lưu Trữ': row.product.warehouseName || 'Tâm An Mỹ Ngãi',
+    'Đơn Vị Tính': row.product.unit,
+    'Số Lượng Tồn Kho': row.stockQuantity,
+    'Đơn Giá Vốn Nhập Kho (VNĐ)': row.unitImportCost,
+    'Thành Tiền Giá Trị Tồn Kho [Mã 156] (VNĐ)': row.totalInventoryCostValue,
+    'Đơn Giá Bán Lẻ Tham Chiếu (VNĐ)': row.unitRetailPrice,
+    'Giá Trị Bán Lẻ Ước Tính (VNĐ)': row.totalEstimatedRetailValue,
+  }));
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(inventoryAuditSheet),
+    'ChiTiet_TonKho_Ma156'
+  );
+
+  // Sheet 4: Bảng kê Phiếu chi vận hành (Mã 24) & Phiếu thu nhập khác (Mã 31)
+  const voucherAuditSheet = [
+    ...statement.operatingPaymentVouchers.map((pv, idx) => ({
+      STT: idx + 1,
+      'Chỉ Tiêu BCTC': 'Mã 24 - Chi phí bán hàng & vận hành',
+      'Ngày Chứng Từ': (pv.createdAt || '').slice(0, 10),
+      'Mã Phiếu': pv.voucherCode,
+      'Nhóm Thu / Chi': pv.groupName,
+      'Đối Tác / Người Nhận': pv.partnerName,
+      'Số Điện Thoại': pv.partnerPhone,
+      'Hình Thức': pv.paymentMethod,
+      'Số Tiền (VNĐ)': pv.amount,
+      'Kho': pv.warehouseName,
+      'Ghi Chú': pv.note,
+    })),
+    ...statement.otherIncomeReceiptVouchers.map((rv, idx) => ({
+      STT: idx + 1,
+      'Chỉ Tiêu BCTC': 'Mã 31 - Thu nhập khác (Thưởng CK NCC / Hỗ trợ)',
+      'Ngày Chứng Từ': (rv.createdAt || '').slice(0, 10),
+      'Mã Phiếu': rv.voucherCode,
+      'Nhóm Thu / Chi': rv.groupName,
+      'Đối Tác / Người Nộp': rv.partnerName,
+      'Số Điện Thoại': rv.partnerPhone,
+      'Hình Thức': rv.paymentMethod,
+      'Số Tiền (VNĐ)': rv.amount,
+      'Kho': rv.warehouseName,
+      'Ghi Chú': rv.note,
+    })),
+  ];
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(voucherAuditSheet),
+    'ChiTiet_ChiPhi24_ThuKhac31'
+  );
+
+  // Sheet 5: Bảng kê Nhập kho & Công nợ phải trả Nhà cung cấp (Mã 331)
+  const supplierAuditSheet = statement.filteredImports.map((imp, idx) => ({
+    STT: idx + 1,
+    'Ngày Nhập Kho': (imp.createdAt || '').slice(0, 10),
+    'Mã Phiếu Nhập': imp.receiptCode,
+    'Kho Nhập': imp.warehouseName || 'Tâm An Mỹ Ngãi',
+    'Nhà Cung Cấp': imp.supplierName,
+    'SĐT NCC': imp.supplierPhone,
+    'Mặt Hàng Nhập': imp.productName,
+    'Số Lượng': `${imp.quantity} ${imp.unit}`,
+    'Đơn Giá Nhập (VNĐ)': imp.unitCost,
+    'Tổng Tiền Nhập (VNĐ)': imp.totalCost,
+    'Đã Thanh Toán NCC (VNĐ)': imp.paidAmount,
+    'Còn Nợ Phải Trả NCC [Mã 331] (VNĐ)': imp.debtAmount,
+    'Hạn Thanh Toán': imp.dueDate,
+  }));
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(supplierAuditSheet),
+    'ChiTiet_NhapKho_NoNCC331'
+  );
+
+  const fileName = `BaoCao_TaiChinh_Thue_Nam_${statement.fiscalYear}_VTNN_TamAn.xlsx`;
+  XLSX.writeFile(wb, fileName);
+  return fileName;
+}
+
 

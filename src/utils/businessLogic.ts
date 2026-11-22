@@ -5,14 +5,18 @@ import {
   AuditTargetEntity,
   BackupEntry,
   BackupSnapshotPayload,
+  CashPaymentVoucher,
+  CashReceiptVoucher,
   CustomerGroup,
   CustomerProfile,
   DebtUrgencyLevel,
+  FifoDebtAllocationItem,
   ImportTransaction,
   NotificationPrefs,
   PaymentStatus,
   ProductItem,
   ReportModuleCategory,
+  SalePromotionType,
   SaleTransaction,
   SavedVoucherRecord,
   StaffFunctionalPermission,
@@ -24,6 +28,8 @@ import {
 } from '../types';
 
 export interface SaleSummaryResult {
+  grossAmount: number;
+  discountAmount: number;
   totalAmount: number;
   paidAmount: number;
   debtAmount: number;
@@ -33,11 +39,17 @@ export interface SaleSummaryResult {
 export function calculateSaleSummary(
   quantity: number,
   unitPrice: number,
-  paidAmountInput: number
+  paidAmountInput: number,
+  discountAmountInput = 0
 ): SaleSummaryResult {
   const safeQty = Math.max(0, Number(quantity) || 0);
   const safePrice = Math.max(0, Number(unitPrice) || 0);
-  const totalAmount = Math.round(safeQty * safePrice);
+  const grossAmount = Math.round(safeQty * safePrice);
+  const discountAmount = Math.min(
+    grossAmount,
+    Math.max(0, Math.round(Number(discountAmountInput) || 0))
+  );
+  const totalAmount = Math.max(0, grossAmount - discountAmount);
   const paidAmount = Math.min(totalAmount, Math.max(0, Math.round(Number(paidAmountInput) || 0)));
   const debtAmount = Math.max(0, totalAmount - paidAmount);
 
@@ -49,6 +61,8 @@ export function calculateSaleSummary(
   }
 
   return {
+    grossAmount,
+    discountAmount,
     totalAmount,
     paidAmount,
     debtAmount,
@@ -93,8 +107,14 @@ export function applySaleToInventory(
   products: ProductItem[],
   productId: string,
   quantitySold: number,
-  nowIso: string
-): { updatedProducts: ProductItem[]; updatedProduct: ProductItem } {
+  nowIso: string,
+  giftProductId?: string,
+  giftQuantity = 0
+): {
+  updatedProducts: ProductItem[];
+  updatedProduct: ProductItem;
+  updatedGiftProduct?: ProductItem;
+} {
   const target = products.find((p) => p.id === productId);
   if (!target) {
     throw new Error('Không tìm thấy sản phẩm trong kho.');
@@ -102,10 +122,48 @@ export function applySaleToInventory(
   if (quantitySold <= 0) {
     throw new Error('Số lượng bán phải lớn hơn 0.');
   }
+
+  const safeGiftQty = Math.max(0, Math.round(Number(giftQuantity) || 0));
+  const hasGift = Boolean(giftProductId && safeGiftQty > 0);
+
+  if (hasGift && giftProductId === productId) {
+    const combinedNeed = quantitySold + safeGiftQty;
+    if (target.stock < combinedNeed) {
+      throw new Error(
+        `Tồn kho không đủ để bán (${quantitySold}) + tặng kèm (${safeGiftQty})! Sản phẩm "${target.name}" chỉ còn ${target.stock} ${target.unit}.`
+      );
+    }
+    const updatedProduct: ProductItem = {
+      ...target,
+      stock: target.stock - combinedNeed,
+      updatedAt: nowIso,
+    };
+    const updatedProducts = products.map((p) => (p.id === productId ? updatedProduct : p));
+    return { updatedProducts, updatedProduct, updatedGiftProduct: updatedProduct };
+  }
+
   if (target.stock < quantitySold) {
     throw new Error(
       `Tồn kho không đủ! Sản phẩm "${target.name}" chỉ còn ${target.stock} ${target.unit}.`
     );
+  }
+
+  let updatedGiftProduct: ProductItem | undefined;
+  if (hasGift && giftProductId) {
+    const giftTarget = products.find((p) => p.id === giftProductId);
+    if (!giftTarget) {
+      throw new Error('Không tìm thấy mặt hàng quà tặng khuyến mãi trong kho.');
+    }
+    if (giftTarget.stock < safeGiftQty) {
+      throw new Error(
+        `Tồn kho quà tặng không đủ! Quà tặng "${giftTarget.name}" hiện chỉ còn ${giftTarget.stock} ${giftTarget.unit}.`
+      );
+    }
+    updatedGiftProduct = {
+      ...giftTarget,
+      stock: giftTarget.stock - safeGiftQty,
+      updatedAt: nowIso,
+    };
   }
 
   const updatedProduct: ProductItem = {
@@ -114,8 +172,12 @@ export function applySaleToInventory(
     updatedAt: nowIso,
   };
 
-  const updatedProducts = products.map((p) => (p.id === productId ? updatedProduct : p));
-  return { updatedProducts, updatedProduct };
+  const updatedProducts = products.map((p) => {
+    if (p.id === productId) return updatedProduct;
+    if (updatedGiftProduct && p.id === updatedGiftProduct.id) return updatedGiftProduct;
+    return p;
+  });
+  return { updatedProducts, updatedProduct, updatedGiftProduct };
 }
 
 export function applyImportToInventory(
@@ -533,7 +595,7 @@ export const ALL_STAFF_FUNCTIONAL_PERMISSIONS: {
   },
   {
     key: 'manage_all_warehouses',
-    label: 'Phó quản lý chung tất cả các kho (Phụ tiếp Quản lý chính)',
+    label: 'Phó quản lý chung tất cả các kho',
     description:
       'Chức năng: Phụ tiếp tài khoản Quản lý chính giám sát, điều phối vật tư, hóa đơn và công nợ trên toàn bộ các kho (Mỹ Ngãi, Cao Lãnh, Mỹ Trà...).',
   },
@@ -587,19 +649,19 @@ export const ALL_STAFF_FUNCTIONAL_PERMISSIONS: {
   },
   {
     key: 'edit_delete_vouchers',
-    label: 'Quyền Sửa / Xóa hóa đơn, chứng từ & phiếu thu đã lưu',
+    label: 'Quyền Sửa / Xóa hóa đơn, chứng từ & phiếu thu',
     description:
       'Chức năng: Được phép mở chỉnh sửa trực tiếp hoặc xóa các hóa đơn bán hàng, phiếu nhập kho, phiếu thu/chi đã lưu trong hệ thống.',
   },
   {
     key: 'export_import_excel',
-    label: 'Nhập / Xuất dữ liệu mẫu Excel (.xlsx) & Báo cáo định kỳ',
+    label: 'Nhập / Xuất dữ liệu mẫu Excel (.xlsx) & Báo cáo',
     description:
       'Chức năng: Tải tệp Excel mẫu, nhập dữ liệu hàng loạt từ Excel lên ứng dụng và xuất báo cáo tổng hợp định kỳ ra Excel/PDF.',
   },
   {
     key: 'view_assigned_reports',
-    label: 'Xem & Xuất báo cáo theo nhiệm vụ được phân công (Từ ngày... đến ngày...)',
+    label: 'Xem & Xuất báo cáo theo nhiệm vụ',
     description:
       'Chức năng: Nhân viên được xem, kiểm tra chi tiết và xuất báo cáo cấp trên (Từ ngày... đến ngày...) tương ứng đúng với mục nghiệp vụ do mình quản lý để báo cáo kịp thời cho Quản lý.',
   },
@@ -697,7 +759,7 @@ export function getPositionRoleLabel(positionRole?: StaffPositionRole): string {
     case 'primary_manager':
       return 'Quản lý chính (Toàn quyền & Cấp tài khoản)';
     case 'deputy_general_manager':
-      return 'Phó quản lý chung tất cả các kho (Phụ tiếp Quản lý chính)';
+      return 'Phó quản lý chung tất cả các kho';
     case 'warehouse_manager':
       return 'Nhân sự Quản lý từng kho riêng';
     case 'warehouse_accountant':
@@ -729,10 +791,25 @@ export function updateSaleRecord(
     paidAmount: number;
     dueDate: string;
     note: string;
+    promotionType?: SalePromotionType;
+    discountAmount?: number;
+    discountPercent?: number;
+    giftProductId?: string;
+    giftProductName?: string;
+    giftUnit?: string;
+    giftQuantity?: number;
+    giftUnitCost?: number;
   },
   nowIso: string
 ): SaleTransaction {
-  const summary = calculateSaleSummary(changes.quantity, changes.unitPrice, changes.paidAmount);
+  const effectiveDiscount =
+    changes.discountAmount !== undefined ? changes.discountAmount : existing.discountAmount || 0;
+  const summary = calculateSaleSummary(
+    changes.quantity,
+    changes.unitPrice,
+    changes.paidAmount,
+    effectiveDiscount
+  );
   return {
     ...existing,
     invoiceCode: changes.invoiceCode?.trim() || existing.invoiceCode,
@@ -748,6 +825,15 @@ export function updateSaleRecord(
     debtAmount: summary.debtAmount,
     status: summary.status,
     dueDate: changes.dueDate || existing.dueDate,
+    promotionType: changes.promotionType ?? existing.promotionType,
+    discountAmount: summary.discountAmount,
+    discountPercent: changes.discountPercent ?? existing.discountPercent,
+    giftProductId: changes.giftProductId ?? existing.giftProductId,
+    giftProductName: changes.giftProductName ?? existing.giftProductName,
+    giftUnit: changes.giftUnit ?? existing.giftUnit,
+    giftQuantity:
+      changes.giftQuantity !== undefined ? Math.max(0, Number(changes.giftQuantity) || 0) : existing.giftQuantity,
+    giftUnitCost: changes.giftUnitCost ?? existing.giftUnitCost,
     note: changes.note,
     updatedAt: nowIso,
   };
@@ -899,6 +985,8 @@ export interface StaffAccessScope {
   canAccessCustomerDebts: boolean;
   canAccessSupplierDebts: boolean;
   canAccessDebts: boolean;
+  canAccessReceiptVouchers: boolean;
+  canAccessPaymentVouchers: boolean;
   canAccessVouchers: boolean;
   canAccessCashflow: boolean;
   canAccessReports: boolean;
@@ -959,6 +1047,23 @@ export function evaluateStaffAccessScope(
 
   const canAccessDebts = canAccessCustomerDebts || canAccessSupplierDebts;
 
+  const canAccessReceiptVouchers =
+    hasAllWarehouses ||
+    perms.includes('cash_treasurer') ||
+    perms.includes('bank_treasurer') ||
+    perms.includes('customer_debt_accounting') ||
+    perms.includes('sales_accounting') ||
+    perms.includes('warehouse_accounting') ||
+    perms.includes('sales_and_invoicing');
+
+  const canAccessPaymentVouchers =
+    hasAllWarehouses ||
+    perms.includes('cash_treasurer') ||
+    perms.includes('bank_treasurer') ||
+    perms.includes('supplier_debt_accounting') ||
+    perms.includes('warehouse_accounting') ||
+    perms.includes('import_and_supplier');
+
   const canAccessCashflow =
     hasAllWarehouses ||
     perms.includes('cash_treasurer') ||
@@ -991,13 +1096,14 @@ export function evaluateStaffAccessScope(
     hasAllWarehouses || perms.includes('edit_delete_vouchers');
 
   // Determine the exact report tabs this staff member is authorized to view & export for upper management
+  // Ordered sequentially 1 -> 8 to match REPORT_CATEGORY_META labels (1, 2, 3, 4, 5, 6, 7, 8)
   const allowedReportCategories: ReportModuleCategory[] = [];
   if (canAccessReports) {
     allowedReportCategories.push('overview');
+    if (canAccessCustomers) allowedReportCategories.push('customers_items');
     if (canAccessSales) allowedReportCategories.push('sales_log');
     if (canAccessImports) allowedReportCategories.push('imports_log');
     if (canAccessInventory) allowedReportCategories.push('inventory_stock');
-    if (canAccessCustomers) allowedReportCategories.push('customers_items');
     if (canAccessDebts) allowedReportCategories.push('debts_receivable_payable');
     if (canAccessCashflow) allowedReportCategories.push('cashflow_treasury');
     if (isPrimaryOwner) allowedReportCategories.push('financial_profit');
@@ -1006,6 +1112,8 @@ export function evaluateStaffAccessScope(
   const allowedTabs: string[] = ['dashboard'];
   if (canAccessSales) allowedTabs.push('sales');
   if (canAccessImports) allowedTabs.push('imports');
+  if (canAccessReceiptVouchers) allowedTabs.push('receipt_vouchers');
+  if (canAccessPaymentVouchers) allowedTabs.push('payment_vouchers');
   if (canAccessInventory) allowedTabs.push('inventory');
   if (canAccessCustomers) allowedTabs.push('customers');
   if (canAccessDebts) allowedTabs.push('debts');
@@ -1024,6 +1132,8 @@ export function evaluateStaffAccessScope(
     canAccessCustomerDebts,
     canAccessSupplierDebts,
     canAccessDebts,
+    canAccessReceiptVouchers,
+    canAccessPaymentVouchers,
     canAccessVouchers,
     canAccessCashflow,
     canAccessReports,
@@ -1094,24 +1204,32 @@ export function buildBackupSnapshotPayload(params: {
   warehouses: string[];
   customerGroups: string[];
   productCategories: string[];
+  receiptGroups?: string[];
+  paymentGroups?: string[];
   products: ProductItem[];
   customers: CustomerProfile[];
   suppliers: SupplierProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
   savedVouchers: SavedVoucherRecord[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
   staffList: StaffMember[];
   auditLogs: AuditLogEntry[];
 }): BackupSnapshotPayload {
+  const receiptVouchers = params.receiptVouchers || [];
+  const paymentVouchers = params.paymentVouchers || [];
   const recordCount =
     params.products.length +
     params.customers.length +
     params.sales.length +
     params.imports.length +
-    params.savedVouchers.length;
+    params.savedVouchers.length +
+    receiptVouchers.length +
+    paymentVouchers.length;
 
   return {
-    version: '2.0-audit-enabled',
+    version: '2.1-cashflow-fifo-enabled',
     exportedAt: params.exportedAt,
     exportedByEmail: params.exportedByEmail,
     fileName: params.fileName,
@@ -1120,12 +1238,16 @@ export function buildBackupSnapshotPayload(params: {
     warehouses: [...params.warehouses],
     customerGroups: [...params.customerGroups],
     productCategories: [...params.productCategories],
+    receiptGroups: params.receiptGroups ? [...params.receiptGroups] : undefined,
+    paymentGroups: params.paymentGroups ? [...params.paymentGroups] : undefined,
     products: [...params.products],
     customers: [...params.customers],
     suppliers: [...params.suppliers],
     sales: [...params.sales],
     imports: [...params.imports],
     savedVouchers: [...params.savedVouchers],
+    receiptVouchers: [...receiptVouchers],
+    paymentVouchers: [...paymentVouchers],
     staffList: [...params.staffList],
     auditLogs: [...params.auditLogs],
   };
@@ -1158,6 +1280,12 @@ export function parseAndValidateBackupPayload(
     const savedVouchers: SavedVoucherRecord[] = Array.isArray(parsed.savedVouchers)
       ? parsed.savedVouchers
       : [];
+    const receiptVouchers: CashReceiptVoucher[] = Array.isArray(parsed.receiptVouchers)
+      ? parsed.receiptVouchers
+      : [];
+    const paymentVouchers: CashPaymentVoucher[] = Array.isArray(parsed.paymentVouchers)
+      ? parsed.paymentVouchers
+      : [];
     const suppliers: SupplierProfile[] = Array.isArray(parsed.suppliers)
       ? parsed.suppliers
       : [];
@@ -1173,13 +1301,21 @@ export function parseAndValidateBackupPayload(
     const productCategories: string[] = Array.isArray(parsed.productCategories)
       ? parsed.productCategories
       : ['Phân bón', 'Thuốc BVTV', 'Hạt giống', 'Chế phẩm sinh học', 'Vật tư & Dụng cụ'];
+    const receiptGroups: string[] | undefined = Array.isArray(parsed.receiptGroups)
+      ? parsed.receiptGroups
+      : undefined;
+    const paymentGroups: string[] | undefined = Array.isArray(parsed.paymentGroups)
+      ? parsed.paymentGroups
+      : undefined;
 
     const recordCount =
       parsed.products.length +
       parsed.customers.length +
       parsed.sales.length +
       parsed.imports.length +
-      savedVouchers.length;
+      savedVouchers.length +
+      receiptVouchers.length +
+      paymentVouchers.length;
 
     return {
       ok: true,
@@ -1193,12 +1329,16 @@ export function parseAndValidateBackupPayload(
         warehouses,
         customerGroups,
         productCategories,
+        receiptGroups,
+        paymentGroups,
         products: parsed.products,
         customers: parsed.customers,
         suppliers,
         sales: parsed.sales,
         imports: parsed.imports,
         savedVouchers,
+        receiptVouchers,
+        paymentVouchers,
         staffList,
         auditLogs,
       },
@@ -1356,6 +1496,11 @@ export interface ReceivedItemReportRow {
   unit: string;
   quantity: number;
   unitPrice: number;
+  discountAmount?: number;
+  giftProductId?: string;
+  giftProductName?: string;
+  giftUnit?: string;
+  giftQuantity?: number;
   totalAmount: number;
   paidAmount: number;
   debtAmount: number;
@@ -1449,6 +1594,11 @@ export function computeReceivedItemsAndDebtReport(
     unit: s.unit,
     quantity: s.quantity,
     unitPrice: s.unitPrice,
+    discountAmount: s.discountAmount || 0,
+    giftProductId: s.giftProductId,
+    giftProductName: s.giftProductName,
+    giftUnit: s.giftUnit,
+    giftQuantity: s.giftQuantity || 0,
     totalAmount: s.totalAmount,
     paidAmount: s.paidAmount,
     debtAmount: s.debtAmount,
@@ -1658,7 +1808,12 @@ export function generateSmartReportRecommendations(params: {
     const estimatedGrossProfit = rangeSales.reduce((sum, sale) => {
       const prod = products.find((p) => p.id === sale.productId);
       const cost = (prod ? prod.importPrice : sale.unitPrice * 0.85) * sale.quantity;
-      return sum + (sale.totalAmount - cost);
+      const giftProd = sale.giftProductId
+        ? products.find((p) => p.id === sale.giftProductId)
+        : undefined;
+      const giftUnitCost = sale.giftUnitCost ?? giftProd?.importPrice ?? 0;
+      const giftCost = giftUnitCost * (sale.giftQuantity || 0);
+      return sum + (sale.totalAmount - cost - giftCost);
     }, 0);
     const marginPct =
       totalSalesRevenue > 0 ? Math.round((estimatedGrossProfit / totalSalesRevenue) * 100) : 0;
@@ -1682,5 +1837,1452 @@ export function generateSmartReportRecommendations(params: {
   return recommendations;
 }
 
+export interface CustomerMatchIdentifier {
+  customerId?: string;
+  customerPhone?: string;
+  customerName?: string;
+  warehouseName?: string | null;
+}
+
+export interface CustomerFifoSettlementPreview {
+  unpaidInvoicesOrdered: SaleTransaction[];
+  allocations: FifoDebtAllocationItem[];
+  totalPreviousDebt: number;
+  totalAllocated: number;
+  unallocatedExcess: number;
+  totalRemainingDebt: number;
+}
+
+export function matchesCustomerRecord(
+  sale: SaleTransaction,
+  identifier: CustomerMatchIdentifier
+): boolean {
+  if (identifier.warehouseName && sale.warehouseName !== identifier.warehouseName) {
+    return false;
+  }
+  if (identifier.customerId && sale.customerId === identifier.customerId) {
+    return true;
+  }
+  const cleanPhone = (identifier.customerPhone || '').trim();
+  if (cleanPhone && sale.customerPhone && sale.customerPhone.trim() === cleanPhone) {
+    return true;
+  }
+  const cleanName = normalizeVietnameseSearch(identifier.customerName || '');
+  if (cleanName && normalizeVietnameseSearch(sale.customerName) === cleanName) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Previews automatic FIFO debt deduction across all unpaid invoices of a customer
+ * sorted strictly by oldest debt date first (createdAt ascending, then dueDate ascending).
+ */
+export function previewCustomerFifoDebtSettlement(
+  sales: SaleTransaction[],
+  identifier: CustomerMatchIdentifier,
+  lumpSumAmountInput: number
+): CustomerFifoSettlementPreview {
+  const safeInput = Math.max(0, Math.round(Number(lumpSumAmountInput) || 0));
+
+  const unpaidInvoicesOrdered = sales
+    .filter((s) => s.debtAmount > 0 && matchesCustomerRecord(s, identifier))
+    .sort((a, b) => {
+      const dateCmp = (a.createdAt || '').localeCompare(b.createdAt || '');
+      if (dateCmp !== 0) return dateCmp;
+      const dueCmp = (a.dueDate || '').localeCompare(b.dueDate || '');
+      if (dueCmp !== 0) return dueCmp;
+      return (a.invoiceCode || '').localeCompare(b.invoiceCode || '');
+    });
+
+  const totalPreviousDebt = unpaidInvoicesOrdered.reduce((sum, s) => sum + s.debtAmount, 0);
+  let remainingToAllocate = safeInput;
+  let totalAllocated = 0;
+
+  const allocations: FifoDebtAllocationItem[] = unpaidInvoicesOrdered.map((sale) => {
+    const allocatedAmount = Math.min(sale.debtAmount, remainingToAllocate);
+    remainingToAllocate = Math.max(0, remainingToAllocate - allocatedAmount);
+    totalAllocated += allocatedAmount;
+    const remainingDebt = Math.max(0, sale.debtAmount - allocatedAmount);
+
+    return {
+      recordId: sale.id,
+      code: sale.invoiceCode,
+      date: (sale.createdAt || '').slice(0, 10),
+      dueDate: sale.dueDate || '',
+      productName: sale.productName,
+      previousDebt: sale.debtAmount,
+      allocatedAmount,
+      remainingDebt,
+    };
+  });
+
+  return {
+    unpaidInvoicesOrdered,
+    allocations,
+    totalPreviousDebt,
+    totalAllocated,
+    unallocatedExcess: Math.max(0, safeInput - totalAllocated),
+    totalRemainingDebt: Math.max(0, totalPreviousDebt - totalAllocated),
+  };
+}
+
+/**
+ * Applies automatic FIFO debt settlement across all older unpaid invoices of a customer
+ * sorted by oldest debt date first (theo thứ tự ngày nợ).
+ */
+export function applyCustomerFifoDebtSettlement(
+  sales: SaleTransaction[],
+  identifier: CustomerMatchIdentifier,
+  lumpSumAmountInput: number,
+  note: string,
+  nowIso: string
+): CustomerFifoSettlementPreview & {
+  updatedSales: SaleTransaction[];
+  settledAllocations: FifoDebtAllocationItem[];
+} {
+  const preview = previewCustomerFifoDebtSettlement(sales, identifier, lumpSumAmountInput);
+  if (preview.totalAllocated <= 0) {
+    throw new Error('Số tiền thu quyết toán phải lớn hơn 0 và khách hàng phải có hóa đơn còn nợ.');
+  }
+
+  const allocationByRecordId = new Map<string, FifoDebtAllocationItem>();
+  for (const alloc of preview.allocations) {
+    if (alloc.allocatedAmount > 0) {
+      allocationByRecordId.set(alloc.recordId, alloc);
+    }
+  }
+
+  const cleanNote = (note || '').trim();
+  const updatedSales = sales.map((sale) => {
+    const alloc = allocationByRecordId.get(sale.id);
+    if (!alloc || alloc.allocatedAmount <= 0) return sale;
+
+    const settled = applyDebtPayment(sale, alloc.allocatedAmount, nowIso);
+    const noteSuffix = cleanNote
+      ? `[Quyết toán công nợ theo thứ tự ngày nợ: +${alloc.allocatedAmount.toLocaleString('vi-VN')}đ - ${cleanNote}]`
+      : `[Quyết toán công nợ theo thứ tự ngày nợ: +${alloc.allocatedAmount.toLocaleString('vi-VN')}đ]`;
+
+    return {
+      ...settled,
+      note: sale.note ? `${sale.note} | ${noteSuffix}` : noteSuffix,
+    };
+  });
+
+  const settledAllocations = preview.allocations.filter((a) => a.allocatedAmount > 0);
+
+  return {
+    ...preview,
+    updatedSales,
+    settledAllocations,
+  };
+}
+
+export interface SupplierMatchIdentifier {
+  supplierName: string;
+  supplierPhone?: string;
+  warehouseName?: string | null;
+}
+
+export interface SupplierFifoSettlementPreview {
+  unpaidReceiptsOrdered: ImportTransaction[];
+  allocations: FifoDebtAllocationItem[];
+  totalPreviousDebt: number;
+  totalAllocated: number;
+  unallocatedExcess: number;
+  totalRemainingDebt: number;
+}
+
+export function matchesSupplierRecord(
+  imp: ImportTransaction,
+  identifier: SupplierMatchIdentifier
+): boolean {
+  if (identifier.warehouseName && imp.warehouseName !== identifier.warehouseName) {
+    return false;
+  }
+  const cleanPhone = (identifier.supplierPhone || '').trim();
+  if (cleanPhone && imp.supplierPhone && imp.supplierPhone.trim() === cleanPhone) {
+    return true;
+  }
+  const cleanName = normalizeVietnameseSearch(identifier.supplierName || '');
+  if (cleanName && normalizeVietnameseSearch(imp.supplierName) === cleanName) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Previews automatic FIFO debt deduction across all unpaid import receipts of a supplier
+ * sorted strictly by oldest debt date first (createdAt ascending, then dueDate ascending).
+ */
+export function previewSupplierFifoDebtSettlement(
+  imports: ImportTransaction[],
+  identifier: SupplierMatchIdentifier,
+  lumpSumAmountInput: number
+): SupplierFifoSettlementPreview {
+  const safeInput = Math.max(0, Math.round(Number(lumpSumAmountInput) || 0));
+
+  const unpaidReceiptsOrdered = imports
+    .filter((imp) => imp.debtAmount > 0 && matchesSupplierRecord(imp, identifier))
+    .sort((a, b) => {
+      const dateCmp = (a.createdAt || '').localeCompare(b.createdAt || '');
+      if (dateCmp !== 0) return dateCmp;
+      const dueCmp = (a.dueDate || '').localeCompare(b.dueDate || '');
+      if (dueCmp !== 0) return dueCmp;
+      return (a.receiptCode || '').localeCompare(b.receiptCode || '');
+    });
+
+  const totalPreviousDebt = unpaidReceiptsOrdered.reduce((sum, imp) => sum + imp.debtAmount, 0);
+  let remainingToAllocate = safeInput;
+  let totalAllocated = 0;
+
+  const allocations: FifoDebtAllocationItem[] = unpaidReceiptsOrdered.map((imp) => {
+    const allocatedAmount = Math.min(imp.debtAmount, remainingToAllocate);
+    remainingToAllocate = Math.max(0, remainingToAllocate - allocatedAmount);
+    totalAllocated += allocatedAmount;
+    const remainingDebt = Math.max(0, imp.debtAmount - allocatedAmount);
+
+    return {
+      recordId: imp.id,
+      code: imp.receiptCode,
+      date: (imp.createdAt || '').slice(0, 10),
+      dueDate: imp.dueDate || '',
+      productName: imp.productName,
+      previousDebt: imp.debtAmount,
+      allocatedAmount,
+      remainingDebt,
+    };
+  });
+
+  return {
+    unpaidReceiptsOrdered,
+    allocations,
+    totalPreviousDebt,
+    totalAllocated,
+    unallocatedExcess: Math.max(0, safeInput - totalAllocated),
+    totalRemainingDebt: Math.max(0, totalPreviousDebt - totalAllocated),
+  };
+}
+
+/**
+ * Applies automatic FIFO debt settlement across all older unpaid import receipts of a supplier
+ * sorted by oldest debt date first (theo thứ tự ngày nợ).
+ */
+export function applySupplierFifoDebtSettlement(
+  imports: ImportTransaction[],
+  identifier: SupplierMatchIdentifier,
+  lumpSumAmountInput: number,
+  note: string,
+  nowIso: string
+): SupplierFifoSettlementPreview & {
+  updatedImports: ImportTransaction[];
+  settledAllocations: FifoDebtAllocationItem[];
+} {
+  const preview = previewSupplierFifoDebtSettlement(imports, identifier, lumpSumAmountInput);
+  if (preview.totalAllocated <= 0) {
+    throw new Error('Số tiền chi trả quyết toán phải lớn hơn 0 và Nhà cung cấp phải có phiếu nhập còn nợ.');
+  }
+
+  const allocationByRecordId = new Map<string, FifoDebtAllocationItem>();
+  for (const alloc of preview.allocations) {
+    if (alloc.allocatedAmount > 0) {
+      allocationByRecordId.set(alloc.recordId, alloc);
+    }
+  }
+
+  const cleanNote = (note || '').trim();
+  const updatedImports = imports.map((imp) => {
+    const alloc = allocationByRecordId.get(imp.id);
+    if (!alloc || alloc.allocatedAmount <= 0) return imp;
+
+    const settled = applyDebtPayment(imp, alloc.allocatedAmount, nowIso);
+    const noteSuffix = cleanNote
+      ? `[Quyết toán nợ NCC theo thứ tự ngày nợ: +${alloc.allocatedAmount.toLocaleString('vi-VN')}đ - ${cleanNote}]`
+      : `[Quyết toán nợ NCC theo thứ tự ngày nợ: +${alloc.allocatedAmount.toLocaleString('vi-VN')}đ]`;
+
+    return {
+      ...settled,
+      note: imp.note ? `${imp.note} | ${noteSuffix}` : noteSuffix,
+    };
+  });
+
+  const settledAllocations = preview.allocations.filter((a) => a.allocatedAmount > 0);
+
+  return {
+    ...preview,
+    updatedImports,
+    settledAllocations,
+  };
+}
+
+export interface VoucherGroupSummaryItem {
+  groupName: string;
+  count: number;
+  totalAmount: number;
+  debtSettlementAmount: number;
+  directOrOperatingAmount: number;
+}
+
+export interface CashflowAndFinancialReportSummary {
+  // Cashflow metrics (7. Thu - Chi Dòng Tiền)
+  salesPaidInflow: number;
+  otherReceiptInflow: number;
+  debtSettlementReceiptTotal: number;
+  totalCashInflow: number;
+  importsPaidOutflow: number;
+  operatingPaymentOutflow: number;
+  debtSettlementPaymentTotal: number;
+  totalCashOutflow: number;
+  netCashflow: number;
+  receiptGroupBreakdown: VoucherGroupSummaryItem[];
+  paymentGroupBreakdown: VoucherGroupSummaryItem[];
+  filteredReceiptVouchers: CashReceiptVoucher[];
+  filteredPaymentVouchers: CashPaymentVoucher[];
+  // Financial & Profit metrics (8. Báo Cáo Tài Chính & Lợi Nhuận)
+  grossSalesRevenueBeforeDiscount: number;
+  totalSalesDiscount: number;
+  netSalesRevenue: number;
+  totalProductCogs: number;
+  totalGiftPromoCost: number;
+  totalCogs: number;
+  grossProfit: number;
+  otherIncome: number;
+  operatingExpenses: number;
+  netProfit: number;
+  grossMarginPct: number;
+  netMarginPct: number;
+  totalReceivableDebt: number;
+  totalPayableDebt: number;
+}
+
+/**
+ * Computes integrated Cashflow (7. Thu - Chi Dòng Tiền) and Financial Profit (8. Báo Cáo Tài Chính & Lợi Nhuận)
+ * combining Sales, Imports, Receipt Vouchers (Phiếu thu tiền), and Payment Vouchers (Phiếu chi tiền)
+ * without double-counting debt settlement vouchers that have already updated sale.paidAmount / import.paidAmount.
+ */
+export function computeCashflowAndFinancialReport(params: {
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  products: ProductItem[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
+  fromDate?: string;
+  toDate?: string;
+  warehouseName?: string | null;
+}): CashflowAndFinancialReportSummary {
+  const {
+    sales = [],
+    imports = [],
+    products = [],
+    receiptVouchers = [],
+    paymentVouchers = [],
+    fromDate,
+    toDate,
+    warehouseName,
+  } = params;
+
+  const filteredSales = sales.filter((s) => {
+    if (warehouseName && s.warehouseName !== warehouseName) return false;
+    return isDateWithinRange(s.createdAt, fromDate, toDate);
+  });
+
+  const filteredImports = imports.filter((i) => {
+    if (warehouseName && i.warehouseName !== warehouseName) return false;
+    return isDateWithinRange(i.createdAt, fromDate, toDate);
+  });
+
+  const filteredReceiptVouchers = receiptVouchers.filter((rv) => {
+    if (warehouseName && rv.warehouseName !== warehouseName) return false;
+    return isDateWithinRange(rv.createdAt, fromDate, toDate);
+  });
+
+  const filteredPaymentVouchers = paymentVouchers.filter((pv) => {
+    if (warehouseName && pv.warehouseName !== warehouseName) return false;
+    return isDateWithinRange(pv.createdAt, fromDate, toDate);
+  });
+
+  // Cashflow calculations
+  const salesPaidInflow = filteredSales.reduce((sum, s) => sum + s.paidAmount, 0);
+  const debtSettlementReceiptTotal = filteredReceiptVouchers
+    .filter((rv) => rv.isDebtSettlement)
+    .reduce((sum, rv) => sum + rv.amount, 0);
+  const otherReceiptInflow = filteredReceiptVouchers
+    .filter((rv) => !rv.isDebtSettlement)
+    .reduce((sum, rv) => sum + rv.amount, 0);
+  const totalCashInflow = salesPaidInflow + otherReceiptInflow;
+
+  const importsPaidOutflow = filteredImports.reduce((sum, i) => sum + i.paidAmount, 0);
+  const debtSettlementPaymentTotal = filteredPaymentVouchers
+    .filter((pv) => pv.isDebtSettlement)
+    .reduce((sum, pv) => sum + pv.amount, 0);
+  const operatingPaymentOutflow = filteredPaymentVouchers
+    .filter((pv) => !pv.isDebtSettlement)
+    .reduce((sum, pv) => sum + pv.amount, 0);
+  const totalCashOutflow = importsPaidOutflow + operatingPaymentOutflow;
+
+  const netCashflow = totalCashInflow - totalCashOutflow;
+
+  // Group breakdown for Receipt Vouchers
+  const receiptGroupMap = new Map<string, VoucherGroupSummaryItem>();
+  for (const rv of filteredReceiptVouchers) {
+    const group = (rv.groupName || 'Nhóm phiếu thu khác').trim();
+    const existing = receiptGroupMap.get(group) || {
+      groupName: group,
+      count: 0,
+      totalAmount: 0,
+      debtSettlementAmount: 0,
+      directOrOperatingAmount: 0,
+    };
+    existing.count += 1;
+    existing.totalAmount += rv.amount;
+    if (rv.isDebtSettlement) {
+      existing.debtSettlementAmount += rv.amount;
+    } else {
+      existing.directOrOperatingAmount += rv.amount;
+    }
+    receiptGroupMap.set(group, existing);
+  }
+  const receiptGroupBreakdown = Array.from(receiptGroupMap.values()).sort(
+    (a, b) => b.totalAmount - a.totalAmount
+  );
+
+  // Group breakdown for Payment Vouchers
+  const paymentGroupMap = new Map<string, VoucherGroupSummaryItem>();
+  for (const pv of filteredPaymentVouchers) {
+    const group = (pv.groupName || 'Nhóm phiếu chi khác').trim();
+    const existing = paymentGroupMap.get(group) || {
+      groupName: group,
+      count: 0,
+      totalAmount: 0,
+      debtSettlementAmount: 0,
+      directOrOperatingAmount: 0,
+    };
+    existing.count += 1;
+    existing.totalAmount += pv.amount;
+    if (pv.isDebtSettlement) {
+      existing.debtSettlementAmount += pv.amount;
+    } else {
+      existing.directOrOperatingAmount += pv.amount;
+    }
+    paymentGroupMap.set(group, existing);
+  }
+  const paymentGroupBreakdown = Array.from(paymentGroupMap.values()).sort(
+    (a, b) => b.totalAmount - a.totalAmount
+  );
+
+  // Financial & Profit calculations
+  const totalSalesDiscount = filteredSales.reduce((sum, s) => sum + (s.discountAmount || 0), 0);
+  const netSalesRevenue = filteredSales.reduce((sum, s) => sum + s.totalAmount, 0);
+  const grossSalesRevenueBeforeDiscount = netSalesRevenue + totalSalesDiscount;
+
+  let totalProductCogs = 0;
+  let totalGiftPromoCost = 0;
+
+  for (const sale of filteredSales) {
+    const prod = products.find((p) => p.id === sale.productId);
+    const unitImportCost = prod ? prod.importPrice : Math.round(sale.unitPrice * 0.85);
+    totalProductCogs += unitImportCost * sale.quantity;
+
+    const giftProd = sale.giftProductId
+      ? products.find((p) => p.id === sale.giftProductId)
+      : undefined;
+    const giftUnitCost = sale.giftUnitCost ?? giftProd?.importPrice ?? 0;
+    totalGiftPromoCost += giftUnitCost * (sale.giftQuantity || 0);
+  }
+
+  const totalCogs = totalProductCogs + totalGiftPromoCost;
+  const grossProfit = netSalesRevenue - totalCogs;
+
+  const otherIncome = filteredReceiptVouchers
+    .filter((rv) => !rv.isDebtSettlement && rv.countsTowardOtherIncome !== false)
+    .reduce((sum, rv) => sum + rv.amount, 0);
+
+  const operatingExpenses = filteredPaymentVouchers
+    .filter((pv) => !pv.isDebtSettlement && pv.countsTowardOperatingExpense !== false)
+    .reduce((sum, pv) => sum + pv.amount, 0);
+
+  const netProfit = grossProfit + otherIncome - operatingExpenses;
+
+  const grossMarginPct =
+    netSalesRevenue > 0 ? Math.round((grossProfit / netSalesRevenue) * 1000) / 10 : 0;
+  const netMarginPct =
+    netSalesRevenue + otherIncome > 0
+      ? Math.round((netProfit / (netSalesRevenue + otherIncome)) * 1000) / 10
+      : 0;
+
+  const totalReceivableDebt = filteredSales.reduce((sum, s) => sum + s.debtAmount, 0);
+  const totalPayableDebt = filteredImports.reduce((sum, i) => sum + i.debtAmount, 0);
+
+  return {
+    salesPaidInflow,
+    otherReceiptInflow,
+    debtSettlementReceiptTotal,
+    totalCashInflow,
+    importsPaidOutflow,
+    operatingPaymentOutflow,
+    debtSettlementPaymentTotal,
+    totalCashOutflow,
+    netCashflow,
+    receiptGroupBreakdown,
+    paymentGroupBreakdown,
+    filteredReceiptVouchers,
+    filteredPaymentVouchers,
+    grossSalesRevenueBeforeDiscount,
+    totalSalesDiscount,
+    netSalesRevenue,
+    totalProductCogs,
+    totalGiftPromoCost,
+    totalCogs,
+    grossProfit,
+    otherIncome,
+    operatingExpenses,
+    netProfit,
+    grossMarginPct,
+    netMarginPct,
+    totalReceivableDebt,
+    totalPayableDebt,
+  };
+}
+
+export function extractRecordYear(
+  dateOrIso: string | null | undefined,
+  fallbackYear = 2026
+): number {
+  if (!dateOrIso) return fallbackYear;
+  const match = dateOrIso.trim().match(/^(\d{4})/);
+  if (match) {
+    const parsed = Number(match[1]);
+    if (parsed >= 2000 && parsed <= 2100) return parsed;
+  }
+  return fallbackYear;
+}
+
+export interface FiscalYearClosePreview {
+  fiscalYear: number;
+  newFiscalYear: number;
+  // Records to be purged (settled / closed in <= fiscalYear)
+  settledSalesToDelete: SaleTransaction[];
+  settledImportsToDelete: ImportTransaction[];
+  receiptVouchersToDelete: CashReceiptVoucher[];
+  paymentVouchersToDelete: CashPaymentVoucher[];
+  savedVouchersToDelete: SavedVoucherRecord[];
+  totalRecordsToDelete: number;
+  settledSalesRevenueTotal: number;
+  settledImportsCostTotal: number;
+  deletedReceiptVouchersAmountTotal: number;
+  deletedPaymentVouchersAmountTotal: number;
+  // Carry-over balances into newFiscalYear (Tồn lưu chuyển sang năm tài chính mới)
+  carriedInventoryCount: number;
+  carriedInventoryTotalUnits: number;
+  carriedInventoryTotalValue: number;
+  carriedUnpaidSales: SaleTransaction[];
+  carriedCustomerDebtCount: number;
+  carriedCustomerDebtTotal: number;
+  carriedUnpaidImports: ImportTransaction[];
+  carriedSupplierDebtCount: number;
+  carriedSupplierDebtTotal: number;
+}
+
+export interface FiscalYearCloseExecutionResult {
+  preview: FiscalYearClosePreview;
+  remainingProducts: ProductItem[];
+  updatedCustomers: CustomerProfile[];
+  updatedSuppliers: SupplierProfile[];
+  remainingSales: SaleTransaction[];
+  remainingImports: ImportTransaction[];
+  remainingReceiptVouchers: CashReceiptVoucher[];
+  remainingPaymentVouchers: CashPaymentVoucher[];
+  remainingSavedVouchers: SavedVoucherRecord[];
+}
+
+/**
+ * Previews what will be deleted vs. carried forward when closing a fiscal year (Chốt sổ năm báo cáo tài chính).
+ * - Purges settled sales (debtAmount === 0), settled imports (debtAmount === 0), receipt vouchers, payment vouchers,
+ *   and saved print vouchers in `<= fiscalYear` to make the application clean and fast.
+ * - Carries forward all current inventory stock, unpaid customer invoices (debtAmount > 0), and unpaid supplier imports (debtAmount > 0)
+ *   into `fiscalYear + 1` as opening balances of the new fiscal year.
+ */
+export function previewFiscalYearCloseAndCleanup(params: {
+  fiscalYear: number;
+  products: ProductItem[];
+  customers: CustomerProfile[];
+  suppliers?: SupplierProfile[];
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
+  savedVouchers?: SavedVoucherRecord[];
+}): FiscalYearClosePreview {
+  const fiscalYear = Math.round(Number(params.fiscalYear) || 2026);
+  const newFiscalYear = fiscalYear + 1;
+  const products = params.products || [];
+  const sales = params.sales || [];
+  const imports = params.imports || [];
+  const receiptVouchers = params.receiptVouchers || [];
+  const paymentVouchers = params.paymentVouchers || [];
+  const savedVouchers = params.savedVouchers || [];
+
+  const settledSalesToDelete = sales.filter(
+    (s) => extractRecordYear(s.createdAt, fiscalYear) <= fiscalYear && s.debtAmount <= 0
+  );
+  const settledImportsToDelete = imports.filter(
+    (i) => extractRecordYear(i.createdAt, fiscalYear) <= fiscalYear && i.debtAmount <= 0
+  );
+  const receiptVouchersToDelete = receiptVouchers.filter(
+    (rv) => extractRecordYear(rv.createdAt, fiscalYear) <= fiscalYear
+  );
+  const paymentVouchersToDelete = paymentVouchers.filter(
+    (pv) => extractRecordYear(pv.createdAt, fiscalYear) <= fiscalYear
+  );
+  const savedVouchersToDelete = savedVouchers.filter(
+    (sv) => extractRecordYear(sv.createdAt, fiscalYear) <= fiscalYear
+  );
+
+  const totalRecordsToDelete =
+    settledSalesToDelete.length +
+    settledImportsToDelete.length +
+    receiptVouchersToDelete.length +
+    paymentVouchersToDelete.length +
+    savedVouchersToDelete.length;
+
+  const settledSalesRevenueTotal = settledSalesToDelete.reduce((sum, s) => sum + s.totalAmount, 0);
+  const settledImportsCostTotal = settledImportsToDelete.reduce((sum, i) => sum + i.totalCost, 0);
+  const deletedReceiptVouchersAmountTotal = receiptVouchersToDelete.reduce(
+    (sum, rv) => sum + rv.amount,
+    0
+  );
+  const deletedPaymentVouchersAmountTotal = paymentVouchersToDelete.reduce(
+    (sum, pv) => sum + pv.amount,
+    0
+  );
+
+  const carriedInventoryCount = products.length;
+  const carriedInventoryTotalUnits = products.reduce((sum, p) => sum + Math.max(0, p.stock), 0);
+  const carriedInventoryTotalValue = products.reduce(
+    (sum, p) => sum + Math.max(0, p.stock) * Math.max(0, p.importPrice),
+    0
+  );
+
+  const carriedUnpaidSales = sales.filter((s) => s.debtAmount > 0);
+  const carriedCustomerDebtCount = carriedUnpaidSales.length;
+  const carriedCustomerDebtTotal = carriedUnpaidSales.reduce((sum, s) => sum + s.debtAmount, 0);
+
+  const carriedUnpaidImports = imports.filter((i) => i.debtAmount > 0);
+  const carriedSupplierDebtCount = carriedUnpaidImports.length;
+  const carriedSupplierDebtTotal = carriedUnpaidImports.reduce((sum, i) => sum + i.debtAmount, 0);
+
+  return {
+    fiscalYear,
+    newFiscalYear,
+    settledSalesToDelete,
+    settledImportsToDelete,
+    receiptVouchersToDelete,
+    paymentVouchersToDelete,
+    savedVouchersToDelete,
+    totalRecordsToDelete,
+    settledSalesRevenueTotal,
+    settledImportsCostTotal,
+    deletedReceiptVouchersAmountTotal,
+    deletedPaymentVouchersAmountTotal,
+    carriedInventoryCount,
+    carriedInventoryTotalUnits,
+    carriedInventoryTotalValue,
+    carriedUnpaidSales,
+    carriedCustomerDebtCount,
+    carriedCustomerDebtTotal,
+    carriedUnpaidImports,
+    carriedSupplierDebtCount,
+    carriedSupplierDebtTotal,
+  };
+}
+
+/**
+ * Executes the Fiscal Year Rollover & Settled Data Cleanup.
+ * Deletes settled transactions/vouchers of `<= fiscalYear` and carries over remaining inventory stock,
+ * unpaid customer debts, and unpaid supplier debts into `newFiscalYear = fiscalYear + 1`.
+ */
+export function executeFiscalYearCloseAndCleanup(params: {
+  fiscalYear: number;
+  products: ProductItem[];
+  customers: CustomerProfile[];
+  suppliers?: SupplierProfile[];
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
+  savedVouchers?: SavedVoucherRecord[];
+  nowIso?: string;
+}): FiscalYearCloseExecutionResult {
+  const nowIso = params.nowIso || new Date().toISOString();
+  const preview = previewFiscalYearCloseAndCleanup(params);
+  const { fiscalYear, newFiscalYear } = preview;
+
+  const remainingProducts = (params.products || []).map((p) => ({
+    ...p,
+    updatedAt: nowIso,
+  }));
+
+  const carrySaleTag = `[Tồn lưu chốt sổ năm ${fiscalYear} -> Chuyển sang đầu kỳ năm ${newFiscalYear}]`;
+  const remainingSales = (params.sales || [])
+    .filter((s) => extractRecordYear(s.createdAt, fiscalYear) > fiscalYear || s.debtAmount > 0)
+    .map((s) => {
+      if (extractRecordYear(s.createdAt, fiscalYear) <= fiscalYear && s.debtAmount > 0) {
+        const hasTag = (s.note || '').includes(`Chốt sổ năm ${fiscalYear}`) || (s.note || '').includes(carrySaleTag);
+        return {
+          ...s,
+          note: hasTag ? s.note : s.note ? `${s.note} | ${carrySaleTag}` : carrySaleTag,
+          updatedAt: nowIso,
+        };
+      }
+      return s;
+    });
+
+  const carryImportTag = `[Tồn lưu nợ NCC chốt sổ năm ${fiscalYear} -> Chuyển sang đầu kỳ năm ${newFiscalYear}]`;
+  const remainingImports = (params.imports || [])
+    .filter((i) => extractRecordYear(i.createdAt, fiscalYear) > fiscalYear || i.debtAmount > 0)
+    .map((i) => {
+      if (extractRecordYear(i.createdAt, fiscalYear) <= fiscalYear && i.debtAmount > 0) {
+        const hasTag = (i.note || '').includes(`Chốt sổ năm ${fiscalYear}`) || (i.note || '').includes(carryImportTag);
+        return {
+          ...i,
+          note: hasTag ? i.note : i.note ? `${i.note} | ${carryImportTag}` : carryImportTag,
+          updatedAt: nowIso,
+        };
+      }
+      return i;
+    });
+
+  const remainingReceiptVouchers = (params.receiptVouchers || []).filter(
+    (rv) => extractRecordYear(rv.createdAt, fiscalYear) > fiscalYear
+  );
+  const remainingPaymentVouchers = (params.paymentVouchers || []).filter(
+    (pv) => extractRecordYear(pv.createdAt, fiscalYear) > fiscalYear
+  );
+  const remainingSavedVouchers = (params.savedVouchers || []).filter(
+    (sv) => extractRecordYear(sv.createdAt, fiscalYear) > fiscalYear
+  );
+
+  const updatedCustomers = (params.customers || []).map((c) => {
+    const custSales = remainingSales.filter(
+      (s) =>
+        s.customerId === c.id ||
+        (c.phone && s.customerPhone === c.phone) ||
+        s.customerName.trim().toLowerCase() === c.name.trim().toLowerCase()
+    );
+    const carriedDebt = custSales.reduce((sum, s) => sum + s.debtAmount, 0);
+    const carriedPurchased = custSales.reduce((sum, s) => sum + s.totalAmount, 0);
+    return {
+      ...c,
+      totalDebt: carriedDebt,
+      totalPurchased: carriedPurchased,
+      updatedAt: nowIso,
+    };
+  });
+
+  const updatedSuppliers = [...(params.suppliers || [])];
+
+  return {
+    preview,
+    remainingProducts,
+    updatedCustomers,
+    updatedSuppliers,
+    remainingSales,
+    remainingImports,
+    remainingReceiptVouchers,
+    remainingPaymentVouchers,
+    remainingSavedVouchers,
+  };
+}
+
+/**
+ * Executes a full data wipe of all business records for the Primary Manager,
+ * while preserving the Primary Manager staff account so the system remains accessible.
+ */
+export function executeFullApplicationDataWipe(params: {
+  staffList: StaffMember[];
+}): {
+  products: ProductItem[];
+  customers: CustomerProfile[];
+  suppliers: SupplierProfile[];
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  receiptVouchers: CashReceiptVoucher[];
+  paymentVouchers: CashPaymentVoucher[];
+  savedVouchers: SavedVoucherRecord[];
+  preservedStaffList: StaffMember[];
+} {
+  const preservedStaffList = (params.staffList || []).filter((s) => canAccountCreateStaff(s));
+  return {
+    products: [],
+    customers: [],
+    suppliers: [],
+    sales: [],
+    imports: [],
+    receiptVouchers: [],
+    paymentVouchers: [],
+    savedVouchers: [],
+    preservedStaffList:
+      preservedStaffList.length > 0 ? preservedStaffList : params.staffList.slice(0, 1),
+  };
+}
+
+/**
+ * Generates a continuous, future-proof list of fiscal years so the manager can always select
+ * 2024, 2025, 2026, 2027, 2028, 2029, 2030, 2031, 2032... up to 2040+ and automatically expand
+ * further into the future as time progresses or later years are selected.
+ */
+export function generateFiscalYearOptions(params?: {
+  startYear?: number;
+  minEndYear?: number;
+  currentYear?: number;
+  dataYears?: number[];
+  selectedYear?: number;
+}): number[] {
+  const startYear = Math.max(2020, Math.round(Number(params?.startYear) || 2024));
+  const minEndYear = Math.max(2040, Math.round(Number(params?.minEndYear) || 2040));
+  const nowYear = Math.round(Number(params?.currentYear) || new Date().getFullYear());
+  const selectedYear = Math.round(Number(params?.selectedYear) || nowYear);
+  const validDataYears = (params?.dataYears || []).filter(
+    (y) => Number.isFinite(y) && y >= 2000 && y <= 2100
+  );
+  const maxDataYear = validDataYears.length > 0 ? Math.max(...validDataYears) : nowYear;
+  const minDataYear = validDataYears.length > 0 ? Math.min(...validDataYears) : startYear;
+
+  const effectiveStart = Math.min(startYear, minDataYear, selectedYear);
+  const effectiveEnd = Math.max(
+    minEndYear,
+    nowYear + 15,
+    maxDataYear + 10,
+    selectedYear + 5
+  );
+
+  const years: number[] = [];
+  for (let yr = effectiveStart; yr <= effectiveEnd; yr += 1) {
+    years.push(yr);
+  }
+  return years;
+}
+
+export type TaxFinancialDrillDownCode =
+  | '01_gross_revenue'
+  | '02_revenue_deduction'
+  | '10_net_revenue'
+  | '11_cogs_total'
+  | '20_gross_profit'
+  | '24_operating_expenses'
+  | '30_operating_profit'
+  | '31_other_income'
+  | '50_profit_before_tax'
+  | '51_estimated_tax'
+  | '60_profit_after_tax'
+  | '110_cash_and_equivalents'
+  | '131_customer_receivables'
+  | '156_inventory_assets'
+  | '331_supplier_payables'
+  | '400_net_working_capital';
+
+export interface TaxFinancialStatementLineItem {
+  code: string;
+  drillDownCode: TaxFinancialDrillDownCode;
+  section: 'B02_INCOME_STATEMENT' | 'B01_B03_BALANCE_CASHFLOW';
+  title: string;
+  noteCode: string;
+  formulaText: string;
+  recordCount: number;
+  recordCountLabel: string;
+  amount: number;
+  ratioToNetRevenuePct: number;
+  isHighlightRow?: boolean;
+  description: string;
+}
+
+export interface SaleCogsAuditRow {
+  sale: SaleTransaction;
+  grossAmountBeforeDiscount: number;
+  discountAmount: number;
+  netRevenueAmount: number;
+  unitImportCost: number;
+  productCogsAmount: number;
+  giftUnitCost: number;
+  giftCogsAmount: number;
+  totalCogsAmount: number;
+  grossProfitAmount: number;
+  grossMarginPct: number;
+}
+
+export interface InventoryValuationAuditRow {
+  product: ProductItem;
+  stockQuantity: number;
+  unitImportCost: number;
+  unitRetailPrice: number;
+  totalInventoryCostValue: number;
+  totalEstimatedRetailValue: number;
+}
+
+export interface TaxAuthorityFinancialStatementResult {
+  fiscalYear: number;
+  fromDate: string;
+  toDate: string;
+  taxRatePct: number;
+  incomeStatementLines: TaxFinancialStatementLineItem[];
+  balanceAndCashflowLines: TaxFinancialStatementLineItem[];
+  allLines: TaxFinancialStatementLineItem[];
+  // Underlying audit datasets for 100% verifiable drill-down inspection
+  filteredSales: SaleTransaction[];
+  discountedSales: SaleTransaction[];
+  unpaidSalesInPeriod: SaleTransaction[];
+  filteredImports: ImportTransaction[];
+  unpaidImportsInPeriod: ImportTransaction[];
+  operatingPaymentVouchers: CashPaymentVoucher[];
+  otherIncomeReceiptVouchers: CashReceiptVoucher[];
+  allFilteredReceiptVouchers: CashReceiptVoucher[];
+  allFilteredPaymentVouchers: CashPaymentVoucher[];
+  saleCogsBreakdown: SaleCogsAuditRow[];
+  inventoryValuationRows: InventoryValuationAuditRow[];
+  // Key summary metrics
+  grossRevenue01: number;
+  revenueDeduction02: number;
+  netRevenue10: number;
+  productCogs11a: number;
+  giftCogs11b: number;
+  totalCogs11: number;
+  grossProfit20: number;
+  operatingExpenses24: number;
+  operatingProfit30: number;
+  otherIncome31: number;
+  profitBeforeTax50: number;
+  estimatedTax51: number;
+  profitAfterTax60: number;
+  totalCashInflow: number;
+  totalCashOutflow: number;
+  netCashflow110: number;
+  customerReceivables131: number;
+  inventoryValue156: number;
+  supplierPayables331: number;
+  netWorkingCapital400: number;
+}
+
+/**
+ * Computes a complete Tax-Authority-Grade Financial Statement (Báo cáo Tài chính Năm theo biểu mẫu
+ * Kê khai Cơ quan Thuế: Mẫu B02-DN Kết quả HĐKD, Mẫu B01-DN Cân đối Tài sản - Tồn kho - Công nợ,
+ * Mẫu B03-DN Lưu chuyển dòng tiền) with full drill-down audit datasets for every line item.
+ */
+export function computeTaxAuthorityFinancialStatement(params: {
+  fiscalYear?: number;
+  fromDate?: string;
+  toDate?: string;
+  warehouseName?: string | null;
+  taxRatePct?: number;
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  products: ProductItem[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
+}): TaxAuthorityFinancialStatementResult {
+  const fromDate = params.fromDate || '';
+  const toDate = params.toDate || '';
+  const inferredYear = fromDate
+    ? extractRecordYear(fromDate, 2026)
+    : toDate
+    ? extractRecordYear(toDate, 2026)
+    : 2026;
+  const fiscalYear = Math.round(Number(params.fiscalYear) || inferredYear);
+  const taxRatePct =
+    params.taxRatePct !== undefined ? Math.max(0, Number(params.taxRatePct) || 0) : 1.5;
+
+  const baseReport = computeCashflowAndFinancialReport({
+    sales: params.sales || [],
+    imports: params.imports || [],
+    products: params.products || [],
+    receiptVouchers: params.receiptVouchers || [],
+    paymentVouchers: params.paymentVouchers || [],
+    fromDate,
+    toDate,
+    warehouseName: params.warehouseName,
+  });
+
+  const filteredSales = (params.sales || [])
+    .filter((s) => {
+      if (params.warehouseName && s.warehouseName !== params.warehouseName) return false;
+      return isDateWithinRange(s.createdAt, fromDate, toDate);
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const discountedSales = filteredSales.filter((s) => (s.discountAmount || 0) > 0);
+  const unpaidSalesInPeriod = filteredSales.filter((s) => s.debtAmount > 0);
+
+  const filteredImports = (params.imports || [])
+    .filter((i) => {
+      if (params.warehouseName && i.warehouseName !== params.warehouseName) return false;
+      return isDateWithinRange(i.createdAt, fromDate, toDate);
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const unpaidImportsInPeriod = filteredImports.filter((i) => i.debtAmount > 0);
+
+  const operatingPaymentVouchers = baseReport.filteredPaymentVouchers.filter(
+    (pv) => !pv.isDebtSettlement && pv.countsTowardOperatingExpense !== false
+  );
+
+  const otherIncomeReceiptVouchers = baseReport.filteredReceiptVouchers.filter(
+    (rv) => !rv.isDebtSettlement && rv.countsTowardOtherIncome !== false
+  );
+
+  const saleCogsBreakdown: SaleCogsAuditRow[] = filteredSales.map((sale) => {
+    const discountAmount = Math.max(0, Math.round(sale.discountAmount || 0));
+    const netRevenueAmount = Math.max(0, Math.round(sale.totalAmount || 0));
+    const grossAmountBeforeDiscount = netRevenueAmount + discountAmount;
+
+    const prod = (params.products || []).find((p) => p.id === sale.productId);
+    const unitImportCost = prod ? prod.importPrice : Math.round(sale.unitPrice * 0.85);
+    const productCogsAmount = unitImportCost * sale.quantity;
+
+    const giftProd = sale.giftProductId
+      ? (params.products || []).find((p) => p.id === sale.giftProductId)
+      : undefined;
+    const giftUnitCost = sale.giftUnitCost ?? giftProd?.importPrice ?? 0;
+    const giftCogsAmount = giftUnitCost * (sale.giftQuantity || 0);
+
+    const totalCogsAmount = productCogsAmount + giftCogsAmount;
+    const grossProfitAmount = netRevenueAmount - totalCogsAmount;
+    const grossMarginPct =
+      netRevenueAmount > 0 ? Math.round((grossProfitAmount / netRevenueAmount) * 1000) / 10 : 0;
+
+    return {
+      sale,
+      grossAmountBeforeDiscount,
+      discountAmount,
+      netRevenueAmount,
+      unitImportCost,
+      productCogsAmount,
+      giftUnitCost,
+      giftCogsAmount,
+      totalCogsAmount,
+      grossProfitAmount,
+      grossMarginPct,
+    };
+  });
+
+  const filteredProducts = (params.products || []).filter((p) => {
+    if (params.warehouseName && p.warehouseName && p.warehouseName !== params.warehouseName) {
+      return false;
+    }
+    return true;
+  });
+
+  const inventoryValuationRows: InventoryValuationAuditRow[] = filteredProducts.map((product) => {
+    const stockQuantity = Math.max(0, Math.round(product.stock || 0));
+    const unitImportCost = Math.max(0, Math.round(product.importPrice || 0));
+    const unitRetailPrice = Math.max(0, Math.round(product.sellPrice || 0));
+    return {
+      product,
+      stockQuantity,
+      unitImportCost,
+      unitRetailPrice,
+      totalInventoryCostValue: stockQuantity * unitImportCost,
+      totalEstimatedRetailValue: stockQuantity * unitRetailPrice,
+    };
+  });
+
+  const grossRevenue01 = baseReport.grossSalesRevenueBeforeDiscount;
+  const revenueDeduction02 = baseReport.totalSalesDiscount;
+  const netRevenue10 = baseReport.netSalesRevenue;
+  const productCogs11a = baseReport.totalProductCogs;
+  const giftCogs11b = baseReport.totalGiftPromoCost;
+  const totalCogs11 = baseReport.totalCogs;
+  const grossProfit20 = baseReport.grossProfit;
+  const operatingExpenses24 = baseReport.operatingExpenses;
+  const operatingProfit30 = grossProfit20 - operatingExpenses24;
+  const otherIncome31 = baseReport.otherIncome;
+  const profitBeforeTax50 = operatingProfit30 + otherIncome31;
+  const estimatedTax51 = Math.max(0, Math.round((netRevenue10 * taxRatePct) / 100));
+  const profitAfterTax60 = profitBeforeTax50 - estimatedTax51;
+
+  const netCashflow110 = baseReport.netCashflow;
+  const customerReceivables131 = baseReport.totalReceivableDebt;
+  const inventoryValue156 = inventoryValuationRows.reduce(
+    (sum, r) => sum + r.totalInventoryCostValue,
+    0
+  );
+  const supplierPayables331 = baseReport.totalPayableDebt;
+  const netWorkingCapital400 =
+    netCashflow110 + customerReceivables131 + inventoryValue156 - supplierPayables331;
+
+  const pctOfNetRev = (amt: number): number =>
+    netRevenue10 > 0 ? Math.round((amt / netRevenue10) * 1000) / 10 : 0;
+
+  const incomeStatementLines: TaxFinancialStatementLineItem[] = [
+    {
+      code: '01',
+      drillDownCode: '01_gross_revenue',
+      section: 'B02_INCOME_STATEMENT',
+      title: '1. Doanh thu bán hàng và cung cấp dịch vụ',
+      noteCode: 'TM.01',
+      formulaText: '∑ Tổng tiền hàng trước chiết khấu/giảm giá',
+      recordCount: filteredSales.length,
+      recordCountLabel: `${filteredSales.length} hóa đơn bán`,
+      amount: grossRevenue01,
+      ratioToNetRevenuePct: pctOfNetRev(grossRevenue01),
+      description:
+        'Tổng doanh thu xuất bán vật tư nông nghiệp theo đơn giá bán niêm yết trước khi trừ chiết khấu/giảm giá khuyến mãi.',
+    },
+    {
+      code: '02',
+      drillDownCode: '02_revenue_deduction',
+      section: 'B02_INCOME_STATEMENT',
+      title: '2. Các khoản giảm trừ doanh thu (Chiết khấu / Giảm giá KM)',
+      noteCode: 'TM.02',
+      formulaText: '∑ Tiền giảm giá trực tiếp trên hóa đơn',
+      recordCount: discountedSales.length,
+      recordCountLabel: `${discountedSales.length} đơn có giảm giá`,
+      amount: revenueDeduction02,
+      ratioToNetRevenuePct: pctOfNetRev(revenueDeduction02),
+      description:
+        'Tổng số tiền chiết khấu thương mại và giảm giá bán trực tiếp trên các hóa đơn bán hàng trong kỳ.',
+    },
+    {
+      code: '10',
+      drillDownCode: '10_net_revenue',
+      section: 'B02_INCOME_STATEMENT',
+      title: '3. Doanh thu thuần về bán hàng và cung cấp dịch vụ (10 = 01 - 02)',
+      noteCode: 'TM.03',
+      formulaText: 'Mã 10 = Mã 01 - Mã 02',
+      recordCount: filteredSales.length,
+      recordCountLabel: `${filteredSales.length} hóa đơn thuần`,
+      amount: netRevenue10,
+      ratioToNetRevenuePct: netRevenue10 > 0 ? 100 : 0,
+      isHighlightRow: true,
+      description:
+        'Doanh thu thực tế sau khi trừ các khoản giảm trừ doanh thu, làm căn cứ tính doanh thu kê khai thuế và lợi nhuận gộp.',
+    },
+    {
+      code: '11',
+      drillDownCode: '11_cogs_total',
+      section: 'B02_INCOME_STATEMENT',
+      title: '4. Giá vốn hàng bán & Giá vốn quà tặng khuyến mãi (11 = Giá vốn hàng + Quà KM)',
+      noteCode: 'TM.04',
+      formulaText: `Hàng bán (${formatVND(productCogs11a)}) + Quà KM (${formatVND(giftCogs11b)})`,
+      recordCount: saleCogsBreakdown.length,
+      recordCountLabel: `${saleCogsBreakdown.length} dòng giá vốn`,
+      amount: totalCogs11,
+      ratioToNetRevenuePct: pctOfNetRev(totalCogs11),
+      description:
+        'Tổng giá vốn nhập kho của các mặt hàng vật tư đã xuất bán cộng với giá vốn của hàng hóa xuất làm quà tặng khuyến mãi kèm đơn.',
+    },
+    {
+      code: '20',
+      drillDownCode: '20_gross_profit',
+      section: 'B02_INCOME_STATEMENT',
+      title: '5. Lợi nhuận gộp về bán hàng và cung cấp dịch vụ (20 = 10 - 11)',
+      noteCode: 'TM.05',
+      formulaText: 'Mã 20 = Mã 10 - Mã 11',
+      recordCount: saleCogsBreakdown.length,
+      recordCountLabel: `${saleCogsBreakdown.length} đơn đối chiếu lãi gộp`,
+      amount: grossProfit20,
+      ratioToNetRevenuePct: pctOfNetRev(grossProfit20),
+      isHighlightRow: true,
+      description:
+        'Chênh lệch giữa Doanh thu thuần (Mã 10) và Giá vốn hàng bán + quà khuyến mãi (Mã 11) của từng hóa đơn.',
+    },
+    {
+      code: '24',
+      drillDownCode: '24_operating_expenses',
+      section: 'B02_INCOME_STATEMENT',
+      title: '6. Chi phí bán hàng, vận hành & quản lý doanh nghiệp',
+      noteCode: 'TM.06',
+      formulaText: '∑ Phiếu chi vận hành (không tính chi trả nợ gốc NCC)',
+      recordCount: operatingPaymentVouchers.length,
+      recordCountLabel: `${operatingPaymentVouchers.length} phiếu chi vận hành`,
+      amount: operatingExpenses24,
+      ratioToNetRevenuePct: pctOfNetRev(operatingExpenses24),
+      description:
+        'Tổng hợp các phiếu chi phục vụ vận hành: chi phí vận chuyển, bốc xếp, tiền lương nhân sự, điện nước, kho bãi...',
+    },
+    {
+      code: '30',
+      drillDownCode: '30_operating_profit',
+      section: 'B02_INCOME_STATEMENT',
+      title: '7. Lợi nhuận thuần từ hoạt động kinh doanh (30 = 20 - 24)',
+      noteCode: 'TM.07',
+      formulaText: 'Mã 30 = Mã 20 - Mã 24',
+      recordCount: filteredSales.length + operatingPaymentVouchers.length,
+      recordCountLabel: `${filteredSales.length} đơn + ${operatingPaymentVouchers.length} phiếu chi`,
+      amount: operatingProfit30,
+      ratioToNetRevenuePct: pctOfNetRev(operatingProfit30),
+      isHighlightRow: true,
+      description:
+        'Lợi nhuận từ hoạt động kinh doanh chính sau khi lấy Lợi nhuận gộp trừ đi toàn bộ Chi phí vận hành & quản lý.',
+    },
+    {
+      code: '31',
+      drillDownCode: '31_other_income',
+      section: 'B02_INCOME_STATEMENT',
+      title: '8. Thu nhập khác (Thưởng chiết khấu NCC, hỗ trợ đại lý & thu khác)',
+      noteCode: 'TM.08',
+      formulaText: '∑ Phiếu thu khác (không tính thu nợ hóa đơn KH)',
+      recordCount: otherIncomeReceiptVouchers.length,
+      recordCountLabel: `${otherIncomeReceiptVouchers.length} phiếu thu khác`,
+      amount: otherIncome31,
+      ratioToNetRevenuePct: pctOfNetRev(otherIncome31),
+      description:
+        'Các khoản thu nhập ngoài hóa đơn bán hàng như tiền thưởng doanh số/chiết khấu từ Nhà cung cấp, hỗ trợ vận chuyển...',
+    },
+    {
+      code: '50',
+      drillDownCode: '50_profit_before_tax',
+      section: 'B02_INCOME_STATEMENT',
+      title: '9. Tổng lợi nhuận kế toán trước thuế (50 = 30 + 31)',
+      noteCode: 'TM.09',
+      formulaText: 'Mã 50 = Mã 30 + Mã 31',
+      recordCount:
+        filteredSales.length + operatingPaymentVouchers.length + otherIncomeReceiptVouchers.length,
+      recordCountLabel: 'Toàn bộ chứng từ KQKD',
+      amount: profitBeforeTax50,
+      ratioToNetRevenuePct: pctOfNetRev(profitBeforeTax50),
+      isHighlightRow: true,
+      description:
+        'Tổng lợi nhuận kế toán thực tế trước thuế của đơn vị trong kỳ báo cáo tài chính.',
+    },
+    {
+      code: '51',
+      drillDownCode: '51_estimated_tax',
+      section: 'B02_INCOME_STATEMENT',
+      title: `10. Nghĩa vụ thuế tham chiếu kê khai (${taxRatePct}% trên Doanh thu thuần Mã 10)`,
+      noteCode: 'TM.10',
+      formulaText: `Mã 10 × ${taxRatePct}% (Tỷ lệ thuế phân phối hàng hóa tham chiếu)`,
+      recordCount: filteredSales.length,
+      recordCountLabel: `Tính trên ${filteredSales.length} hóa đơn`,
+      amount: estimatedTax51,
+      ratioToNetRevenuePct: taxRatePct,
+      description:
+        'Mức thuế tham chiếu để chủ cơ sở/doanh nghiệp đối chiếu nghĩa vụ thuế GTGT & TNCN/TNDN với Cơ quan Thuế.',
+    },
+    {
+      code: '60',
+      drillDownCode: '60_profit_after_tax',
+      section: 'B02_INCOME_STATEMENT',
+      title: '11. Lợi nhuận thuần sau thuế (60 = 50 - 51)',
+      noteCode: 'TM.11',
+      formulaText: 'Mã 60 = Mã 50 - Mã 51',
+      recordCount:
+        filteredSales.length + operatingPaymentVouchers.length + otherIncomeReceiptVouchers.length,
+      recordCountLabel: 'Tổng hợp sau thuế',
+      amount: profitAfterTax60,
+      ratioToNetRevenuePct: pctOfNetRev(profitAfterTax60),
+      isHighlightRow: true,
+      description:
+        'Lợi nhuận ròng còn lại sau khi trừ toàn bộ giá vốn, chi phí vận hành và nghĩa vụ thuế ước tính.',
+    },
+  ];
+
+  const balanceAndCashflowLines: TaxFinancialStatementLineItem[] = [
+    {
+      code: '110',
+      drillDownCode: '110_cash_and_equivalents',
+      section: 'B01_B03_BALANCE_CASHFLOW',
+      title: 'I. Tiền & Lưu chuyển dòng tiền thuần trong kỳ (Thực thu - Thực chi)',
+      noteCode: 'B03-DN',
+      formulaText: `Thực thu (${formatVND(baseReport.totalCashInflow)}) - Thực chi (${formatVND(
+        baseReport.totalCashOutflow
+      )})`,
+      recordCount:
+        filteredSales.length +
+        filteredImports.length +
+        baseReport.filteredReceiptVouchers.length +
+        baseReport.filteredPaymentVouchers.length,
+      recordCountLabel: `${
+        filteredSales.length + baseReport.filteredReceiptVouchers.length
+      } khoản thu / ${
+        filteredImports.length + baseReport.filteredPaymentVouchers.length
+      } khoản chi`,
+      amount: netCashflow110,
+      ratioToNetRevenuePct: pctOfNetRev(netCashflow110),
+      isHighlightRow: true,
+      description:
+        'Chênh lệch giữa Tổng tiền thực thu (Khách trả ngay + Thu nợ + Phiếu thu khác) và Tổng tiền thực chi (Trả NCC + Phiếu chi vận hành).',
+    },
+    {
+      code: '131',
+      drillDownCode: '131_customer_receivables',
+      section: 'B01_B03_BALANCE_CASHFLOW',
+      title: 'II. Các khoản phải thu ngắn hạn của Khách hàng (Công nợ KH còn nợ)',
+      noteCode: 'TK.131',
+      formulaText: '∑ Số tiền khách hàng còn nợ trên các hóa đơn trong kỳ',
+      recordCount: unpaidSalesInPeriod.length,
+      recordCountLabel: `${unpaidSalesInPeriod.length} hóa đơn KH còn nợ`,
+      amount: customerReceivables131,
+      ratioToNetRevenuePct: pctOfNetRev(customerReceivables131),
+      description:
+        'Tổng số dư công nợ phải thu từ khách hàng đối với các hóa đơn xuất bán chưa thanh toán hết.',
+    },
+    {
+      code: '156',
+      drillDownCode: '156_inventory_assets',
+      section: 'B01_B03_BALANCE_CASHFLOW',
+      title: 'III. Hàng tồn kho vật tư nông nghiệp cuối kỳ (Theo giá vốn nhập kho)',
+      noteCode: 'TK.156',
+      formulaText: '∑ (Số lượng tồn kho thực tế × Đơn giá vốn nhập kho)',
+      recordCount: inventoryValuationRows.length,
+      recordCountLabel: `${inventoryValuationRows.length} danh mục vật tư`,
+      amount: inventoryValue156,
+      ratioToNetRevenuePct: pctOfNetRev(inventoryValue156),
+      description:
+        'Tổng giá trị tài sản hàng hóa vật tư nông nghiệp hiện đang tồn kho tính theo đơn giá vốn nhập kho.',
+    },
+    {
+      code: '331',
+      drillDownCode: '331_supplier_payables',
+      section: 'B01_B03_BALANCE_CASHFLOW',
+      title: 'IV. Phải trả cho người bán ngắn hạn (Công nợ Nhà cung cấp còn nợ)',
+      noteCode: 'TK.331',
+      formulaText: '∑ Số tiền còn nợ Nhà cung cấp trên các phiếu nhập kho',
+      recordCount: unpaidImportsInPeriod.length,
+      recordCountLabel: `${unpaidImportsInPeriod.length} phiếu nhập còn nợ NCC`,
+      amount: supplierPayables331,
+      ratioToNetRevenuePct: pctOfNetRev(supplierPayables331),
+      description:
+        'Tổng số dư nghĩa vụ công nợ phải trả cho các Nhà cung cấp phân bón, thuốc BVTV, giống cây trồng.',
+    },
+    {
+      code: '400',
+      drillDownCode: '400_net_working_capital',
+      section: 'B01_B03_BALANCE_CASHFLOW',
+      title: 'V. Giá trị Tài sản thuần & Vốn lưu động ròng cuối kỳ (110 + 131 + 156 - 331)',
+      noteCode: 'B01-DN',
+      formulaText: 'Mã 110 + Mã 131 + Mã 156 - Mã 331',
+      recordCount:
+        inventoryValuationRows.length + unpaidSalesInPeriod.length + unpaidImportsInPeriod.length,
+      recordCountLabel: 'Tổng hợp Tài sản & Nguồn vốn',
+      amount: netWorkingCapital400,
+      ratioToNetRevenuePct: pctOfNetRev(netWorkingCapital400),
+      isHighlightRow: true,
+      description:
+        'Tổng giá trị tài sản ròng gồm Dòng tiền ròng + Phải thu khách hàng + Giá trị tồn kho trừ đi Nợ phải trả Nhà cung cấp.',
+    },
+  ];
+
+  return {
+    fiscalYear,
+    fromDate,
+    toDate,
+    taxRatePct,
+    incomeStatementLines,
+    balanceAndCashflowLines,
+    allLines: [...incomeStatementLines, ...balanceAndCashflowLines],
+    filteredSales,
+    discountedSales,
+    unpaidSalesInPeriod,
+    filteredImports,
+    unpaidImportsInPeriod,
+    operatingPaymentVouchers,
+    otherIncomeReceiptVouchers,
+    allFilteredReceiptVouchers: baseReport.filteredReceiptVouchers,
+    allFilteredPaymentVouchers: baseReport.filteredPaymentVouchers,
+    saleCogsBreakdown,
+    inventoryValuationRows,
+    grossRevenue01,
+    revenueDeduction02,
+    netRevenue10,
+    productCogs11a,
+    giftCogs11b,
+    totalCogs11,
+    grossProfit20,
+    operatingExpenses24,
+    operatingProfit30,
+    otherIncome31,
+    profitBeforeTax50,
+    estimatedTax51,
+    profitAfterTax60,
+    totalCashInflow: baseReport.totalCashInflow,
+    totalCashOutflow: baseReport.totalCashOutflow,
+    netCashflow110,
+    customerReceivables131,
+    inventoryValue156,
+    supplierPayables331,
+    netWorkingCapital400,
+  };
+}
+
+/**
+ * Checks whether a staff account is authorized to view and filter across all/multiple warehouses:
+ * - Primary Manager ('primary_manager')
+ * - Deputy General Manager ('deputy_general_manager')
+ * - Any account with 'manage_all_warehouses' permission or assignedWarehouse === 'Tất cả kho'
+ */
+export function canStaffFilterMultiWarehouses(staff: StaffMember): boolean {
+  return (
+    canAccountCreateStaff(staff) ||
+    staff.positionRole === 'primary_manager' ||
+    staff.positionRole === 'deputy_general_manager' ||
+    Boolean(staff.permissions?.includes('manage_all_warehouses')) ||
+    staff.assignedWarehouse === 'Tất cả kho'
+  );
+}
+
+/**
+ * Normalizes the selected warehouse list against all existing warehouses.
+ * Empty array or matching all available warehouses means "All Warehouses" are active.
+ */
+export function resolveActiveWarehouses(
+  staff: StaffMember,
+  allWarehouses: string[],
+  selectedWarehouses: string[]
+): string[] {
+  const defaultWarehouse = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  if (!canStaffFilterMultiWarehouses(staff)) {
+    const locked =
+      staff.assignedWarehouse && staff.assignedWarehouse !== 'Tất cả kho'
+        ? staff.assignedWarehouse
+        : defaultWarehouse;
+    return [locked];
+  }
+  const validSelected = selectedWarehouses.filter((w) => allWarehouses.includes(w));
+  if (validSelected.length === 0 || validSelected.length === allWarehouses.length) {
+    return allWarehouses;
+  }
+  return validSelected;
+}
+
+/**
+ * Filters records with an optional warehouseName field by the currently selected warehouses.
+ */
+export function filterRecordsBySelectedWarehouses<T extends { warehouseName?: string }>(
+  records: T[],
+  staff: StaffMember,
+  allWarehouses: string[],
+  selectedWarehouses: string[]
+): T[] {
+  const defaultWarehouse = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  const activeSet = new Set(resolveActiveWarehouses(staff, allWarehouses, selectedWarehouses));
+  if (canStaffFilterMultiWarehouses(staff) && activeSet.size >= allWarehouses.length) {
+    return records;
+  }
+  return records.filter((rec) => activeSet.has(rec.warehouseName || defaultWarehouse));
+}
+
+/**
+ * Formats the concise label for the warehouse filter badge (e.g. "Tất cả kho (3)", "Tâm An Mỹ Ngãi", "Đã chọn 2/3 kho").
+ */
+export function formatSelectedWarehousesBadge(
+  staff: StaffMember,
+  allWarehouses: string[],
+  selectedWarehouses: string[],
+  detailed = false
+): string {
+  const active = resolveActiveWarehouses(staff, allWarehouses, selectedWarehouses);
+  if (!canStaffFilterMultiWarehouses(staff)) {
+    return active[0] || 'Tâm An Mỹ Ngãi';
+  }
+  if (active.length === 0 || active.length >= allWarehouses.length) {
+    return `Tất cả kho (${allWarehouses.length})`;
+  }
+  if (active.length === 1) {
+    return active[0];
+  }
+  if (detailed) {
+    return `${active.join(', ')} (${active.length}/${allWarehouses.length} kho)`;
+  }
+  return `Đã chọn ${active.length}/${allWarehouses.length} kho`;
+}
 
 

@@ -1,28 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applyCustomerFifoDebtSettlement,
   applyDebtPayment,
   applyImportToInventory,
   applySaleToInventory,
+  applySupplierFifoDebtSettlement,
   authenticateStaffByGoogleEmail,
   buildBackupSnapshotPayload,
   calculateImportSummary,
   calculateSaleSummary,
   canAccountCreateStaff,
   canPerformRoleAction,
+  canStaffFilterMultiWarehouses,
   canViewAuditHistory,
+  computeCashflowAndFinancialReport,
   computeCustomerLedger,
   computeCustomerOldDebtSummary,
   computeDueDateAfterDays,
   computeReceivedItemsAndDebtReport,
   computeSupplierOldDebtSummary,
+  computeTaxAuthorityFinancialStatement,
   createAuditLogEntry,
   DEBT_TERM_DAY_OPTIONS,
   evaluateDebtUrgency,
   evaluateStaffAccessScope,
   evaluateStockAlert,
+  executeFiscalYearCloseAndCleanup,
+  executeFullApplicationDataWipe,
   filterCustomers,
+  filterRecordsBySelectedWarehouses,
   filterSearchableOptions,
+  formatSelectedWarehousesBadge,
+  generateFiscalYearOptions,
   generateSmartNotifications,
   generateSmartReportRecommendations,
   getDefaultPermissionsForPosition,
@@ -31,6 +41,10 @@ import {
   matchDebtTermDays,
   normalizeVietnameseSearch,
   parseAndValidateBackupPayload,
+  previewCustomerFifoDebtSettlement,
+  previewFiscalYearCloseAndCleanup,
+  previewSupplierFifoDebtSettlement,
+  resolveActiveWarehouses,
   updateImportRecord,
   updateSaleRecord,
 } from './businessLogic';
@@ -571,6 +585,7 @@ test('canAccountCreateStaff only allows trannhat1205@gmail.com or phone 03931202
   assert.equal(scope.canEditDeleteVouchers, false);
   assert.deepEqual(scope.allowedTabs, [
     'dashboard',
+    'receipt_vouchers',
     'customers',
     'debts',
     'vouchers',
@@ -855,6 +870,752 @@ test('isDateWithinRange, computeReceivedItemsAndDebtReport, generateSmartReportR
   assert.equal(
     recs.every((r) => staffScope.allowedReportCategories.includes(r.targetCategory)),
     true
+  );
+});
+
+test('applyCustomerFifoDebtSettlement and applySupplierFifoDebtSettlement settle unpaid records strictly in chronological order of debt date and update cashflow/financial reports', () => {
+  const multiSales: SaleTransaction[] = [
+    {
+      id: 'sale_newer',
+      invoiceCode: 'HD-2611-010',
+      customerId: 'cust_01',
+      customerName: 'Ông Nguyễn Văn Hòa',
+      customerPhone: '0913456789',
+      productId: 'prod_2',
+      productName: 'Thuốc trừ sâu Radiant 60SC',
+      unit: 'Chai',
+      quantity: 10,
+      unitPrice: 350000,
+      totalAmount: 3500000,
+      paidAmount: 500000,
+      debtAmount: 3000000,
+      dueDate: '2026-11-25',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-12T10:00:00Z',
+      updatedAt: '2026-11-12T10:00:00Z',
+    },
+    {
+      id: 'sale_oldest',
+      invoiceCode: 'HD-2611-001',
+      customerId: 'cust_01',
+      customerName: 'Ông Nguyễn Văn Hòa',
+      customerPhone: '0913456789',
+      productId: 'prod_1',
+      productName: 'Phân bón NPK Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 10,
+      unitPrice: 750000,
+      totalAmount: 7500000,
+      paidAmount: 2500000,
+      debtAmount: 5000000,
+      dueDate: '2026-11-10',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-02T09:00:00Z',
+      updatedAt: '2026-11-02T09:00:00Z',
+    },
+  ];
+
+  // Total customer debt = 5,000,000 (oldest 2026-11-02) + 3,000,000 (newer 2026-11-12) = 8,000,000
+  // Entering lump-sum 6,200,000 should completely settle HD-2611-001 (5,000,000) and deduct 1,200,000 from HD-2611-010 (leaving 1,800,000)
+  const preview = previewCustomerFifoDebtSettlement(
+    multiSales,
+    { customerId: 'cust_01' },
+    6200000
+  );
+  assert.equal(preview.totalPreviousDebt, 8000000);
+  assert.equal(preview.totalAllocated, 6200000);
+  assert.equal(preview.totalRemainingDebt, 1800000);
+  assert.equal(preview.allocations[0].code, 'HD-2611-001');
+  assert.equal(preview.allocations[0].allocatedAmount, 5000000);
+  assert.equal(preview.allocations[0].remainingDebt, 0);
+  assert.equal(preview.allocations[1].code, 'HD-2611-010');
+  assert.equal(preview.allocations[1].allocatedAmount, 1200000);
+  assert.equal(preview.allocations[1].remainingDebt, 1800000);
+
+  const settledCustomer = applyCustomerFifoDebtSettlement(
+    multiSales,
+    { customerId: 'cust_01' },
+    6200000,
+    'Thu quyết toán tổng công nợ Ông Hòa',
+    '2026-11-16T10:00:00Z'
+  );
+  const updatedOldest = settledCustomer.updatedSales.find((s) => s.id === 'sale_oldest')!;
+  const updatedNewer = settledCustomer.updatedSales.find((s) => s.id === 'sale_newer')!;
+  assert.equal(updatedOldest.debtAmount, 0);
+  assert.equal(updatedOldest.status, 'paid');
+  assert.equal(updatedNewer.debtAmount, 1800000);
+  assert.equal(updatedNewer.status, 'partial');
+
+  // Supplier FIFO settlement test
+  const multiImports: ImportTransaction[] = [
+    {
+      id: 'imp_newer',
+      receiptCode: 'PN-2611-009',
+      supplierName: 'Công ty Phân bón Bình Điền',
+      supplierPhone: '02837560110',
+      productId: 'prod_1',
+      productName: 'NPK Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 10,
+      unitCost: 680000,
+      totalCost: 6800000,
+      paidAmount: 2800000,
+      debtAmount: 4000000,
+      dueDate: '2026-11-25',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-10T08:00:00Z',
+      updatedAt: '2026-11-10T08:00:00Z',
+    },
+    {
+      id: 'imp_oldest',
+      receiptCode: 'PN-2611-001',
+      supplierName: 'Công ty Phân bón Bình Điền',
+      supplierPhone: '02837560110',
+      productId: 'prod_1',
+      productName: 'NPK Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 20,
+      unitCost: 680000,
+      totalCost: 13600000,
+      paidAmount: 3600000,
+      debtAmount: 10000000,
+      dueDate: '2026-11-15',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-01T08:00:00Z',
+      updatedAt: '2026-11-01T08:00:00Z',
+    },
+  ];
+
+  const supPreview = previewSupplierFifoDebtSettlement(
+    multiImports,
+    { supplierName: 'Công ty Phân bón Bình Điền' },
+    11500000
+  );
+  assert.equal(supPreview.totalPreviousDebt, 14000000);
+  assert.equal(supPreview.allocations[0].code, 'PN-2611-001');
+  assert.equal(supPreview.allocations[0].allocatedAmount, 10000000);
+  assert.equal(supPreview.allocations[1].code, 'PN-2611-009');
+  assert.equal(supPreview.allocations[1].allocatedAmount, 1500000);
+
+  const settledSupplier = applySupplierFifoDebtSettlement(
+    multiImports,
+    { supplierName: 'Công ty Phân bón Bình Điền' },
+    11500000,
+    'Chi quyết toán nợ NCC Bình Điền',
+    '2026-11-16T11:00:00Z'
+  );
+  const updatedImpOldest = settledSupplier.updatedImports.find((i) => i.id === 'imp_oldest')!;
+  const updatedImpNewer = settledSupplier.updatedImports.find((i) => i.id === 'imp_newer')!;
+  assert.equal(updatedImpOldest.debtAmount, 0);
+  assert.equal(updatedImpOldest.status, 'paid');
+  assert.equal(updatedImpNewer.debtAmount, 2500000);
+
+  // Cashflow & Financial Profit integration test
+  const report = computeCashflowAndFinancialReport({
+    sales: settledCustomer.updatedSales,
+    imports: settledSupplier.updatedImports,
+    products: mockProducts,
+    receiptVouchers: [
+      {
+        id: 'rv_1',
+        voucherCode: 'PT-01',
+        groupName: 'Thu nợ bán hàng khách hàng',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Ông Nguyễn Văn Hòa',
+        partnerPhone: '0913456789',
+        amount: 6200000,
+        paymentMethod: 'Chuyển khoản ngân hàng',
+        isDebtSettlement: true,
+        settledAllocations: settledCustomer.settledAllocations,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-16T10:00:00Z',
+        updatedAt: '2026-11-16T10:00:00Z',
+      },
+      {
+        id: 'rv_2',
+        voucherCode: 'PT-02',
+        groupName: 'Thu chiết khấu / Hỗ trợ từ Nhà cung cấp',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'NCC Bình Điền',
+        partnerPhone: '02837560110',
+        amount: 500000,
+        paymentMethod: 'Chuyển khoản ngân hàng',
+        isDebtSettlement: false,
+        countsTowardOtherIncome: true,
+        note: 'Thưởng chiết khấu',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-16T10:30:00Z',
+        updatedAt: '2026-11-16T10:30:00Z',
+      },
+    ],
+    paymentVouchers: [
+      {
+        id: 'pv_1',
+        voucherCode: 'PC-01',
+        groupName: 'Chi trả nợ Nhà cung cấp',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Công ty Phân bón Bình Điền',
+        partnerPhone: '02837560110',
+        amount: 11500000,
+        paymentMethod: 'Chuyển khoản ngân hàng',
+        isDebtSettlement: true,
+        settledAllocations: settledSupplier.settledAllocations,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-16T11:00:00Z',
+        updatedAt: '2026-11-16T11:00:00Z',
+      },
+      {
+        id: 'pv_2',
+        voucherCode: 'PC-02',
+        groupName: 'Chi phí vận chuyển & Bốc xếp hàng hóa',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Đội xe bốc xếp',
+        partnerPhone: '0900111222',
+        amount: 300000,
+        paymentMethod: 'Tiền mặt',
+        isDebtSettlement: false,
+        countsTowardOperatingExpense: true,
+        note: 'Chi bốc xếp',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-16T11:30:00Z',
+        updatedAt: '2026-11-16T11:30:00Z',
+      },
+    ],
+    fromDate: '2026-11-01',
+    toDate: '2026-11-30',
+  });
+
+  // Sales paid inflow = 7,500,000 + 1,700,000 = 9,200,000; other receipt inflow = 500,000 -> totalCashInflow = 9,700,000
+  assert.equal(report.salesPaidInflow, 9200000);
+  assert.equal(report.otherReceiptInflow, 500000);
+  assert.equal(report.totalCashInflow, 9700000);
+  // Imports paid outflow = 13,600,000 + 4,300,000 = 17,900,000; operating payment outflow = 300,000 -> totalCashOutflow = 18,200,000
+  assert.equal(report.importsPaidOutflow, 17900000);
+  assert.equal(report.operatingPaymentOutflow, 300000);
+  assert.equal(report.totalCashOutflow, 18200000);
+  // Gross profit = (7,500,000 + 3,500,000) - (10*680,000 + 10*145,000) = 11,000,000 - 8,250,000 = 2,750,000
+  // Net profit = 2,750,000 + 500,000 (other income) - 300,000 (operating expense) = 2,950,000
+  assert.equal(report.grossProfit, 2750000);
+  assert.equal(report.otherIncome, 500000);
+  assert.equal(report.operatingExpenses, 300000);
+  assert.equal(report.netProfit, 2950000);
+});
+
+test('previewFiscalYearCloseAndCleanup, executeFiscalYearCloseAndCleanup, and executeFullApplicationDataWipe clean up settled fiscal year data while carrying forward remaining inventory and debts into the new fiscal year', () => {
+  const sampleCustomers: CustomerProfile[] = [
+    {
+      id: 'cust_01',
+      code: 'KH-001',
+      name: 'Ông Nguyễn Văn Hòa',
+      phone: '0913456789',
+      email: '',
+      address: 'Cao Lãnh',
+      group: 'Nhà nông',
+      note: '',
+      totalPurchased: 30000000,
+      totalDebt: 3500000,
+      ownerId: 'u1',
+      createdAt: '2026-01-01',
+      updatedAt: '2026-11-01',
+    },
+  ];
+
+  const sampleSales: SaleTransaction[] = [
+    {
+      id: 's_paid_2026',
+      invoiceCode: 'HD-2605-001',
+      customerId: 'cust_01',
+      customerName: 'Ông Nguyễn Văn Hòa',
+      customerPhone: '0913456789',
+      productId: 'prod_1',
+      productName: 'Phân bón NPK 20-20-15 Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 20,
+      unitPrice: 750000,
+      totalAmount: 15000000,
+      paidAmount: 15000000,
+      debtAmount: 0,
+      dueDate: '2026-05-15',
+      status: 'paid',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: 'Đã tất toán hết công nợ năm 2026',
+      staffName: 'Trần Đình Nhất',
+      ownerId: 'u1',
+      createdAt: '2026-05-10T08:00:00Z',
+      updatedAt: '2026-05-10T08:00:00Z',
+    },
+    {
+      id: 's_unpaid_2026',
+      invoiceCode: 'HD-2611-002',
+      customerId: 'cust_01',
+      customerName: 'Ông Nguyễn Văn Hòa',
+      customerPhone: '0913456789',
+      productId: 'prod_2',
+      productName: 'Thuốc trừ sâu Radiant 60SC',
+      unit: 'Chai',
+      quantity: 10,
+      unitPrice: 350000,
+      totalAmount: 3500000,
+      paidAmount: 1000000,
+      debtAmount: 2500000,
+      dueDate: '2026-12-10',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: 'Còn nợ chuyển qua năm mới',
+      staffName: 'Trần Đình Nhất',
+      ownerId: 'u1',
+      createdAt: '2026-11-12T08:00:00Z',
+      updatedAt: '2026-11-12T08:00:00Z',
+    },
+  ];
+
+  const sampleImports: ImportTransaction[] = [
+    {
+      id: 'i_paid_2026',
+      receiptCode: 'PN-2603-001',
+      supplierName: 'Công ty Phân bón Bình Điền',
+      supplierPhone: '02837560110',
+      productId: 'prod_1',
+      productName: 'Phân bón NPK 20-20-15 Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 30,
+      unitCost: 680000,
+      totalCost: 20400000,
+      paidAmount: 20400000,
+      debtAmount: 0,
+      dueDate: '2026-04-01',
+      status: 'paid',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: 'Đã trả hết nợ NCC',
+      staffName: 'Trần Đình Nhất',
+      ownerId: 'u1',
+      createdAt: '2026-03-15T08:00:00Z',
+      updatedAt: '2026-03-15T08:00:00Z',
+    },
+    {
+      id: 'i_unpaid_2026',
+      receiptCode: 'PN-2611-005',
+      supplierName: 'Công ty Phân bón Bình Điền',
+      supplierPhone: '02837560110',
+      productId: 'prod_1',
+      productName: 'Phân bón NPK 20-20-15 Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 20,
+      unitCost: 680000,
+      totalCost: 13600000,
+      paidAmount: 5600000,
+      debtAmount: 8000000,
+      dueDate: '2026-12-20',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: 'Còn nợ NCC',
+      staffName: 'Trần Đình Nhất',
+      ownerId: 'u1',
+      createdAt: '2026-11-14T08:00:00Z',
+      updatedAt: '2026-11-14T08:00:00Z',
+    },
+  ];
+
+  const preview = previewFiscalYearCloseAndCleanup({
+    fiscalYear: 2026,
+    products: mockProducts,
+    customers: sampleCustomers,
+    sales: sampleSales,
+    imports: sampleImports,
+    receiptVouchers: [
+      {
+        id: 'rv_2026',
+        voucherCode: 'PT-2611-001',
+        groupName: 'Thu nợ bán hàng khách hàng',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Ông Nguyễn Văn Hòa',
+        partnerPhone: '0913456789',
+        amount: 5000000,
+        paymentMethod: 'Tiền mặt',
+        isDebtSettlement: true,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-01T08:00:00Z',
+        updatedAt: '2026-11-01T08:00:00Z',
+      },
+    ],
+    paymentVouchers: [
+      {
+        id: 'pv_2026',
+        voucherCode: 'PC-2611-001',
+        groupName: 'Chi trả nợ Nhà cung cấp',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Công ty Phân bón Bình Điền',
+        partnerPhone: '02837560110',
+        amount: 10000000,
+        paymentMethod: 'Chuyển khoản ngân hàng',
+        isDebtSettlement: true,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-05T08:00:00Z',
+        updatedAt: '2026-11-05T08:00:00Z',
+      },
+    ],
+    savedVouchers: [],
+  });
+
+  assert.equal(preview.fiscalYear, 2026);
+  assert.equal(preview.newFiscalYear, 2027);
+  assert.equal(preview.settledSalesToDelete.length, 1);
+  assert.equal(preview.settledImportsToDelete.length, 1);
+  assert.equal(preview.receiptVouchersToDelete.length, 1);
+  assert.equal(preview.paymentVouchersToDelete.length, 1);
+  assert.equal(preview.totalRecordsToDelete, 4);
+  assert.equal(preview.carriedInventoryCount, 2);
+  assert.equal(preview.carriedCustomerDebtCount, 1);
+  assert.equal(preview.carriedCustomerDebtTotal, 2500000);
+  assert.equal(preview.carriedSupplierDebtCount, 1);
+  assert.equal(preview.carriedSupplierDebtTotal, 8000000);
+
+  const execution = executeFiscalYearCloseAndCleanup({
+    fiscalYear: 2026,
+    products: mockProducts,
+    customers: sampleCustomers,
+    sales: sampleSales,
+    imports: sampleImports,
+    receiptVouchers: preview.receiptVouchersToDelete,
+    paymentVouchers: preview.paymentVouchersToDelete,
+    savedVouchers: [],
+    nowIso: '2026-12-31T23:59:00Z',
+  });
+
+  assert.equal(execution.remainingProducts.length, 2);
+  assert.equal(execution.remainingSales.length, 1);
+  assert.equal(execution.remainingSales[0].invoiceCode, 'HD-2611-002');
+  assert.equal(execution.remainingSales[0].debtAmount, 2500000);
+  assert.equal(execution.remainingSales[0].note.includes('Chuyển sang đầu kỳ năm 2027'), true);
+  assert.equal(execution.remainingImports.length, 1);
+  assert.equal(execution.remainingImports[0].receiptCode, 'PN-2611-005');
+  assert.equal(execution.remainingImports[0].debtAmount, 8000000);
+  assert.equal(execution.remainingReceiptVouchers.length, 0);
+  assert.equal(execution.remainingPaymentVouchers.length, 0);
+  assert.equal(execution.updatedCustomers[0].totalDebt, 2500000);
+
+  // Full application data wipe preserves primary manager account
+  const primaryManager: StaffMember = {
+    uid: 'staff_manager_01',
+    username: 'admin',
+    password: '885300',
+    displayName: 'Trần Đình Nhất',
+    email: 'trannhat1205@gmail.com',
+    phone: '0393120246',
+    role: 'manager',
+    positionRole: 'primary_manager',
+    permissions: ['create_staff_accounts', 'manage_all_warehouses'],
+    assignedWarehouse: 'Tất cả kho',
+    active: true,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-11-18',
+  };
+  const wipeResult = executeFullApplicationDataWipe({
+    staffList: [primaryManager],
+  });
+  assert.equal(wipeResult.products.length, 0);
+  assert.equal(wipeResult.sales.length, 0);
+  assert.equal(wipeResult.imports.length, 0);
+  assert.equal(wipeResult.preservedStaffList.length, 1);
+  assert.equal(wipeResult.preservedStaffList[0].email, 'trannhat1205@gmail.com');
+});
+
+test('generateFiscalYearOptions pre-calculates future fiscal years (2028, 2029, 2030, 2031, 2032... 2040+) and computeTaxAuthorityFinancialStatement produces full tax-authority line items with drill-down audit records', () => {
+  const defaultYears = generateFiscalYearOptions({ currentYear: 2026 });
+  assert.equal(defaultYears.includes(2024), true);
+  assert.equal(defaultYears.includes(2028), true);
+  assert.equal(defaultYears.includes(2029), true);
+  assert.equal(defaultYears.includes(2030), true);
+  assert.equal(defaultYears.includes(2031), true);
+  assert.equal(defaultYears.includes(2032), true);
+  assert.equal(defaultYears.includes(2040), true);
+  assert.equal(defaultYears[defaultYears.length - 1] >= 2041, true);
+
+  // Selecting year 2045 automatically extends options through 2050
+  const extendedYears = generateFiscalYearOptions({ currentYear: 2026, selectedYear: 2045 });
+  assert.equal(extendedYears.includes(2045), true);
+  assert.equal(extendedYears.includes(2050), true);
+
+  const taxReport = computeTaxAuthorityFinancialStatement({
+    fiscalYear: 2026,
+    fromDate: '2026-01-01',
+    toDate: '2026-12-31',
+    taxRatePct: 1.5,
+    products: mockProducts,
+    sales: [
+      {
+        id: 'sale_tax_1',
+        invoiceCode: 'HD-2611-001',
+        customerId: 'cust_01',
+        customerName: 'Ông Nguyễn Văn Hòa',
+        customerPhone: '0913456789',
+        productId: 'prod_1',
+        productName: 'Phân bón NPK 20-20-15 Đầu Trâu',
+        unit: 'Bao 50kg',
+        quantity: 20,
+        unitPrice: 750000,
+        discountAmount: 500000,
+        giftProductId: 'prod_2',
+        giftProductName: 'Thuốc trừ sâu sinh học Radiant 60SC',
+        giftUnit: 'Chai 100ml',
+        giftQuantity: 2,
+        giftUnitCost: 145000,
+        totalAmount: 14500000, // (20 * 750,000) - 500,000
+        paidAmount: 10000000,
+        debtAmount: 4500000,
+        dueDate: '2026-12-15',
+        status: 'partial',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        note: '',
+        staffName: 'Trần Đình Nhất',
+        ownerId: 'u1',
+        createdAt: '2026-11-10T08:00:00Z',
+        updatedAt: '2026-11-10T08:00:00Z',
+      },
+    ],
+    imports: [
+      {
+        id: 'imp_tax_1',
+        receiptCode: 'PN-2611-001',
+        supplierName: 'Công ty Phân bón Bình Điền',
+        supplierPhone: '02837560110',
+        productId: 'prod_1',
+        productName: 'Phân bón NPK 20-20-15 Đầu Trâu',
+        unit: 'Bao 50kg',
+        quantity: 20,
+        unitCost: 680000,
+        totalCost: 13600000,
+        paidAmount: 8600000,
+        debtAmount: 5000000,
+        dueDate: '2026-12-20',
+        status: 'partial',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        note: '',
+        staffName: 'Trần Đình Nhất',
+        ownerId: 'u1',
+        createdAt: '2026-11-05T08:00:00Z',
+        updatedAt: '2026-11-05T08:00:00Z',
+      },
+    ],
+    receiptVouchers: [
+      {
+        id: 'rv_tax_1',
+        voucherCode: 'PT-2611-01',
+        groupName: 'Thu thưởng chiết khấu Nhà cung cấp',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'NCC Bình Điền',
+        partnerPhone: '02837560110',
+        amount: 600000,
+        paymentMethod: 'Chuyển khoản ngân hàng',
+        isDebtSettlement: false,
+        countsTowardOtherIncome: true,
+        note: 'Thưởng đại lý',
+        staffName: 'Trần Đình Nhất',
+        ownerId: 'u1',
+        createdAt: '2026-11-12T08:00:00Z',
+        updatedAt: '2026-11-12T08:00:00Z',
+      },
+    ],
+    paymentVouchers: [
+      {
+        id: 'pv_tax_1',
+        voucherCode: 'PC-2611-01',
+        groupName: 'Chi phí vận chuyển & bốc xếp',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Đội xe vận tải',
+        partnerPhone: '0909123456',
+        amount: 400000,
+        paymentMethod: 'Tiền mặt',
+        isDebtSettlement: false,
+        countsTowardOperatingExpense: true,
+        note: 'Chi bốc xếp',
+        staffName: 'Trần Đình Nhất',
+        ownerId: 'u1',
+        createdAt: '2026-11-14T08:00:00Z',
+        updatedAt: '2026-11-14T08:00:00Z',
+      },
+    ],
+  });
+
+  // Mã 01: Gross revenue = 15,000,000
+  assert.equal(taxReport.grossRevenue01, 15000000);
+  // Mã 02: Revenue deduction = 500,000
+  assert.equal(taxReport.revenueDeduction02, 500000);
+  // Mã 10: Net revenue = 14,500,000
+  assert.equal(taxReport.netRevenue10, 14500000);
+  // Mã 11: COGS = 20 * 680,000 (13,600,000) + 2 * 145,000 (290,000) = 13,890,000
+  assert.equal(taxReport.productCogs11a, 13600000);
+  assert.equal(taxReport.giftCogs11b, 290000);
+  assert.equal(taxReport.totalCogs11, 13890000);
+  // Mã 20: Gross profit = 14,500,000 - 13,890,000 = 610,000
+  assert.equal(taxReport.grossProfit20, 610000);
+  // Mã 24: Operating expenses = 400,000
+  assert.equal(taxReport.operatingExpenses24, 400000);
+  // Mã 30: Operating profit = 610,000 - 400,000 = 210,000
+  assert.equal(taxReport.operatingProfit30, 210000);
+  // Mã 31: Other income = 600,000
+  assert.equal(taxReport.otherIncome31, 600000);
+  // Mã 50: Profit before tax = 210,000 + 600,000 = 810,000
+  assert.equal(taxReport.profitBeforeTax50, 810000);
+  // Mã 51: Estimated tax (1.5% of 14,500,000) = 217,500
+  assert.equal(taxReport.estimatedTax51, 217500);
+  // Mã 60: Profit after tax = 810,000 - 217,500 = 592,500
+  assert.equal(taxReport.profitAfterTax60, 592500);
+  // Mã 131: Customer receivables = 4,500,000; Mã 331: Supplier payables = 5,000,000
+  assert.equal(taxReport.customerReceivables131, 4500000);
+  assert.equal(taxReport.supplierPayables331, 5000000);
+  // Drill-down line count check
+  assert.equal(taxReport.incomeStatementLines.length, 11);
+  assert.equal(taxReport.balanceAndCashflowLines.length, 5);
+  assert.equal(taxReport.saleCogsBreakdown.length, 1);
+  assert.equal(taxReport.inventoryValuationRows.length, 2);
+});
+
+test('canStaffFilterMultiWarehouses, resolveActiveWarehouses, filterRecordsBySelectedWarehouses, and formatSelectedWarehousesBadge support single, multi-checkbox, and all-warehouse filtering for Primary Manager and Deputy General Manager', () => {
+  const warehouses = ['Tâm An Mỹ Ngãi', 'Tâm An Cao Lãnh', 'Tâm An Mỹ Trà'];
+
+  const primaryManager: StaffMember = {
+    uid: 'staff_01',
+    username: 'admin',
+    password: '885300',
+    displayName: 'Trần Đình Nhất',
+    email: 'trannhat1205@gmail.com',
+    phone: '0393120246',
+    role: 'manager',
+    positionRole: 'primary_manager',
+    permissions: ['create_staff_accounts', 'manage_all_warehouses'],
+    assignedWarehouse: 'Tất cả kho',
+    active: true,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-11-21',
+  };
+
+  const deputyManager: StaffMember = {
+    uid: 'staff_02',
+    username: 'pho_quanly',
+    password: '123456',
+    displayName: 'Nguyễn Minh Quân',
+    email: 'quan.pho@gmail.com',
+    phone: '0909111222',
+    role: 'manager',
+    positionRole: 'deputy_general_manager',
+    permissions: ['manage_all_warehouses'],
+    assignedWarehouse: 'Tất cả kho',
+    active: true,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-11-21',
+  };
+
+  const singleWarehouseStaff: StaffMember = {
+    uid: 'staff_03',
+    username: 'nam_banhang',
+    password: '123456',
+    displayName: 'Lê Hoàng Nam',
+    email: 'nam@gmail.com',
+    phone: '0909333444',
+    role: 'staff',
+    positionRole: 'warehouse_manager',
+    permissions: ['manage_single_warehouse'],
+    assignedWarehouse: 'Tâm An Mỹ Ngãi',
+    active: true,
+    createdAt: '2026-01-01',
+    updatedAt: '2026-11-21',
+  };
+
+  assert.equal(canStaffFilterMultiWarehouses(primaryManager), true);
+  assert.equal(canStaffFilterMultiWarehouses(deputyManager), true);
+  assert.equal(canStaffFilterMultiWarehouses(singleWarehouseStaff), false);
+
+  const sampleRecords = [
+    { id: 'r1', warehouseName: 'Tâm An Mỹ Ngãi' },
+    { id: 'r2', warehouseName: 'Tâm An Cao Lãnh' },
+    { id: 'r3', warehouseName: 'Tâm An Mỹ Trà' },
+  ];
+
+  // 1. All warehouses selected (empty or all 3)
+  assert.equal(
+    filterRecordsBySelectedWarehouses(sampleRecords, primaryManager, warehouses, []).length,
+    3
+  );
+  assert.equal(
+    formatSelectedWarehousesBadge(primaryManager, warehouses, []),
+    'Tất cả kho (3)'
+  );
+
+  // 2. Single warehouse selected by Deputy General Manager
+  const singleFiltered = filterRecordsBySelectedWarehouses(
+    sampleRecords,
+    deputyManager,
+    warehouses,
+    ['Tâm An Cao Lãnh']
+  );
+  assert.equal(singleFiltered.length, 1);
+  assert.equal(singleFiltered[0].id, 'r2');
+  assert.equal(
+    formatSelectedWarehousesBadge(deputyManager, warehouses, ['Tâm An Cao Lãnh']),
+    'Tâm An Cao Lãnh'
+  );
+
+  // 3. Multi-warehouse (2 warehouses checked simultaneously)
+  const twoWarehouses = ['Tâm An Mỹ Ngãi', 'Tâm An Mỹ Trà'];
+  const multiFiltered = filterRecordsBySelectedWarehouses(
+    sampleRecords,
+    primaryManager,
+    warehouses,
+    twoWarehouses
+  );
+  assert.equal(multiFiltered.length, 2);
+  assert.deepEqual(
+    multiFiltered.map((r) => r.id),
+    ['r1', 'r3']
+  );
+  assert.equal(
+    formatSelectedWarehousesBadge(primaryManager, warehouses, twoWarehouses, false),
+    'Đã chọn 2/3 kho'
+  );
+  assert.equal(
+    formatSelectedWarehousesBadge(primaryManager, warehouses, twoWarehouses, true),
+    'Tâm An Mỹ Ngãi, Tâm An Mỹ Trà (2/3 kho)'
+  );
+
+  // 4. Single warehouse staff is always locked to their assigned warehouse even if selectedWarehouses is passed
+  const staffFiltered = filterRecordsBySelectedWarehouses(
+    sampleRecords,
+    singleWarehouseStaff,
+    warehouses,
+    ['Tâm An Cao Lãnh', 'Tâm An Mỹ Trà']
+  );
+  assert.equal(staffFiltered.length, 1);
+  assert.equal(staffFiltered[0].warehouseName, 'Tâm An Mỹ Ngãi');
+  assert.deepEqual(
+    resolveActiveWarehouses(singleWarehouseStaff, warehouses, ['Tâm An Cao Lãnh']),
+    ['Tâm An Mỹ Ngãi']
   );
 });
 

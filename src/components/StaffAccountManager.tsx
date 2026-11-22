@@ -959,13 +959,9 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
               <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
                 <UserPlus className="w-4 h-4 text-emerald-700 shrink-0" />
                 <span>
-                  Tạo Tài Khoản & Đánh Dấu [X] Phân Quyền ({ADMIN_BACKUP_EMAIL})
+                  Tạo Tài Khoản & Đánh Dấu [X] Phân Quyền
                 </span>
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Chỉ Quản lý chính ({ADMIN_BACKUP_EMAIL} / {ADMIN_PRIMARY_PHONE}) mới có quyền tạo tài
-                khoản và phân quyền [X] theo thời gian thực.
-              </p>
             </div>
 
             <form onSubmit={handleCreateAccountSubmit} className="p-5 sm:p-6 space-y-4">
@@ -1268,15 +1264,10 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
                   <span>
                     {canCreateAndAssignRoles
-                      ? `Danh Sách Tài Khoản & Cập Nhật Phân Quyền [X] Thời Gian Thực (${visibleStaffRows.length} TK)`
+                      ? 'Danh Sách Tài Khoản & Cập Nhật Phân Quyền'
                       : `Thông Tin Tài Khoản Cá Nhân (@${currentStaff.username})`}
                   </span>
                 </h3>
-                {canCreateAndAssignRoles && (
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Bấm trực tiếp vào từng ô [X] / [ ] dưới mỗi nhân sự hoặc bấm &ldquo;Phân quyền [X]&rdquo; để cập nhật ngay lập tức theo thời gian thực
-                  </p>
-                )}
               </div>
             </div>
 
@@ -1492,15 +1483,9 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                 <h2 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-2">
                   <UserCog className="w-4 h-4 text-emerald-700 shrink-0" />
                   <span>
-                    Chỉnh Sửa Thông Tin Cá Nhân — Bổ Sung Gmail Nhân Viên (@
-                    {targetPersonalStaff.username})
+                    Chỉnh Sửa Thông Tin Cá Nhân
                   </span>
                 </h2>
-                <p className="text-xs text-slate-600 mt-0.5">
-                  Bổ sung Gmail cá nhân, Số điện thoại và Mật khẩu mới để từ lần sau đăng nhập bằng
-                  nút <strong>Đăng nhập bằng Google</strong> hoặc bằng{' '}
-                  <strong>Gmail / Số điện thoại + Mật khẩu mới</strong>.
-                </p>
               </div>
               <span
                 className={`px-2.5 py-1 text-[11px] font-bold rounded-md border ${
@@ -1622,7 +1607,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     htmlFor="personal-profile-new-password"
                     className="block text-xs font-semibold text-slate-700 mb-1"
                   >
-                    Mật khẩu mới (Có con mắt bật/tắt — Để trống nếu giữ nguyên)
+                    Mật khẩu mới
                   </label>
                   <PasswordInputWithEye
                     id="personal-profile-new-password"

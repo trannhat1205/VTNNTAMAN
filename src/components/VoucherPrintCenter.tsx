@@ -444,23 +444,10 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         </div>
       </div>
 
-      {/* NEW: Phiếu Tổng Hợp Chung Danh Sách Các Mặt Hàng Đã Nhận & Còn Nợ (Từ ngày ... Đến ngày ...) */}
+      {/* NEW: Phiếu Tổng Hợp Chung Danh Sách Các Mặt Hàng Đã Nhận & Còn Nợ */}
       <div className="bg-white p-4 sm:p-6 rounded-xl border border-emerald-200 space-y-4">
         <div className="flex flex-col gap-3">
-          <div className="min-w-0">
-            <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide flex items-center gap-1.5">
-              <Calendar className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-              <span>Phiếu Tổng Hợp Chung & Tệp Báo Cáo Các Mặt Hàng Đã Nhận (Từ ngày ... Đến ngày ...)</span>
-            </div>
-            <h3 className="text-sm sm:text-base font-bold text-slate-900 mt-0.5">
-              Danh Sách Tổng Hợp Tất Cả Các Hàng Hóa Đã Nhận / Còn Nợ & Thu Nợ Trong Kỳ
-            </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Chọn khoảng thời gian từ ngày ... đến ngày ... và khách hàng để hiện lên bảng danh sách tất cả các mặt hàng đã nhận, đối chiếu công nợ và in Phiếu tổng hợp chung (PDF & Excel).
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-slate-100">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => {
@@ -514,7 +501,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
               className="px-3.5 py-2 text-xs font-semibold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap"
             >
               <FileSpreadsheet className="w-4 h-4 text-emerald-700 shrink-0" />
-              <span>Xuất Tệp Báo Cáo Mặt Hàng Đã Nhận (Excel)</span>
+              <span>Xuất Tệp Báo Cáo Mặt Hàng Đã Nhận</span>
             </button>
           </div>
         </div>

@@ -31,6 +31,7 @@ import {
   evaluateDebtUrgency,
   filterCustomers,
   formatVND,
+  previewCustomerFifoDebtSettlement,
 } from '../utils/businessLogic';
 import {
   exportCombinedReceivedItemsAndDebtExcel,
@@ -57,6 +58,15 @@ interface CustomerModuleProps {
   onDeleteCustomer: (customerId: string) => void;
   onImportCustomersFromExcel: (rows: Record<string, unknown>[]) => number;
   onCollectCustomerDebt: (saleId: string, amount: number, note: string) => void;
+  onSettleCustomerTotalDebtFifo?: (params: {
+    customerId?: string;
+    customerName: string;
+    customerPhone: string;
+    totalAmount: number;
+    groupName: string;
+    paymentMethod: string;
+    note: string;
+  }) => void;
   onCreateSaleForCustomer: (customerId: string) => void;
   leadDays: number;
 }
@@ -73,6 +83,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
   onDeleteCustomer,
   onImportCustomersFromExcel,
   onCollectCustomerDebt,
+  onSettleCustomerTotalDebtFifo,
   onCreateSaleForCustomer,
   leadDays,
 }) => {
@@ -538,19 +549,16 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                 </div>
               </div>
 
-              {/* NEW: Danh Sách Tổng Hợp Các Mặt Hàng Đã Nhận & Còn Nợ / Thu Nợ (Từ ngày ... Đến ngày ...) */}
+              {/* NEW: Danh Sách Tổng Hợp Các Mặt Hàng Đã Nhận & Còn Nợ / Thu Nợ */}
               <div className="p-4 sm:p-5 border-b border-slate-200 bg-emerald-50/30 space-y-3.5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <div className="text-xs font-bold text-emerald-900 flex items-center gap-1.5">
                       <Calendar className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                       <span>
-                        Danh sách tổng hợp các mặt hàng đã nhận & còn nợ (Từ ngày ... đến ngày ...)
+                        Danh sách tổng hợp các mặt hàng đã nhận & còn nợ
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      Chọn khoảng ngày để xem toàn bộ hàng hóa đã nhận, thu nợ gộp hoặc in Phiếu tổng hợp chung
-                    </p>
                   </div>
                 </div>
 
@@ -972,7 +980,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                   htmlFor="batch-collect-note"
                   className="block text-xs font-semibold text-slate-700 mb-1"
                 >
-                  Ghi chú thu nợ tổng hợp
+                  Ghi chú thu nợ tổng hợp (Tự động trừ các hóa đơn nợ cũ theo thứ tự ngày nợ)
                 </label>
                 <input
                   id="batch-collect-note"
@@ -982,6 +990,56 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                   className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                 />
               </div>
+
+              {/* Live FIFO Debt Allocation Preview by Date */}
+              {(() => {
+                const fifoPreview = previewCustomerFifoDebtSettlement(
+                  sales,
+                  {
+                    customerId: activeEntry.customer.id,
+                    customerPhone: activeEntry.customer.phone,
+                    customerName: activeEntry.customer.name,
+                  },
+                  Math.max(0, Number(batchCollectAmount) || 0)
+                );
+                if (fifoPreview.allocations.length === 0) return null;
+                return (
+                  <div className="bg-amber-50/70 border border-amber-200 rounded-lg overflow-hidden">
+                    <div className="px-3 py-2 bg-amber-100/70 border-b border-amber-200 flex items-center justify-between text-[11px] font-bold text-amber-950">
+                      <span>Thứ tự trừ tự động theo ngày nợ (Cũ → Mới)</span>
+                      <span>Tự động trừ: {formatVND(fifoPreview.totalAllocated)}</span>
+                    </div>
+                    <div className="divide-y divide-amber-100 max-h-40 overflow-y-auto bg-white">
+                      {fifoPreview.allocations.map((alloc, idx) => (
+                        <div
+                          key={alloc.recordId}
+                          className="px-3 py-1.5 flex items-center justify-between text-xs"
+                        >
+                          <div>
+                            <span className="font-mono font-bold text-slate-900">
+                              #{idx + 1} {alloc.code}
+                            </span>{' '}
+                            <span className="text-[11px] text-slate-500 font-mono">
+                              ({alloc.date})
+                            </span>
+                            <div className="text-[11px] text-slate-600">
+                              {alloc.productName} · Nợ: {formatVND(alloc.previousDebt)}
+                            </div>
+                          </div>
+                          <div className="text-right font-mono">
+                            <div className="font-bold text-emerald-700">
+                              -{formatVND(alloc.allocatedAmount)}
+                            </div>
+                            <div className="text-[10px] text-slate-500">
+                              Còn: {formatVND(alloc.remainingDebt)}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-end gap-2 shrink-0">
@@ -995,24 +1053,40 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  let remainingToAllocate = Math.max(0, Number(batchCollectAmount) || 0);
-                  if (remainingToAllocate <= 0) return;
-                  const unpaidRows = customerReceivedItemsReport.items.filter(
-                    (i) => i.debtAmount > 0
-                  );
-                  unpaidRows.forEach((row) => {
-                    if (remainingToAllocate <= 0) return;
-                    const payForThisSale = Math.min(row.debtAmount, remainingToAllocate);
-                    if (payForThisSale > 0) {
-                      onCollectCustomerDebt(
-                        row.saleId,
-                        payForThisSale,
+                  const amountVal = Math.max(0, Number(batchCollectAmount) || 0);
+                  if (amountVal <= 0) return;
+
+                  if (onSettleCustomerTotalDebtFifo) {
+                    onSettleCustomerTotalDebtFifo({
+                      customerId: activeEntry.customer.id,
+                      customerName: activeEntry.customer.name,
+                      customerPhone: activeEntry.customer.phone,
+                      totalAmount: amountVal,
+                      groupName: 'Thu nợ bán hàng khách hàng',
+                      paymentMethod: 'Chuyển khoản ngân hàng',
+                      note:
                         batchCollectNote.trim() ||
-                          `Thu nợ tổng hợp kỳ ${itemsFromDate} -> ${itemsToDate}`
-                      );
-                      remainingToAllocate -= payForThisSale;
-                    }
-                  });
+                        `Thu nợ tổng hợp theo thứ tự ngày nợ (${itemsFromDate} -> ${itemsToDate})`,
+                    });
+                  } else {
+                    let remainingToAllocate = amountVal;
+                    const unpaidRows = [...customerReceivedItemsReport.items]
+                      .filter((i) => i.debtAmount > 0)
+                      .sort((a, b) => a.date.localeCompare(b.date));
+                    unpaidRows.forEach((row) => {
+                      if (remainingToAllocate <= 0) return;
+                      const payForThisSale = Math.min(row.debtAmount, remainingToAllocate);
+                      if (payForThisSale > 0) {
+                        onCollectCustomerDebt(
+                          row.saleId,
+                          payForThisSale,
+                          batchCollectNote.trim() ||
+                            `Thu nợ tổng hợp kỳ ${itemsFromDate} -> ${itemsToDate}`
+                        );
+                        remainingToAllocate -= payForThisSale;
+                      }
+                    });
+                  }
                   exportCombinedReceivedItemsAndDebtPDF({
                     customerName: activeEntry.customer.name,
                     customerPhone: activeEntry.customer.phone,
@@ -1021,7 +1095,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                     toDate: itemsToDate,
                     items: customerReceivedItemsReport.items,
                     onlyUnpaid: onlyUnpaidItems,
-                    collectedThisSession: Math.max(0, Number(batchCollectAmount) || 0),
+                    collectedThisSession: amountVal,
                     staffName: 'Trần Đình Nhất',
                   });
                   setIsBatchCollectOpen(false);
@@ -1029,7 +1103,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                 className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1.5"
               >
                 <FileDown className="w-3.5 h-3.5" />
-                <span>Xác nhận thu nợ & In Phiếu Tổng Hợp PDF</span>
+                <span>Xác nhận thu nợ theo ngày nợ & In Phiếu Tổng Hợp PDF</span>
               </button>
             </div>
           </div>

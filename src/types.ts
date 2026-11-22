@@ -63,6 +63,8 @@ export interface CustomerProfile {
   updatedAt: string;
 }
 
+export type SalePromotionType = 'none' | 'gift' | 'discount' | 'both';
+
 export interface SaleTransaction {
   id: string;
   invoiceCode: string;
@@ -80,6 +82,14 @@ export interface SaleTransaction {
   dueDate: string;
   status: PaymentStatus;
   warehouseName?: string;
+  promotionType?: SalePromotionType;
+  discountAmount?: number;
+  discountPercent?: number;
+  giftProductId?: string;
+  giftProductName?: string;
+  giftUnit?: string;
+  giftQuantity?: number;
+  giftUnitCost?: number;
   note: string;
   staffName: string;
   ownerId: string;
@@ -135,8 +145,72 @@ export interface AppNotification {
   message: string;
   timestamp: string;
   read: boolean;
-  actionTab?: 'sales' | 'imports' | 'inventory' | 'debts' | 'customers' | 'vouchers' | 'staff_accounts' | 'reports';
+  actionTab?:
+    | 'sales'
+    | 'imports'
+    | 'inventory'
+    | 'debts'
+    | 'customers'
+    | 'receipt_vouchers'
+    | 'payment_vouchers'
+    | 'vouchers'
+    | 'staff_accounts'
+    | 'reports';
   relatedId?: string;
+}
+
+export interface FifoDebtAllocationItem {
+  recordId: string;
+  code: string;
+  date: string;
+  dueDate: string;
+  productName: string;
+  previousDebt: number;
+  allocatedAmount: number;
+  remainingDebt: number;
+}
+
+export interface CashReceiptVoucher {
+  id: string;
+  voucherCode: string;
+  groupName: string;
+  warehouseName: string;
+  partnerId?: string;
+  partnerName: string;
+  partnerPhone: string;
+  amount: number;
+  paymentMethod: string;
+  isDebtSettlement: boolean;
+  settledAllocations?: FifoDebtAllocationItem[];
+  totalPreviousDebt?: number;
+  totalRemainingDebt?: number;
+  countsTowardOtherIncome?: boolean;
+  note: string;
+  staffName: string;
+  ownerId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CashPaymentVoucher {
+  id: string;
+  voucherCode: string;
+  groupName: string;
+  warehouseName: string;
+  partnerName: string;
+  partnerPhone: string;
+  amount: number;
+  paymentMethod: string;
+  isDebtSettlement: boolean;
+  settledAllocations?: FifoDebtAllocationItem[];
+  totalPreviousDebt?: number;
+  totalRemainingDebt?: number;
+  countsTowardOperatingExpense?: boolean;
+  note: string;
+  staffName: string;
+  ownerId: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface BackupEntry {
@@ -292,14 +366,19 @@ export interface BackupSnapshotPayload {
   warehouses: string[];
   customerGroups: string[];
   productCategories: string[];
+  receiptGroups?: string[];
+  paymentGroups?: string[];
   products: ProductItem[];
   customers: CustomerProfile[];
   suppliers: SupplierProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
   savedVouchers: SavedVoucherRecord[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
   staffList: StaffMember[];
   auditLogs: AuditLogEntry[];
 }
+
 
 

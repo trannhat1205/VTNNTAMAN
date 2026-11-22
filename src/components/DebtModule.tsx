@@ -28,6 +28,8 @@ import {
   formatVND,
   matchDebtTermDays,
   normalizeVietnameseSearch,
+  previewCustomerFifoDebtSettlement,
+  previewSupplierFifoDebtSettlement,
 } from '../utils/businessLogic';
 import {
   exportCustomerReceiptPDF,
@@ -84,6 +86,25 @@ interface DebtModuleProps {
   onImportDebtPaymentsFromExcel: (rows: Record<string, unknown>[]) => number;
   canAccessCustomerDebts?: boolean;
   canAccessSupplierDebts?: boolean;
+  receiptGroups?: string[];
+  paymentGroups?: string[];
+  onSettleCustomerTotalDebtFifo?: (params: {
+    customerId?: string;
+    customerName: string;
+    customerPhone: string;
+    totalAmount: number;
+    groupName: string;
+    paymentMethod: string;
+    note: string;
+  }) => void;
+  onSettleSupplierTotalDebtFifo?: (params: {
+    supplierName: string;
+    supplierPhone: string;
+    totalAmount: number;
+    groupName: string;
+    paymentMethod: string;
+    note: string;
+  }) => void;
 }
 
 export const DebtModule: React.FC<DebtModuleProps> = ({
@@ -104,6 +125,10 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   onImportDebtPaymentsFromExcel,
   canAccessCustomerDebts = true,
   canAccessSupplierDebts = true,
+  receiptGroups = ['Thu nợ bán hàng khách hàng'],
+  paymentGroups = ['Chi trả nợ Nhà cung cấp'],
+  onSettleCustomerTotalDebtFifo,
+  onSettleSupplierTotalDebtFifo,
 }) => {
   const [activeTab, setActiveTab] = useState<'supplier' | 'customer'>(
     canAccessSupplierDebts ? 'supplier' : 'customer'
@@ -111,6 +136,16 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   const [urgencyFilter, setUrgencyFilter] = useState<'all' | 'overdue' | 'due_soon'>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedLinkedVoucherId, setSelectedLinkedVoucherId] = useState<string | null>(null);
+
+  // Lump-sum FIFO Debt Settlement state (auto-deduct across all older unpaid invoices/receipts by debt date)
+  const [fifoPartnerKey, setFifoPartnerKey] = useState<string>('');
+  const [fifoLumpSumInput, setFifoLumpSumInput] = useState<string>('');
+  const [fifoGroupName, setFifoGroupName] = useState<string>(
+    receiptGroups[0] || 'Thu nợ bán hàng khách hàng'
+  );
+  const [fifoPaymentMethod, setFifoPaymentMethod] = useState<string>('Chuyển khoản ngân hàng');
+  const [fifoNote, setFifoNote] = useState<string>('');
+  const [fifoFeedback, setFifoFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     if (!canAccessSupplierDebts && canAccessCustomerDebts && activeTab === 'supplier') {
@@ -471,13 +506,444 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
             >
               {formatVND(totalCustomerDebt - totalSupplierDebt)}
             </div>
-            <div className="text-xs text-slate-500 pt-1">
-              Bấm trực tiếp vào các nhãn <strong className="text-red-600">quá hạn</strong> /{' '}
-              <strong className="text-amber-700">sắp đến hạn</strong> để mở chứng từ liên kết ngay
-            </div>
           </div>
         )}
       </div>
+
+      {/* FIFO Lump-Sum Debt Settlement by Oldest Debt Date (Tự Động Trừ Quyết Toán Vào Tất Cả Các Hóa Đơn Nợ Trước Đó Theo Thứ Tự Ngày Nợ) */}
+      {(() => {
+        const isCustomerMode = activeTab === 'customer';
+        // Build unique list of indebted customers or suppliers
+        const indebtedCustomersMap = new Map<
+          string,
+          { id?: string; name: string; phone: string; totalDebt: number; count: number }
+        >();
+        for (const s of customerDebts) {
+          const key = s.customerId || s.customerPhone || s.customerName;
+          const existing = indebtedCustomersMap.get(key) || {
+            id: s.customerId,
+            name: s.customerName,
+            phone: s.customerPhone,
+            totalDebt: 0,
+            count: 0,
+          };
+          existing.totalDebt += s.debtAmount;
+          existing.count += 1;
+          indebtedCustomersMap.set(key, existing);
+        }
+        const indebtedCustomerList = Array.from(indebtedCustomersMap.entries()).map(
+          ([key, val]) => ({ key, ...val })
+        );
+
+        const indebtedSuppliersMap = new Map<
+          string,
+          { name: string; phone: string; totalDebt: number; count: number }
+        >();
+        for (const imp of supplierDebts) {
+          const key = imp.supplierName;
+          const existing = indebtedSuppliersMap.get(key) || {
+            name: imp.supplierName,
+            phone: imp.supplierPhone,
+            totalDebt: 0,
+            count: 0,
+          };
+          existing.totalDebt += imp.debtAmount;
+          existing.count += 1;
+          indebtedSuppliersMap.set(key, existing);
+        }
+        const indebtedSupplierList = Array.from(indebtedSuppliersMap.entries()).map(
+          ([key, val]) => ({ key, ...val })
+        );
+
+        const activePartnerList = isCustomerMode ? indebtedCustomerList : indebtedSupplierList;
+        const selectedPartner =
+          activePartnerList.find((p) => p.key === fifoPartnerKey) ||
+          activePartnerList[0] ||
+          null;
+
+        const numericLumpSum = Math.max(0, Math.round(Number(fifoLumpSumInput) || 0));
+
+        const fifoPreview = selectedPartner
+          ? isCustomerMode
+            ? previewCustomerFifoDebtSettlement(
+                sales,
+                {
+                  customerId: (selectedPartner as { id?: string }).id,
+                  customerPhone: selectedPartner.phone,
+                  customerName: selectedPartner.name,
+                },
+                numericLumpSum
+              )
+            : previewSupplierFifoDebtSettlement(
+                imports,
+                {
+                  supplierName: selectedPartner.name,
+                  supplierPhone: selectedPartner.phone,
+                },
+                numericLumpSum
+              )
+          : null;
+
+        const availableGroups = isCustomerMode ? receiptGroups : paymentGroups;
+
+        return (
+          <div className="bg-white rounded-xl border-2 border-emerald-700/80 shadow-xs p-4 sm:p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                {canAccessCustomerDebts && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('customer');
+                      setFifoPartnerKey('');
+                      setFifoLumpSumInput('');
+                      setFifoGroupName(receiptGroups[0] || 'Thu nợ bán hàng khách hàng');
+                      setFifoFeedback(null);
+                    }}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                      isCustomerMode
+                        ? 'bg-emerald-800 text-white border-emerald-800'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    Thu tổng nợ Khách hàng ({indebtedCustomerList.length} KH)
+                  </button>
+                )}
+                {canAccessSupplierDebts && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setActiveTab('supplier');
+                      setFifoPartnerKey('');
+                      setFifoLumpSumInput('');
+                      setFifoGroupName(paymentGroups[0] || 'Chi trả nợ Nhà cung cấp');
+                      setFifoFeedback(null);
+                    }}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                      !isCustomerMode
+                        ? 'bg-amber-800 text-white border-amber-800'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    Trả tổng nợ Nhà cung cấp ({indebtedSupplierList.length} NCC)
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {fifoFeedback && (
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-900 flex items-center justify-between">
+                <span>{fifoFeedback}</span>
+                <button
+                  type="button"
+                  onClick={() => setFifoFeedback(null)}
+                  className="text-emerald-700 hover:text-emerald-950 font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {activePartnerList.length === 0 ? (
+              <div className="p-4 rounded-lg bg-slate-50 text-center text-xs text-slate-500">
+                Hiện không có {isCustomerMode ? 'khách hàng' : 'nhà cung cấp'} nào còn dư nợ cần quyết toán.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                {/* Left Input Controls */}
+                <div className="lg:col-span-5 space-y-3 bg-slate-50/80 p-3.5 rounded-xl border border-slate-200/80">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      1. Chọn {isCustomerMode ? 'Khách hàng đang có công nợ' : 'Nhà cung cấp đang có công nợ'}
+                    </label>
+                    <select
+                      value={selectedPartner?.key || ''}
+                      onChange={(e) => {
+                        const nextKey = e.target.value;
+                        setFifoPartnerKey(nextKey);
+                        const found = activePartnerList.find((p) => p.key === nextKey);
+                        if (found) {
+                          setFifoLumpSumInput(String(found.totalDebt));
+                        }
+                      }}
+                      className="w-full px-3 py-2 text-xs font-semibold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                    >
+                      {activePartnerList.map((p) => (
+                        <option key={p.key} value={p.key}>
+                          {p.name} ({p.phone || 'Chưa SĐT'}) — Tổng nợ ({p.count} đơn):{' '}
+                          {formatVND(p.totalDebt)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {selectedPartner && fifoPreview && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setFifoLumpSumInput(String(fifoPreview.totalPreviousDebt))}
+                        className="px-2.5 py-1 text-[11px] font-semibold bg-emerald-800 text-white rounded-md hover:bg-emerald-900"
+                      >
+                        Quyết toán 100% tổng nợ ({formatVND(fifoPreview.totalPreviousDebt)})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFifoLumpSumInput(
+                            String(Math.round(fifoPreview.totalPreviousDebt / 2))
+                          )
+                        }
+                        className="px-2.5 py-1 text-[11px] font-semibold bg-white text-slate-800 border border-slate-300 rounded-md hover:bg-slate-100"
+                      >
+                        Trừ 50% tổng nợ ({formatVND(Math.round(fifoPreview.totalPreviousDebt / 2))})
+                      </button>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        2. Nhập số tiền tổng (VNĐ) *
+                      </label>
+                      <input
+                        type="number"
+                        min={1000}
+                        step={1000}
+                        value={fifoLumpSumInput}
+                        onChange={(e) => setFifoLumpSumInput(e.target.value)}
+                        placeholder={
+                          fifoPreview
+                            ? `Tối đa ${fifoPreview.totalPreviousDebt.toLocaleString('vi-VN')} đ`
+                            : 'Nhập số tiền tổng...'
+                        }
+                        className="w-full px-3 py-2 text-sm font-mono font-bold bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-700"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        {isCustomerMode ? 'Nhóm phiếu thu' : 'Nhóm phiếu chi'}
+                      </label>
+                      <select
+                        value={fifoGroupName}
+                        onChange={(e) => setFifoGroupName(e.target.value)}
+                        className="w-full px-2.5 py-2 text-xs bg-white border border-slate-300 rounded-lg"
+                      >
+                        {availableGroups.map((g) => (
+                          <option key={g} value={g}>
+                            {g}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                        Hình thức thanh toán
+                      </label>
+                      <select
+                        value={fifoPaymentMethod}
+                        onChange={(e) => setFifoPaymentMethod(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                      >
+                        <option value="Chuyển khoản ngân hàng">Chuyển khoản ngân hàng</option>
+                        <option value="Tiền mặt">Tiền mặt</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                        Ghi chú quyết toán
+                      </label>
+                      <input
+                        type="text"
+                        value={fifoNote}
+                        onChange={(e) => setFifoNote(e.target.value)}
+                        placeholder="Ghi chú phiếu thu/chi..."
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!selectedPartner || !fifoPreview) return;
+                      const amountToSettle =
+                        numericLumpSum > 0
+                          ? Math.min(numericLumpSum, fifoPreview.totalPreviousDebt)
+                          : fifoPreview.totalPreviousDebt;
+                      if (amountToSettle <= 0) return;
+
+                      if (isCustomerMode && onSettleCustomerTotalDebtFifo) {
+                        onSettleCustomerTotalDebtFifo({
+                          customerId: (selectedPartner as { id?: string }).id,
+                          customerName: selectedPartner.name,
+                          customerPhone: selectedPartner.phone,
+                          totalAmount: amountToSettle,
+                          groupName:
+                            fifoGroupName || receiptGroups[0] || 'Thu nợ bán hàng khách hàng',
+                          paymentMethod: fifoPaymentMethod,
+                          note:
+                            fifoNote.trim() ||
+                            `Thu quyết toán tổng công nợ KH theo thứ tự ngày nợ (${selectedPartner.name})`,
+                        });
+                        setFifoFeedback(
+                          `Đã thu tổng số tiền ${formatVND(amountToSettle)} của "${selectedPartner.name}", tự động trừ quyết toán các hóa đơn nợ cũ theo thứ tự ngày nợ và lưu vào Nhật ký Phiếu Thu Tiền!`
+                        );
+                        setFifoLumpSumInput('');
+                        setFifoNote('');
+                      } else if (!isCustomerMode && onSettleSupplierTotalDebtFifo) {
+                        onSettleSupplierTotalDebtFifo({
+                          supplierName: selectedPartner.name,
+                          supplierPhone: selectedPartner.phone,
+                          totalAmount: amountToSettle,
+                          groupName:
+                            fifoGroupName || paymentGroups[0] || 'Chi trả nợ Nhà cung cấp',
+                          paymentMethod: fifoPaymentMethod,
+                          note:
+                            fifoNote.trim() ||
+                            `Chi quyết toán tổng công nợ NCC theo thứ tự ngày nợ (${selectedPartner.name})`,
+                        });
+                        setFifoFeedback(
+                          `Đã chi tổng số tiền ${formatVND(amountToSettle)} cho "${selectedPartner.name}", tự động trừ quyết toán các phiếu nhập nợ cũ theo thứ tự ngày nợ và lưu vào Nhật ký Phiếu Chi Tiền!`
+                        );
+                        setFifoLumpSumInput('');
+                        setFifoNote('');
+                      }
+                    }}
+                    className={`w-full py-2.5 px-4 text-xs sm:text-sm font-bold text-white rounded-lg shadow-xs transition-colors ${
+                      isCustomerMode
+                        ? 'bg-emerald-800 hover:bg-emerald-900'
+                        : 'bg-amber-800 hover:bg-amber-900'
+                    }`}
+                  >
+                    {isCustomerMode
+                      ? `Quyết Toán Tự Động Theo Ngày Nợ & Lập Phiếu Thu (${formatVND(
+                          numericLumpSum > 0 && fifoPreview
+                            ? Math.min(numericLumpSum, fifoPreview.totalPreviousDebt)
+                            : fifoPreview?.totalPreviousDebt || 0
+                        )})`
+                      : `Quyết Toán Tự Động Theo Ngày Nợ & Lập Phiếu Chi (${formatVND(
+                          numericLumpSum > 0 && fifoPreview
+                            ? Math.min(numericLumpSum, fifoPreview.totalPreviousDebt)
+                            : fifoPreview?.totalPreviousDebt || 0
+                        )})`}
+                  </button>
+                </div>
+
+                {/* Right Live FIFO Allocation Preview Table */}
+                <div className="lg:col-span-7 bg-amber-50/50 rounded-xl border border-amber-200 overflow-hidden">
+                  <div className="px-4 py-3 bg-amber-100/70 border-b border-amber-200 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-xs font-bold text-amber-950">
+                        Bảng Thứ Tự Các Hóa Đơn Nợ Trước Đó Của "{selectedPartner?.name}" (Sắp Xếp Từ Ngày Nợ Cũ Nhất)
+                      </p>
+                      <p className="text-[11px] text-amber-800">
+                        {numericLumpSum > 0
+                          ? `Đang nhập số tiền tổng: ${formatVND(numericLumpSum)} → Hệ thống tự động trừ lần lượt từ đơn số #1 trở đi`
+                          : 'Nếu bấm nút quyết toán ngay, hệ thống mặc định trừ tất toán 100% hoặc nhập số tiền tổng bất kỳ để xem mức trừ từng đơn'}
+                      </p>
+                    </div>
+                    {fifoPreview && (
+                      <div className="text-right font-mono text-xs">
+                        <span className="text-slate-600">Tổng nợ hiện tại: </span>
+                        <strong className="text-red-700">
+                          {formatVND(fifoPreview.totalPreviousDebt)}
+                        </strong>
+                      </div>
+                    )}
+                  </div>
+
+                  {fifoPreview && (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-white border-b border-amber-200 text-[11px] font-semibold text-slate-600">
+                            <th className="py-2 px-3">Thứ tự ưu tiên</th>
+                            <th className="py-2 px-3">Ngày nợ</th>
+                            <th className="py-2 px-3">Mã chứng từ</th>
+                            <th className="py-2 px-3">Vật tư</th>
+                            <th className="py-2 px-3 text-right">Nợ hiện tại</th>
+                            <th className="py-2 px-3 text-right">Tự động trừ</th>
+                            <th className="py-2 px-3 text-right">Còn nợ sau trừ</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-amber-100 bg-white text-xs">
+                          {(() => {
+                            const effectivePreview =
+                              numericLumpSum > 0
+                                ? fifoPreview
+                                : isCustomerMode && selectedPartner
+                                ? previewCustomerFifoDebtSettlement(
+                                    sales,
+                                    {
+                                      customerId: (selectedPartner as { id?: string }).id,
+                                      customerPhone: selectedPartner.phone,
+                                      customerName: selectedPartner.name,
+                                    },
+                                    fifoPreview.totalPreviousDebt
+                                  )
+                                : selectedPartner
+                                ? previewSupplierFifoDebtSettlement(
+                                    imports,
+                                    {
+                                      supplierName: selectedPartner.name,
+                                      supplierPhone: selectedPartner.phone,
+                                    },
+                                    fifoPreview.totalPreviousDebt
+                                  )
+                                : fifoPreview;
+
+                            return effectivePreview.allocations.map((alloc, idx) => (
+                              <tr
+                                key={alloc.recordId}
+                                className={
+                                  alloc.allocatedAmount > 0 ? 'bg-emerald-50/40' : ''
+                                }
+                              >
+                                <td className="py-2 px-3 font-mono font-bold text-amber-900">
+                                  #{idx + 1} (Cũ nhất)
+                                </td>
+                                <td className="py-2 px-3 font-mono text-slate-700">
+                                  {alloc.date}
+                                </td>
+                                <td className="py-2 px-3 font-mono font-bold text-slate-900">
+                                  {alloc.code}
+                                </td>
+                                <td className="py-2 px-3 text-slate-700 max-w-[160px] truncate">
+                                  {alloc.productName}
+                                </td>
+                                <td className="py-2 px-3 text-right font-mono text-red-700 font-semibold">
+                                  {formatVND(alloc.previousDebt)}
+                                </td>
+                                <td className="py-2 px-3 text-right font-mono font-bold text-emerald-700">
+                                  -{formatVND(alloc.allocatedAmount)}
+                                </td>
+                                <td className="py-2 px-3 text-right font-mono">
+                                  {alloc.remainingDebt === 0 && alloc.allocatedAmount > 0 ? (
+                                    <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                                      Hết nợ (0 đ)
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-800 font-semibold">
+                                      {formatVND(alloc.remainingDebt)}
+                                    </span>
+                                  )}
+                                </td>
+                              </tr>
+                            ));
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Direct Linked Voucher Inspector Card (appears when user clicks a reminder badge, notification, or voucher code) */}
       {(linkedSupplierRecord || linkedCustomerRecord) && (
@@ -745,9 +1211,6 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
               <h3 className="text-sm font-bold text-slate-900">
                 Bảng theo dõi & Nhắc hạn Công nợ Nhà cung cấp
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Bấm vào mã phiếu để liên kết kiểm soát nhanh, xuất Phiếu Thanh Toán NCC (PDF) và Sửa/Xóa (Chỉ Quản lý)
-              </p>
             </div>
             <span className="text-xs text-slate-500 whitespace-nowrap">
               Đang hiển thị {filteredSupplierDebts.length} phiếu công nợ
@@ -1120,9 +1583,6 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
               <h3 className="text-sm font-bold text-slate-900">
                 Bảng theo dõi Công nợ Khách hàng
               </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Bấm vào mã hóa đơn để liên kết kiểm soát nhanh, thu nợ trực tiếp, xuất Phiếu Thu PDF và Sửa/Xóa (Chỉ Quản lý)
-              </p>
             </div>
             <span className="text-xs text-slate-500 whitespace-nowrap">
               Đang hiển thị {filteredCustomerDebts.length} hóa đơn nợ

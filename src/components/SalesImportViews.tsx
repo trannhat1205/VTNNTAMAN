@@ -5,13 +5,16 @@ import {
   CheckCircle2,
   FileDown,
   FolderPlus,
+  Gift,
   Lock,
   PackagePlus,
   Pencil,
+  Percent,
   Plus,
   RotateCcw,
   Search,
   ShoppingCart,
+  Tag,
   Trash2,
   Truck,
   UserPlus,
@@ -25,6 +28,7 @@ import {
   PaymentStatus,
   ProductCategory,
   ProductItem,
+  SalePromotionType,
   SaleTransaction,
   SupplierProfile,
   UserRole,
@@ -75,6 +79,14 @@ interface SalesLogViewProps {
     dueDate: string;
     note: string;
     warehouseName: string;
+    promotionType?: SalePromotionType;
+    discountAmount?: number;
+    discountPercent?: number;
+    giftProductId?: string;
+    giftProductName?: string;
+    giftUnit?: string;
+    giftQuantity?: number;
+    giftUnitCost?: number;
   }) => SaleTransaction;
   onCreateCustomerInline: (
     data: Omit<CustomerProfile, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
@@ -97,6 +109,11 @@ interface SalesLogViewProps {
       paidAmount: number;
       dueDate: string;
       note: string;
+      promotionType?: SalePromotionType;
+      discountAmount?: number;
+      giftProductName?: string;
+      giftUnit?: string;
+      giftQuantity?: number;
     }
   ) => void;
   onDeleteSale: (saleId: string) => void;
@@ -165,6 +182,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [newProdStock, setNewProdStock] = useState<string>('');
   const [newProdSupplier, setNewProdSupplier] = useState<string>('');
 
+  // Promotional Gift & Discount State
+  const [promotionType, setPromotionType] = useState<SalePromotionType>('none');
+  const [discountMode, setDiscountMode] = useState<'amount' | 'percent'>('amount');
+  const [discountInput, setDiscountInput] = useState<string>('');
+  const [selectedGiftProductId, setSelectedGiftProductId] = useState<string>('');
+  const [giftQuantity, setGiftQuantity] = useState<string>('1');
+  const [showNewGiftBox, setShowNewGiftBox] = useState<boolean>(false);
+  const [newGiftCode, setNewGiftCode] = useState<string>('QUATANG');
+  const [newGiftName, setNewGiftName] = useState<string>('');
+  const [newGiftUnit, setNewGiftUnit] = useState<string>('CÁI');
+  const [newGiftImportPrice, setNewGiftImportPrice] = useState<string>('');
+  const [newGiftStock, setNewGiftStock] = useState<string>('50');
+
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | PaymentStatus>('all');
   const [warehouseTableFilter, setWarehouseTableFilter] = useState<string>('all');
@@ -179,6 +209,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [editSaleUnit, setEditSaleUnit] = useState('');
   const [editSaleQty, setEditSaleQty] = useState('');
   const [editSalePrice, setEditSalePrice] = useState('');
+  const [editSaleDiscount, setEditSaleDiscount] = useState('');
+  const [editSaleGiftName, setEditSaleGiftName] = useState('');
+  const [editSaleGiftUnit, setEditSaleGiftUnit] = useState('');
+  const [editSaleGiftQty, setEditSaleGiftQty] = useState('');
   const [editSalePaid, setEditSalePaid] = useState('');
   const [editSaleDueDate, setEditSaleDueDate] = useState('');
   const [editSaleNote, setEditSaleNote] = useState('');
@@ -194,6 +228,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setEditSaleUnit(s.unit);
     setEditSaleQty(String(s.quantity));
     setEditSalePrice(String(s.unitPrice));
+    setEditSaleDiscount(String(s.discountAmount || 0));
+    setEditSaleGiftName(s.giftProductName || '');
+    setEditSaleGiftUnit(s.giftUnit || 'CÁI');
+    setEditSaleGiftQty(String(s.giftQuantity || 0));
     setEditSalePaid(String(s.paidAmount));
     setEditSaleDueDate(s.dueDate);
     setEditSaleNote(s.note);
@@ -214,6 +252,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setSelectedProductId('');
     setQuantity('');
     setUnitPrice('');
+    setPromotionType('none');
+    setDiscountMode('amount');
+    setDiscountInput('');
+    setSelectedGiftProductId('');
+    setGiftQuantity('1');
+    setShowNewGiftBox(false);
+    setNewGiftCode('QUATANG');
+    setNewGiftName('');
+    setNewGiftUnit('CÁI');
+    setNewGiftImportPrice('');
+    setNewGiftStock('50');
     setPaymentMode('full');
     setPaidAmount('');
     setDueDate('');
@@ -404,11 +453,74 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     return created;
   };
 
+  const handleConfirmInlineGiftProduct = () => {
+    if (!newGiftName.trim() || !newGiftUnit.trim()) {
+      setFormMessage({
+        type: 'error',
+        text: 'Vui lòng nhập Tên quà tặng khuyến mãi và Đơn vị tính (VD: CÁI, Gói, Áo...).',
+      });
+      return null;
+    }
+    const importNum = Math.max(0, Number(newGiftImportPrice) || 0);
+    const stockNum = Math.max(1, Number(newGiftStock) || 50);
+
+    const createdGift = onCreateProductInline({
+      code: newGiftCode.trim() || 'QUATANG',
+      name: newGiftName.trim(),
+      category: 'Vật tư & Dụng cụ',
+      warehouseName:
+        lockedWarehouse ||
+        (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+          ? selectedWarehouse
+          : warehouses[0] || 'Tâm An Mỹ Ngãi'),
+      unit: newGiftUnit.trim(),
+      importPrice: importNum,
+      sellPrice: 0,
+      stock: stockNum,
+      minStock: 5,
+      supplierName: 'NPP QUÀ',
+    });
+    setSelectedGiftProductId(createdGift.id);
+    if (!giftQuantity) setGiftQuantity('1');
+    setShowNewGiftBox(false);
+    setNewGiftName('');
+    setFormMessage({
+      type: 'success',
+      text: `Đã bổ sung quà tặng mới "[${createdGift.code}] ${createdGift.name}" (${createdGift.stock} ${createdGift.unit}) và chọn tặng kèm đơn!`,
+    });
+    return createdGift;
+  };
+
   const qtyNum = Math.max(0, Number(quantity) || 0);
   const priceNum = Math.max(0, Number(unitPrice) || 0);
-  const computedTotal = Math.round(qtyNum * priceNum);
-  const paidNum = paymentMode === 'full' ? computedTotal : Math.max(0, Number(paidAmount) || 0);
-  const summary = calculateSaleSummary(qtyNum, priceNum, paidNum);
+  const grossTotal = Math.round(qtyNum * priceNum);
+
+  const hasDiscountActive = promotionType === 'discount' || promotionType === 'both';
+  const hasGiftActive = promotionType === 'gift' || promotionType === 'both';
+
+  const rawDiscountNum = Math.max(0, Number(discountInput) || 0);
+  const computedDiscountAmount = hasDiscountActive
+    ? discountMode === 'percent'
+      ? Math.round((grossTotal * Math.min(100, rawDiscountNum)) / 100)
+      : Math.min(grossTotal, Math.round(rawDiscountNum))
+    : 0;
+  const computedDiscountPercent =
+    hasDiscountActive && grossTotal > 0
+      ? discountMode === 'percent'
+        ? Math.min(100, rawDiscountNum)
+        : Math.round((computedDiscountAmount / grossTotal) * 100)
+      : 0;
+
+  const netPayableTotal = Math.max(0, grossTotal - computedDiscountAmount);
+  const paidNum = paymentMode === 'full' ? netPayableTotal : Math.max(0, Number(paidAmount) || 0);
+  const summary = calculateSaleSummary(qtyNum, priceNum, paidNum, computedDiscountAmount);
+
+  const selectedGiftProductObj =
+    hasGiftActive && selectedGiftProductId && selectedGiftProductId !== '__new_gift__'
+      ? products.find((p) => p.id === selectedGiftProductId) || null
+      : null;
+  const giftQtyNum = hasGiftActive ? Math.max(1, Math.round(Number(giftQuantity) || 1)) : 0;
+
   const selectedCustomerObj =
     selectedCustomerId && selectedCustomerId !== '__new_customer__'
       ? customers.find((c) => c.id === selectedCustomerId) || null
@@ -418,6 +530,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     sales,
     summary.debtAmount
   );
+
+  // Sort products so gift items ([QUATANG] or sellPrice === 0 or name contains QUÀ) appear first in gift selector
+  const giftSortedProducts = [...products].sort((a, b) => {
+    const aIsGift =
+      a.code.toUpperCase().includes('QUA') ||
+      a.name.toUpperCase().includes('QUÀ') ||
+      a.sellPrice === 0
+        ? 1
+        : 0;
+    const bIsGift =
+      b.code.toUpperCase().includes('QUA') ||
+      b.name.toUpperCase().includes('QUÀ') ||
+      b.sellPrice === 0
+        ? 1
+        : 0;
+    return bIsGift - aIsGift;
+  });
 
   const submitSale = (shouldExportPDF: boolean) => {
     setFormMessage(null);
@@ -476,12 +605,49 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
       return;
     }
 
+    // Resolve Promotional Gift if gift mode is active
+    let resolvedGiftProduct: ProductItem | null = null;
+    if (hasGiftActive) {
+      if (showNewGiftBox || selectedGiftProductId === '__new_gift__') {
+        const createdGift = handleConfirmInlineGiftProduct();
+        if (!createdGift) return;
+        resolvedGiftProduct = createdGift;
+      } else if (selectedGiftProductId) {
+        resolvedGiftProduct = products.find((p) => p.id === selectedGiftProductId) || null;
+      }
+      if (!resolvedGiftProduct) {
+        setFormMessage({
+          type: 'error',
+          text: 'Vui lòng chọn mặt hàng Quà tặng khuyến mãi trong kho hoặc bấm "+ Thêm quà tặng mới".',
+        });
+        return;
+      }
+      const requiredGiftStock =
+        resolvedGiftProduct.id === resolvedProduct.id ? qtyNum + giftQtyNum : giftQtyNum;
+      if (resolvedGiftProduct.stock < requiredGiftStock) {
+        setFormMessage({
+          type: 'error',
+          text: `Tồn kho quà tặng "${resolvedGiftProduct.name}" không đủ! Hiện chỉ còn ${resolvedGiftProduct.stock} ${resolvedGiftProduct.unit}.`,
+        });
+        return;
+      }
+    }
+
     try {
       const effectivePrice = priceNum > 0 ? priceNum : resolvedProduct.sellPrice;
+      const effectiveGross = Math.round(qtyNum * effectivePrice);
+      const effectiveDiscount = hasDiscountActive
+        ? discountMode === 'percent'
+          ? Math.round((effectiveGross * Math.min(100, rawDiscountNum)) / 100)
+          : Math.min(effectiveGross, Math.round(rawDiscountNum))
+        : 0;
+      const effectiveNet = Math.max(0, effectiveGross - effectiveDiscount);
+
       const effectiveSummary = calculateSaleSummary(
         qtyNum,
         effectivePrice,
-        paymentMode === 'full' ? qtyNum * effectivePrice : paidNum
+        paymentMode === 'full' ? effectiveNet : paidNum,
+        effectiveDiscount
       );
 
       const createdSale = onCreateSale({
@@ -498,6 +664,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             : computeDueDateAfterDays(0),
         note: note.trim(),
         warehouseName: resolvedWarehouse,
+        promotionType,
+        discountAmount: effectiveSummary.discountAmount,
+        discountPercent: computedDiscountPercent,
+        giftProductId: resolvedGiftProduct?.id,
+        giftProductName: resolvedGiftProduct?.name,
+        giftUnit: resolvedGiftProduct?.unit,
+        giftQuantity: resolvedGiftProduct ? giftQtyNum : 0,
+        giftUnitCost: resolvedGiftProduct?.importPrice || 0,
       });
 
       if (shouldExportPDF) {
@@ -1032,10 +1206,318 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               </div>
             </div>
 
+            {/* 3. Promotional Gift or Sale Discount Section */}
+            <div className="space-y-2.5 p-3.5 bg-emerald-50/40 rounded-xl border border-emerald-200/80">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                  <Gift className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                  <span>3. Chọn quà tặng khuyến mãi hoặc giảm giá bán</span>
+                </span>
+                {promotionType !== 'none' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPromotionType('none');
+                      setDiscountInput('');
+                      setSelectedGiftProductId('');
+                      setGiftQuantity('1');
+                    }}
+                    className="text-[11px] font-semibold text-slate-500 hover:text-red-600 underline whitespace-nowrap"
+                  >
+                    Bỏ ưu đãi
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 bg-white rounded-lg border border-slate-200">
+                {[
+                  { id: 'none', label: 'Không áp dụng' },
+                  { id: 'gift', label: 'Quà tặng KM' },
+                  { id: 'discount', label: 'Giảm giá bán' },
+                  { id: 'both', label: 'Quà + Giảm giá' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setPromotionType(opt.id as SalePromotionType)}
+                    className={`py-1.5 px-2 text-xs font-semibold rounded-md transition-colors text-center ${
+                      promotionType === opt.id
+                        ? 'bg-emerald-700 text-white shadow-xs'
+                        : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Gift Item Selector from Warehouse Inventory + Inline Gift Creation */}
+              {hasGiftActive && (
+                <div className="p-3 bg-white rounded-lg border border-emerald-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label
+                      htmlFor="sale-gift-select"
+                      className="text-xs font-semibold text-emerald-900 flex items-center gap-1.5"
+                    >
+                      <Gift className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      <span>Chọn mặt hàng quà tặng khuyến mãi từ kho *</span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = !showNewGiftBox;
+                        setShowNewGiftBox(next);
+                        setSelectedGiftProductId(next ? '__new_gift__' : '');
+                      }}
+                      className="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1 whitespace-nowrap"
+                    >
+                      <PackagePlus className="w-3.5 h-3.5" />
+                      <span>{showNewGiftBox ? 'Đóng thêm quà' : '+ Thêm quà tặng mới'}</span>
+                    </button>
+                  </div>
+
+                  <SearchableSelect
+                    id="sale-gift-select"
+                    value={selectedGiftProductId === '__new_gift__' ? '' : selectedGiftProductId}
+                    onChange={(val) => {
+                      if (val === '__new_gift__') {
+                        setSelectedGiftProductId('__new_gift__');
+                        setShowNewGiftBox(true);
+                      } else {
+                        setSelectedGiftProductId(val);
+                        setShowNewGiftBox(false);
+                      }
+                    }}
+                    placeholder="Gõ tên quà tặng ([QUATANG], áo, nón, phân bón tặng kèm...) để chọn..."
+                    emptyOptionLabel="-- Chưa chọn quà tặng khuyến mãi --"
+                    createActionLabel="+ Tạo mặt hàng quà tặng khuyến mãi mới tại đây..."
+                    onCreateAction={(kw) => {
+                      setSelectedGiftProductId('__new_gift__');
+                      setShowNewGiftBox(true);
+                      if (kw) setNewGiftName(kw);
+                    }}
+                    options={giftSortedProducts.map((p) => ({
+                      value: p.id,
+                      label: `[${p.code}] ${p.name} — Tồn: ${p.stock} ${p.unit}`,
+                      subLabel: `Kho: ${p.warehouseName || 'Tâm An Mỹ Ngãi'} · NCC: ${p.supplierName} · Giá tặng khách: 0 đ`,
+                      badge: `Tồn: ${p.stock} ${p.unit}`,
+                      keywords: `${p.code} ${p.name} ${p.category} ${p.supplierName} ${p.warehouseName || ''} QUATANG QUA TANG`,
+                    }))}
+                  />
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
+                    <div>
+                      <label
+                        htmlFor="sale-gift-qty"
+                        className="block text-xs font-semibold text-slate-700 mb-1"
+                      >
+                        Số lượng quà tặng ({selectedGiftProductObj?.unit || 'Đơn vị'}) *
+                      </label>
+                      <input
+                        id="sale-gift-qty"
+                        type="number"
+                        min={1}
+                        value={giftQuantity}
+                        onChange={(e) => setGiftQuantity(e.target.value)}
+                        placeholder="1"
+                        className="w-full px-3 py-1.5 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                      />
+                    </div>
+                    <div className="px-3 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-900 font-medium">
+                      Giá tính khách: <strong className="font-mono text-emerald-800">0 đ (Tặng KM)</strong>
+                    </div>
+                  </div>
+
+                  {showNewGiftBox && (
+                    <div className="p-3 bg-emerald-50/70 rounded-lg border border-emerald-200 space-y-2.5">
+                      <div className="text-xs font-bold text-emerald-900">
+                        Thêm mặt hàng Quà tặng khuyến mãi mới vào kho
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div>
+                          <label htmlFor="inline-gift-code" className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                            Mã quà tặng
+                          </label>
+                          <input
+                            id="inline-gift-code"
+                            type="text"
+                            value={newGiftCode}
+                            onChange={(e) => setNewGiftCode(e.target.value)}
+                            placeholder="QUATANG"
+                            className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label htmlFor="inline-gift-name" className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                            Tên quà tặng khuyến mãi *
+                          </label>
+                          <input
+                            id="inline-gift-name"
+                            type="text"
+                            value={newGiftName}
+                            onChange={(e) => setNewGiftName(e.target.value)}
+                            placeholder="VD: QUÀ TẶNG ÁO THUN / XÔ NHỰA"
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div>
+                          <label htmlFor="inline-gift-unit" className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                            Đơn vị tính *
+                          </label>
+                          <input
+                            id="inline-gift-unit"
+                            type="text"
+                            value={newGiftUnit}
+                            onChange={(e) => setNewGiftUnit(e.target.value)}
+                            placeholder="CÁI"
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="inline-gift-cost" className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                            Giá nhập quà (VNĐ)
+                          </label>
+                          <input
+                            id="inline-gift-cost"
+                            type="number"
+                            min={0}
+                            value={newGiftImportPrice}
+                            onChange={(e) => setNewGiftImportPrice(e.target.value)}
+                            placeholder="0"
+                            className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                          />
+                        </div>
+                        <div>
+                          <label htmlFor="inline-gift-stock" className="block text-[11px] font-semibold text-slate-700 mb-0.5">
+                            Số lượng tồn *
+                          </label>
+                          <input
+                            id="inline-gift-stock"
+                            type="number"
+                            min={1}
+                            value={newGiftStock}
+                            onChange={(e) => setNewGiftStock(e.target.value)}
+                            placeholder="50"
+                            className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                          />
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleConfirmInlineGiftProduct}
+                        className="w-full py-1.5 px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md"
+                      >
+                        Lưu quà tặng vào kho & Chọn tặng đơn này
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Sale Discount / Price Reduction Controls */}
+              {hasDiscountActive && (
+                <div className="p-3 bg-white rounded-lg border border-amber-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-amber-950 flex items-center gap-1.5">
+                      <Tag className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                      <span>Giảm giá bán / Chiết khấu trực tiếp trên đơn</span>
+                    </span>
+                    <div className="inline-flex p-0.5 bg-slate-100 rounded-md border border-slate-200">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDiscountMode('amount');
+                          setDiscountInput('');
+                        }}
+                        className={`px-2 py-1 text-[11px] font-semibold rounded ${
+                          discountMode === 'amount'
+                            ? 'bg-white text-slate-900 shadow-2xs'
+                            : 'text-slate-600'
+                        }`}
+                      >
+                        Giảm theo tiền (VNĐ)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDiscountMode('percent');
+                          setDiscountInput('');
+                        }}
+                        className={`px-2 py-1 text-[11px] font-semibold rounded flex items-center gap-0.5 ${
+                          discountMode === 'percent'
+                            ? 'bg-white text-slate-900 shadow-2xs'
+                            : 'text-slate-600'
+                        }`}
+                      >
+                        <Percent className="w-3 h-3" />
+                        <span>Giảm theo %</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
+                    <div>
+                      <label
+                        htmlFor="sale-discount-input"
+                        className="block text-xs font-semibold text-slate-700 mb-1"
+                      >
+                        {discountMode === 'percent'
+                          ? 'Nhập phần trăm giảm giá (%)'
+                          : 'Nhập số tiền giảm giá (VNĐ)'}
+                      </label>
+                      <input
+                        id="sale-discount-input"
+                        type="number"
+                        min={0}
+                        max={discountMode === 'percent' ? 100 : grossTotal || undefined}
+                        value={discountInput}
+                        onChange={(e) => setDiscountInput(e.target.value)}
+                        placeholder={discountMode === 'percent' ? 'VD: 5' : 'VD: 50000'}
+                        className="w-full px-3 py-1.5 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                      />
+                    </div>
+                    <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-950 flex items-center justify-between">
+                      <span>Số tiền được giảm:</span>
+                      <strong className="font-mono text-red-600">
+                        -{formatVND(computedDiscountAmount)}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-slate-500">Chọn nhanh:</span>
+                    {discountMode === 'percent'
+                      ? [2, 5, 10, 15, 20].map((pct) => (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => setDiscountInput(String(pct))}
+                            className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-amber-100 text-slate-800 rounded border border-slate-200"
+                          >
+                            Giảm {pct}%
+                          </button>
+                        ))
+                      : [20000, 50000, 100000, 200000, 500000].map((amt) => (
+                          <button
+                            key={amt}
+                            type="button"
+                            onClick={() => setDiscountInput(String(amt))}
+                            className="px-2 py-1 text-[11px] font-mono font-semibold bg-slate-100 hover:bg-amber-100 text-slate-800 rounded border border-slate-200"
+                          >
+                            -{amt.toLocaleString('vi-VN')}đ
+                          </button>
+                        ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             {/* Payment Method Toggle */}
             <div>
               <span className="block text-xs font-semibold text-slate-700 mb-1.5">
-                3. Hình thức thanh toán
+                4. Hình thức thanh toán
               </span>
               <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-lg">
                 <button
@@ -1079,7 +1561,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     id="sale-paid-input"
                     type="number"
                     min={0}
-                    max={computedTotal}
+                    max={netPayableTotal}
                     value={paidAmount}
                     onChange={(e) => setPaidAmount(e.target.value)}
                     placeholder="0"
@@ -1157,10 +1639,43 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               </div>
             )}
 
-            {/* Live Summary Box with Old Customer Debt & Cumulative Total Debt */}
+            {/* Live Summary Box with Discount, Promotional Gift, Old Customer Debt & Cumulative Total Debt */}
             <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 space-y-2 text-xs">
+              {(summary.discountAmount > 0 || (hasGiftActive && selectedGiftProductObj)) && (
+                <div className="space-y-1.5 pb-2 border-b border-slate-200">
+                  <div className="flex items-center justify-between text-slate-600">
+                    <span>Tiền hàng gốc ({qtyNum || 0} × {formatVND(priceNum)}):</span>
+                    <span className="font-mono tabular-nums font-semibold text-slate-800">
+                      {formatVND(summary.grossAmount)}
+                    </span>
+                  </div>
+                  {summary.discountAmount > 0 && (
+                    <div className="flex items-center justify-between text-amber-900">
+                      <span className="font-medium">
+                        Giảm giá bán / Chiết khấu{computedDiscountPercent > 0 ? ` (${computedDiscountPercent}%)` : ''}:
+                      </span>
+                      <span className="font-mono tabular-nums font-bold text-red-600">
+                        -{formatVND(summary.discountAmount)}
+                      </span>
+                    </div>
+                  )}
+                  {hasGiftActive && selectedGiftProductObj && (
+                    <div className="flex items-center justify-between text-emerald-900 bg-emerald-50 px-2 py-1 rounded border border-emerald-200">
+                      <span className="font-semibold flex items-center gap-1">
+                        <Gift className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                        <span>
+                          Quà tặng KM: {giftQtyNum} {selectedGiftProductObj.unit} {selectedGiftProductObj.name}
+                        </span>
+                      </span>
+                      <span className="font-mono font-bold text-emerald-800">0 đ (Miễn phí)</span>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="flex items-center justify-between">
-                <span className="text-slate-600">Tổng thành tiền:</span>
+                <span className="text-slate-600">
+                  {summary.discountAmount > 0 ? 'Tổng thành tiền (Sau giảm giá):' : 'Tổng thành tiền:'}
+                </span>
                 <span className="text-sm font-bold font-mono tabular-nums text-slate-900">
                   {formatVND(summary.totalAmount)}
                 </span>
@@ -1356,6 +1871,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <div className="text-xs font-mono text-slate-600">
                         {s.quantity} {s.unit} × {formatVND(s.unitPrice)}
                       </div>
+                      {((s.discountAmount || 0) > 0 || (s.giftProductName && (s.giftQuantity || 0) > 0)) && (
+                        <div className="mt-1.5 pt-1.5 border-t border-slate-200/80 space-y-1">
+                          {(s.discountAmount || 0) > 0 && (
+                            <div className="text-[11px] font-semibold text-amber-800 flex items-center gap-1">
+                              <Tag className="w-3 h-3 shrink-0" />
+                              <span>Giảm giá: -{formatVND(s.discountAmount || 0)}</span>
+                            </div>
+                          )}
+                          {s.giftProductName && (s.giftQuantity || 0) > 0 && (
+                            <div className="text-[11px] font-semibold text-emerald-800 flex items-center gap-1">
+                              <Gift className="w-3 h-3 shrink-0" />
+                              <span>
+                                Tặng KM: {s.giftQuantity} {s.giftUnit || ''} {s.giftProductName}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1466,6 +1999,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <div className="text-xs font-mono text-slate-500 mt-0.5">
                         {s.quantity} {s.unit} × {formatVND(s.unitPrice)}
                       </div>
+                      {((s.discountAmount || 0) > 0 || (s.giftProductName && (s.giftQuantity || 0) > 0)) && (
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          {(s.discountAmount || 0) > 0 && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 rounded">
+                              <Tag className="w-3 h-3 shrink-0" />
+                              <span>Giảm: -{formatVND(s.discountAmount || 0)}</span>
+                            </span>
+                          )}
+                          {s.giftProductName && (s.giftQuantity || 0) > 0 && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded">
+                              <Gift className="w-3 h-3 shrink-0" />
+                              <span>
+                                Tặng: {s.giftQuantity} {s.giftUnit || ''} {s.giftProductName}
+                              </span>
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
                       {formatVND(s.totalAmount)}
@@ -1577,6 +2128,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
+                const discNum = Math.max(0, Number(editSaleDiscount) || 0);
+                const giftQtyVal = Math.max(0, Number(editSaleGiftQty) || 0);
+                const hasGiftVal = Boolean(editSaleGiftName.trim() && giftQtyVal > 0);
+                const promoVal: SalePromotionType =
+                  discNum > 0 && hasGiftVal
+                    ? 'both'
+                    : discNum > 0
+                    ? 'discount'
+                    : hasGiftVal
+                    ? 'gift'
+                    : 'none';
                 onUpdateSale(editingSale.id, {
                   invoiceCode: editSaleCode,
                   warehouseName: editSaleWarehouse,
@@ -1589,6 +2151,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   paidAmount: Math.max(0, Number(editSalePaid) || 0),
                   dueDate: editSaleDueDate,
                   note: editSaleNote,
+                  promotionType: promoVal,
+                  discountAmount: discNum,
+                  giftProductName: hasGiftVal ? editSaleGiftName.trim() : undefined,
+                  giftUnit: hasGiftVal ? editSaleGiftUnit.trim() || 'CÁI' : undefined,
+                  giftQuantity: hasGiftVal ? giftQtyVal : 0,
                 });
                 setEditingSale(null);
               }}
@@ -2887,11 +3454,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
         <div className="xl:col-span-7 bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="p-5 border-b border-slate-200">
             <h3 className="text-base font-bold text-slate-900">
-              Nhật Ký Nhập Hàng ({imports.length} phiếu)
+              Nhật Ký Nhập Hàng
             </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Lưu trữ lịch sử nhập vật tư theo từng kho, đồng bộ Công nợ NCC và hỗ trợ Xuất Phiếu Nhập Kho PDF
-            </p>
           </div>
 
           {/* Mobile Card View (< md): Full-width balanced layout, zero column squishing */}
