@@ -2847,20 +2847,41 @@ export default function App() {
       showToast('Tài khoản của bạn không có quyền khôi phục dữ liệu từ tệp sao lưu.');
       return;
     }
-    if (Array.isArray(payload.products) && payload.products.length > 0) {
+    if (Array.isArray(payload.warehouses) && payload.warehouses.length > 0) {
+      setWarehouses(payload.warehouses);
+    }
+    if (Array.isArray(payload.customerGroups) && payload.customerGroups.length > 0) {
+      setCustomerGroups(payload.customerGroups);
+    }
+    if (Array.isArray(payload.productCategories) && payload.productCategories.length > 0) {
+      setProductCategories(payload.productCategories);
+    }
+    if (Array.isArray(payload.products)) {
       setProducts(payload.products);
+      payload.products.forEach((p) => {
+        void syncProductToFirestore(p, true);
+      });
     }
-    if (Array.isArray(payload.customers) && payload.customers.length > 0) {
+    if (Array.isArray(payload.customers)) {
       setCustomers(payload.customers);
+      payload.customers.forEach((c) => {
+        void syncCustomerToFirestore(c, true);
+      });
     }
-    if (Array.isArray(payload.suppliers) && payload.suppliers.length > 0) {
+    if (Array.isArray(payload.suppliers)) {
       setSuppliers(payload.suppliers);
     }
     if (Array.isArray(payload.sales)) {
       setSales(payload.sales);
+      payload.sales.forEach((s) => {
+        void syncSaleToFirestore(s, true);
+      });
     }
     if (Array.isArray(payload.imports)) {
       setImports(payload.imports);
+      payload.imports.forEach((imp) => {
+        void syncImportToFirestore(imp, true);
+      });
     }
     if (Array.isArray(payload.receiptGroups) && payload.receiptGroups.length > 0) {
       setReceiptGroups(payload.receiptGroups);
@@ -2874,7 +2895,7 @@ export default function App() {
     if (Array.isArray(payload.paymentVouchers)) {
       setPaymentVouchers(payload.paymentVouchers);
     }
-    if (Array.isArray(payload.savedVouchers) && payload.savedVouchers.length > 0) {
+    if (Array.isArray(payload.savedVouchers)) {
       setSavedVouchers(payload.savedVouchers);
     }
     if (isAdminAccount && Array.isArray(payload.staffList) && payload.staffList.length > 0) {
@@ -2887,8 +2908,8 @@ export default function App() {
       targetEntity: 'backup',
       targetCode: `Backup_${payload.exportedAt.slice(0, 10)}`,
       warehouseName: currentStaff.assignedWarehouse,
-      actionTitle: `Khôi phục dữ liệu từ tệp sao lưu (${payload.exportedAt})`,
-      details: `Đã phục hồi: ${payload.products.length} vật tư, ${payload.customers.length} khách hàng, ${payload.sales.length} đơn bán, ${payload.imports.length} phiếu nhập và ${payload.auditLogs.length} bản ghi lịch sử thao tác.`,
+      actionTitle: `Khôi phục & Đăng tải dữ liệu từ tệp sao lưu (${payload.exportedAt})`,
+      details: `Đã phục hồi: ${payload.warehouses?.length || warehouses.length} kho, ${payload.products.length} vật tư, ${payload.customers.length} khách hàng, ${payload.sales.length} đơn bán, ${payload.imports.length} phiếu nhập và ${payload.auditLogs.length} bản ghi lịch sử thao tác.`,
     });
 
     const mergedLogs = [
@@ -2897,7 +2918,7 @@ export default function App() {
     ];
     setAuditLogs(mergedLogs);
     showToast(
-      `Đã khôi phục thành công dữ liệu (${payload.sales.length} đơn bán, ${payload.imports.length} phiếu nhập, ${payload.auditLogs.length} lịch sử thao tác)!`
+      `Đã đăng tải và khôi phục thành công toàn bộ dữ liệu (${payload.warehouses?.length || warehouses.length} kho, ${payload.products.length} vật tư, ${payload.customers.length} khách hàng, ${payload.sales.length} đơn bán, ${payload.imports.length} phiếu nhập)!`
     );
   };
 
