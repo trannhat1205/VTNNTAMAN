@@ -21,6 +21,20 @@ export default defineConfig(() => {
           const rootServer = path.resolve(import.meta.dirname, 'server.js');
           if (fs.existsSync(distDir) && fs.existsSync(rootServer)) {
             fs.cpSync(rootServer, path.resolve(distDir, 'server.js'), {force: true});
+            const runtimePkg = {
+              name: 'vtnn-tam-an-runtime',
+              private: true,
+              type: 'module',
+              main: 'server.js',
+              scripts: {
+                start: 'node server.js',
+              },
+            };
+            fs.writeFileSync(
+              path.resolve(distDir, 'package.json'),
+              `${JSON.stringify(runtimePkg, null, 2)}\n`,
+              'utf8'
+            );
           }
         },
       },

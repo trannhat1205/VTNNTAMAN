@@ -31,7 +31,7 @@ jobs:
       - name: Publish clean dist/ artifact to deploy branch for Hostinger Auto-Deploy
         run: |
           if [ -f deploy.htaccess ]; then cp deploy.htaccess dist/.htaccess; fi
-          rm -f dist/server.js
+          rm -f dist/server.js dist/package.json
           cd dist
           git init
           git config user.name "github-actions[bot]"
