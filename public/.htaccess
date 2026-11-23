@@ -1,0 +1,29 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # If the requested file or directory exists directly in the root, serve it
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule ^ - [L]
+
+  # If Hostinger deploys the GitHub repo root directly to public_html,
+  # transparently serve compiled assets from dist/ when they exist
+  RewriteCond %{DOCUMENT_ROOT}/dist/%{REQUEST_URI} -f
+  RewriteRule ^(.*)$ dist/$1 [L]
+
+  # Route root or SPA navigation requests to dist/index.html if present
+  RewriteCond %{DOCUMENT_ROOT}/dist/index.html -f
+  RewriteRule ^ dist/index.html [L]
+
+  # Standard SPA fallback when Document Root is already set to dist/
+  RewriteRule ^index\.html$ - [L]
+  RewriteRule . /index.html [L]
+</IfModule>
+
+<IfModule mod_mime.c>
+  AddType application/javascript .js .mjs
+  AddType text/css .css
+  AddType application/json .json
+  AddType image/svg+xml .svg
+</IfModule>

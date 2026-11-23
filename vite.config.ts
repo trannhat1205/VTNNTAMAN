@@ -6,6 +6,7 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    base: './',
     plugins: [
       react(),
       tailwindcss(),
@@ -24,6 +25,10 @@ export default defineConfig(() => {
           const distAssets = path.resolve(distDir, 'src/assets');
           if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
             fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+          }
+          const publicHtaccess = path.resolve(__dirname, 'public/.htaccess');
+          if (fs.existsSync(distDir) && fs.existsSync(publicHtaccess)) {
+            fs.cpSync(publicHtaccess, path.resolve(distDir, '.htaccess'), {force: true});
           }
         },
       },

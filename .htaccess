@@ -1,0 +1,26 @@
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # Do not rewrite requests that already point to dist/
+  RewriteRule ^dist/ - [L]
+
+  # Serve compiled static files from dist/ if they exist (e.g. /assets/*, /favicon.ico)
+  RewriteCond %{DOCUMENT_ROOT}/dist/$1 -f
+  RewriteRule ^(.*)$ dist/$1 [L]
+
+  # Serve existing static files in public/ if requested directly
+  RewriteCond %{DOCUMENT_ROOT}/public/$1 -f
+  RewriteRule ^(.*)$ public/$1 [L]
+
+  # Route all root and SPA paths to the compiled dist/index.html
+  RewriteCond %{DOCUMENT_ROOT}/dist/index.html -f
+  RewriteRule ^ dist/index.html [L]
+</IfModule>
+
+<IfModule mod_mime.c>
+  AddType application/javascript .js .mjs
+  AddType text/css .css
+  AddType application/json .json
+  AddType image/svg+xml .svg
+</IfModule>
