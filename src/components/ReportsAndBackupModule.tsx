@@ -3540,16 +3540,16 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
             </div>
           )}
 
-        {/* Section: Tự Động Đề Xuất Các Báo Cáo Phù Hợp & Tốt Nhất Theo Nhiệm Vụ Cần Có */}
+        {/* Section: Tự Động Đề Xuất Các Báo Cáo Phù Hợp & Tốt Nhất */}
         <div className="bg-white p-4 sm:p-6 rounded-xl border border-emerald-200 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
               <div className="text-xs font-bold text-emerald-800 uppercase tracking-wide flex items-center gap-1.5">
                 <Sparkles className="w-4 h-4 text-emerald-700 shrink-0" />
-                <span>Hệ Thống Tự Động Phân Tích & Viết Đề Xuất Báo Cáo Cấp Trên</span>
+                <span>Hệ Thống Tự Động Phân Tích</span>
               </div>
               <h3 className="text-sm sm:text-base font-bold text-slate-900 mt-0.5">
-                Đề Xuất Các Báo Cáo Phù Hợp & Tốt Nhất Theo Nhu Cầu Quản Lý ({fromDate} → {toDate})
+                Đề Xuất Các Báo Cáo Phù Hợp &amp; Tốt Nhất ({fromDate} → {toDate})
               </h3>
             </div>
             <span className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-lg self-start sm:self-auto">
@@ -3602,7 +3602,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
 
                   <p className="text-xs text-slate-700 leading-relaxed">{rec.summary}</p>
                   <div className="text-xs font-semibold text-emerald-900 bg-white/80 p-2 rounded-lg border border-slate-200/80">
-                    <strong>Đề xuất hành động & báo cáo cấp trên:</strong> {rec.suggestedAction}
+                    <strong>Đề xuất hành động:</strong> {rec.suggestedAction}
                   </div>
                 </div>
 
@@ -3626,7 +3626,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                     onClick={handleExportComprehensiveExcel}
                     className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-slate-900 underline"
                   >
-                    Xuất tệp gửi Quản lý
+                    Xuất tệp
                   </button>
                 </div>
               </div>
@@ -3637,7 +3637,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
         {/* Bottom Report Export Bar (Moved to bottom of page) */}
         <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="text-xs font-semibold text-slate-700">
-            Xuất tệp báo cáo tổng hợp & Báo cáo cấp trên ({fromDate} → {toDate}):
+            Xuất tệp báo cáo tổng hợp ({fromDate} → {toDate}):
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -3655,7 +3655,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               className="px-3.5 py-2 text-xs font-bold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap"
             >
               <FileText className="w-4 h-4 text-red-600 shrink-0" />
-              <span>Xuất Báo Cáo Cấp Trên (PDF .pdf)</span>
+              <span>Xuất Báo Cáo (PDF .pdf)</span>
             </button>
           </div>
         </div>

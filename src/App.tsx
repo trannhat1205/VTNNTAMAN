@@ -3988,7 +3988,7 @@ export default function App() {
                     referrerPolicy="no-referrer"
                     className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-contain border border-slate-200 p-1 shrink-0 bg-white"
                   />
-                  <div className="min-w-0 space-y-1">
+                  <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       {isAdminAccount ? (
                         <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
@@ -4001,15 +4001,7 @@ export default function App() {
                           <span>Quản lý 1 kho: {currentStaff.assignedWarehouse}</span>
                         </span>
                       )}
-                      <span className="text-xs font-mono text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 break-all">
-                        {isAdminAccount
-                          ? `UID: ${PRIMARY_ADMIN_UID}`
-                          : `Độc lập · Đầy đủ chức năng quản trị trên kho riêng`}
-                      </span>
                     </div>
-                    <h1 className="text-lg sm:text-2xl font-bold text-slate-900">
-                      VTNN Tâm An — Vật tư Tâm An, Nhà Nông an tâm
-                    </h1>
                   </div>
                 </div>
 

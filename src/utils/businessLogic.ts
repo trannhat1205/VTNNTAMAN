@@ -819,7 +819,7 @@ export const ALL_STAFF_FUNCTIONAL_PERMISSIONS: {
     key: 'view_assigned_reports',
     label: 'Xem & Xuất báo cáo theo nhiệm vụ',
     description:
-      'Chức năng: Nhân viên được xem, kiểm tra chi tiết và xuất báo cáo cấp trên (Từ ngày... đến ngày...) tương ứng đúng với mục nghiệp vụ do mình quản lý để báo cáo kịp thời cho Quản lý.',
+      'Chức năng: Nhân viên được xem, kiểm tra chi tiết và xuất báo cáo (Từ ngày... đến ngày...) tương ứng đúng với mục nghiệp vụ do mình quản lý.',
   },
 ];
 
@@ -1893,7 +1893,7 @@ export function generateSmartReportRecommendations(params: {
   // 2. Inventory & Low Stock Restock Recommendation
   if (allowed.includes('inventory_stock')) {
     const advice =
-      'Nhân sự phụ trách kho nên xuất Báo cáo Tồn kho gửi cấp trên để phê duyệt kế hoạch nhập hàng kịp thời trước cao điểm mùa vụ.';
+      'Nhân sự phụ trách kho nên xuất Báo cáo Tồn kho để lên kế hoạch nhập hàng kịp thời trước cao điểm mùa vụ.';
     recommendations.push({
       id: 'rec_inventory_stock',
       category: 'inventory_stock',
@@ -1916,13 +1916,13 @@ export function generateSmartReportRecommendations(params: {
     const collectionRate =
       totalSalesRevenue > 0 ? Math.round((totalSalesPaid / totalSalesRevenue) * 100) : 100;
     const advice =
-      'Xuất báo cáo chi tiết các mặt hàng bán chạy nhất trong kỳ để trình Quản lý điều chỉnh lượng hàng dự trữ và chính sách chiết khấu.';
+      'Xuất báo cáo chi tiết các mặt hàng bán chạy nhất trong kỳ để điều chỉnh lượng hàng dự trữ và chính sách chiết khấu.';
     recommendations.push({
       id: 'rec_sales_performance',
       category: 'sales_log',
       targetCategory: 'sales_log',
       priority: 'medium',
-      badgeLabel: 'Đề xuất Báo cáo Bán hàng cấp trên',
+      badgeLabel: 'Đề xuất Báo cáo Bán hàng',
       title: 'Báo cáo Nhật ký Bán hàng & Tỷ lệ Thu tiền Thực tế theo Kỳ',
       summary: `Ghi nhận ${rangeSales.length} hóa đơn xuất bán với tổng doanh thu ${formatVND(totalSalesRevenue)}, đã thu thực tế ${formatVND(totalSalesPaid)} (Đạt tỷ lệ thu tiền ${collectionRate}%).`,
       suggestedAction: advice,

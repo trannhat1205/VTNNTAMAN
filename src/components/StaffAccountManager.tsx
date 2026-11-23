@@ -1119,11 +1119,11 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
               </span>
             )}
           </h2>
-          <p className="text-xs text-slate-600">
-            {canCreateAndAssignRoles
-              ? 'Tài khoản Quản lý chính có toàn quyền xem dữ liệu tất cả người dùng/kho và phân quyền quản lý kho cho bất kỳ tài khoản người dùng nào.'
-              : `Tài khoản quản lý 1 kho độc lập (${currentStaff.assignedWarehouse}) với đầy đủ tất cả các chức năng của người quản trị nhưng chỉ quản lý riêng kho của mình.`}
-          </p>
+          {canCreateAndAssignRoles && (
+            <p className="text-xs text-slate-600">
+              Tài khoản Quản lý chính có toàn quyền xem dữ liệu tất cả người dùng/kho và phân quyền quản lý kho cho bất kỳ tài khoản người dùng nào.
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1626,9 +1626,6 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-3 gap-y-1">
                           <span className="font-mono">Gmail: {st.email || 'Chưa bổ sung'}</span>
                           {st.phone && <span className="font-mono">SĐT: {st.phone}</span>}
-                          <span className="inline-flex items-center gap-1 font-mono text-slate-500">
-                            Bảo mật: <strong>Đã mã hóa SHA-256 / Firebase Auth</strong>
-                          </span>
                         </div>
                       </div>
 
@@ -1860,7 +1857,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     htmlFor="personal-profile-phone"
                     className="block text-xs font-semibold text-slate-700 mb-1"
                   >
-                    Số điện thoại liên hệ (Không bắt buộc)
+                    Số điện thoại liên hệ
                   </label>
                   <input
                     id="personal-profile-phone"
@@ -1918,9 +1915,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         className="text-xs font-bold text-emerald-950 flex items-center gap-1.5"
                       >
                         <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
-                        <span>
-                          Tên hiển thị Kho quản lý (Tiền tố &quot;{MANDATORY_WAREHOUSE_PREFIX}&quot; là mặc định không thay đổi) *
-                        </span>
+                        <span>Tên hiển thị Kho quản lý *</span>
                       </label>
                       <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded">
                         Quản lý 1 kho độc lập
@@ -1967,9 +1962,6 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   <Mail className="w-4 h-4 shrink-0" />
                   <span>Lưu hồ sơ cá nhân &amp; Cập nhật tên hiển thị kho</span>
                 </button>
-                <span className="text-[11px] text-slate-500">
-                  Mỗi tài khoản quản lý 1 kho độc lập với đầy đủ chức năng của người quản trị trên kho của mình.
-                </span>
               </div>
             </form>
           </div>
@@ -1982,9 +1974,6 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   <KeyRound className="w-4 h-4 text-emerald-700" />
                   <span>Thay Đổi Mật Khẩu Cá Nhân (@{currentStaff.username})</span>
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Bấm biểu tượng con mắt để kiểm tra mật khẩu trước khi lưu
-                </p>
               </div>
             </div>
 
@@ -2277,7 +2266,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   !canAccountCreateStaff(editingStaffModal) && (
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Tên hiển thị Kho (Tiền tố &quot;{MANDATORY_WAREHOUSE_PREFIX}&quot; cố định) *
+                        Tên hiển thị Kho *
                       </label>
                       <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
                         <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
