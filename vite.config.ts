@@ -1,6 +1,5 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
-import fs from 'fs';
 import path from 'path';
 import {defineConfig} from 'vite';
 
@@ -10,34 +9,6 @@ export default defineConfig(() => {
     plugins: [
       react(),
       tailwindcss(),
-      {
-        name: 'copy-node-server-entry',
-        apply: 'build',
-        closeBundle(error?: Error): void {
-          if (error) {
-            return;
-          }
-          const distDir = path.resolve(import.meta.dirname, 'dist');
-          const rootServer = path.resolve(import.meta.dirname, 'server.js');
-          if (fs.existsSync(distDir) && fs.existsSync(rootServer)) {
-            fs.cpSync(rootServer, path.resolve(distDir, 'server.js'), {force: true});
-            const runtimePkg = {
-              name: 'vtnn-tam-an-runtime',
-              private: true,
-              type: 'module',
-              main: 'server.js',
-              scripts: {
-                start: 'node server.js',
-              },
-            };
-            fs.writeFileSync(
-              path.resolve(distDir, 'package.json'),
-              `${JSON.stringify(runtimePkg, null, 2)}\n`,
-              'utf8'
-            );
-          }
-        },
-      },
     ],
     resolve: {
       alias: {
