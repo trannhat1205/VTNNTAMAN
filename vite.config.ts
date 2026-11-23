@@ -11,16 +11,16 @@ export default defineConfig(() => {
       react(),
       tailwindcss(),
       {
-        name: 'copy-production-htaccess',
+        name: 'copy-node-server-entry',
         apply: 'build',
         closeBundle(error?: Error): void {
           if (error) {
             return;
           }
           const distDir = path.resolve(import.meta.dirname, 'dist');
-          const publicHtaccess = path.resolve(import.meta.dirname, 'public/.htaccess');
-          if (fs.existsSync(distDir) && fs.existsSync(publicHtaccess)) {
-            fs.cpSync(publicHtaccess, path.resolve(distDir, '.htaccess'), {force: true});
+          const rootServer = path.resolve(import.meta.dirname, 'server.js');
+          if (fs.existsSync(distDir) && fs.existsSync(rootServer)) {
+            fs.cpSync(rootServer, path.resolve(distDir, 'server.js'), {force: true});
           }
         },
       },
