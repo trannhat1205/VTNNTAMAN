@@ -6,27 +6,19 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
-    base: './',
+    base: '/',
     plugins: [
       react(),
       tailwindcss(),
-      // Copies src/assets into dist/ so root-relative URLs like
-      // "/src/assets/images/..." (e.g. generate_image output) still resolve
-      // in production builds. Do not remove.
       {
-        name: 'copy-unbundled-src-assets',
+        name: 'copy-production-htaccess',
         apply: 'build',
         closeBundle(error?: Error): void {
           if (error) {
             return;
           }
-          const distDir = path.resolve(__dirname, 'dist');
-          const srcAssets = path.resolve(__dirname, 'src/assets');
-          const distAssets = path.resolve(distDir, 'src/assets');
-          if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
-            fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
-          }
-          const publicHtaccess = path.resolve(__dirname, 'public/.htaccess');
+          const distDir = path.resolve(import.meta.dirname, 'dist');
+          const publicHtaccess = path.resolve(import.meta.dirname, 'public/.htaccess');
           if (fs.existsSync(distDir) && fs.existsSync(publicHtaccess)) {
             fs.cpSync(publicHtaccess, path.resolve(distDir, '.htaccess'), {force: true});
           }
@@ -35,14 +27,28 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
+      },
+    },
+    build: {
+      outDir: 'dist',
+      sourcemap: false,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules')) {
+              if (id.includes('firebase')) return 'vendor-firebase';
+              if (id.includes('xlsx')) return 'vendor-xlsx';
+              if (id.includes('jspdf')) return 'vendor-pdf';
+              if (id.includes('lucide-react')) return 'vendor-icons';
+              if (id.includes('react')) return 'vendor-react';
+            }
+          },
+        },
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
   };

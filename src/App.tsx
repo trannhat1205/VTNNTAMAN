@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   ArrowDownCircle,
   ArrowUpCircle,
@@ -14,7 +14,6 @@ import {
   History,
   KeyRound,
   LayoutDashboard,
-  LogIn,
   LogOut,
   Menu,
   Printer,
@@ -51,25 +50,8 @@ import {
 import {
   ADMIN_BACKUP_EMAIL,
   ADMIN_PRIMARY_PHONE,
-  DEFAULT_NOTIFICATION_PREFS,
-  DEFAULT_REFERENCE_DATE,
-  INITIAL_AUDIT_LOGS,
-  INITIAL_BACKUPS,
-  INITIAL_CUSTOMER_GROUPS,
-  INITIAL_CUSTOMERS,
-  INITIAL_IMPORTS,
-  INITIAL_PAYMENT_GROUPS,
-  INITIAL_PAYMENT_VOUCHERS,
-  INITIAL_PRODUCT_CATEGORIES,
-  INITIAL_PRODUCTS,
-  INITIAL_RECEIPT_GROUPS,
-  INITIAL_RECEIPT_VOUCHERS,
-  INITIAL_SALES,
-  INITIAL_SAVED_VOUCHERS,
-  INITIAL_STAFF,
-  INITIAL_SUPPLIERS,
-  INITIAL_WAREHOUSES,
   PRIMARY_ADMIN_UID,
+  PRODUCTION_PRIMARY_ADMIN,
 } from './data/seedData';
 import {
   applyCustomerFifoDebtSettlement,
@@ -85,6 +67,7 @@ import {
   canPerformRoleAction,
   canStaffFilterMultiWarehouses,
   canViewAuditHistory,
+  computeDueDateAfterDays,
   createAuditLogEntry,
   evaluateDebtUrgency,
   evaluateStaffAccessScope,
@@ -95,21 +78,32 @@ import {
   formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
   formatVND,
+  generateSequentialVoucherCode,
   generateSmartNotifications,
+  getCurrentMonthRangeVietnam,
   getDefaultPermissionsForPosition,
   getIndependentWarehouseFullPermissions,
   getPositionRoleLabel,
+  getTodayVietnamDateStr,
   normalizeCustomTamAnWarehouseName,
   resolveActiveWarehouses,
   updateImportRecord,
   updateSaleRecord,
 } from './utils/businessLogic';
+import { hashPassword, isHashedPassword, verifyPassword } from './utils/authSecurity';
 import {
+  auth,
+  canWriteToFirestore,
   deleteBackupFileFromDrive,
+  deleteFirestoreDocIfAdmin,
   fetchUserFirestoreData,
+  firebaseSignInWithEmailPassword,
+  firebaseSignUpWithEmailPassword,
   googleSignInWithRole,
   initAuth,
+  isCurrentUserAdmin,
   logoutUser,
+  resendVerificationEmail,
   syncCustomerToFirestore,
   syncImportToFirestore,
   syncNotificationPrefsToFirestore,
@@ -117,26 +111,53 @@ import {
   syncSaleToFirestore,
   uploadBackupToGoogleDrive,
 } from './services/firebaseService';
+import {
+  loadWorkspaceFromStorage,
+  mergeRecordsById,
+  saveWorkspaceToStorage,
+  sanitizeStaffListForStorage,
+  WORKSPACE_STORAGE_KEY,
+} from './services/localPersistence';
 import { NotificationCenter } from './components/NotificationCenter';
-import { CustomerModule } from './components/CustomerModule';
-import { DebtModule } from './components/DebtModule';
-import { ReportsAndBackupModule } from './components/ReportsAndBackupModule';
-import { ImportLogView, SalesLogView } from './components/SalesImportViews';
-import { InventoryView } from './components/InventoryView';
 import { MultiWarehouseFilterPopover } from './components/MultiWarehouseFilterPopover';
-import { VoucherPrintCenter } from './components/VoucherPrintCenter';
-import {
-  CreatePaymentVoucherInput,
-  CreateReceiptVoucherInput,
-  PaymentVoucherLogView,
-  ReceiptVoucherLogView,
-} from './components/CashFlowVouchersView';
-import {
-  GmailRecoveryLog,
-  InitialLoginScreenPortal,
-  StaffAccountManager,
-} from './components/StaffAccountManager';
-import { exportPeriodicReportExcel, exportPeriodicReportPDF } from './utils/exportReports';
+import { InitialLoginScreenPortal } from './components/StaffAccountManager';
+
+const CustomerModule = lazy(() =>
+  import('./components/CustomerModule').then((m) => ({ default: m.CustomerModule }))
+);
+const DebtModule = lazy(() =>
+  import('./components/DebtModule').then((m) => ({ default: m.DebtModule }))
+);
+const ReportsAndBackupModule = lazy(() =>
+  import('./components/ReportsAndBackupModule').then((m) => ({
+    default: m.ReportsAndBackupModule,
+  }))
+);
+const SalesLogView = lazy(() =>
+  import('./components/SalesImportViews').then((m) => ({ default: m.SalesLogView }))
+);
+const ImportLogView = lazy(() =>
+  import('./components/SalesImportViews').then((m) => ({ default: m.ImportLogView }))
+);
+const InventoryView = lazy(() =>
+  import('./components/InventoryView').then((m) => ({ default: m.InventoryView }))
+);
+const VoucherPrintCenter = lazy(() =>
+  import('./components/VoucherPrintCenter').then((m) => ({ default: m.VoucherPrintCenter }))
+);
+const ReceiptVoucherLogView = lazy(() =>
+  import('./components/CashFlowVouchersView').then((m) => ({
+    default: m.ReceiptVoucherLogView,
+  }))
+);
+const PaymentVoucherLogView = lazy(() =>
+  import('./components/CashFlowVouchersView').then((m) => ({
+    default: m.PaymentVoucherLogView,
+  }))
+);
+const StaffAccountManager = lazy(() =>
+  import('./components/StaffAccountManager').then((m) => ({ default: m.StaffAccountManager }))
+);
 
 type ActiveTab =
   | 'dashboard'
@@ -153,105 +174,52 @@ type ActiveTab =
   | 'backup_history';
 
 export default function App() {
+  const [initialWorkspace] = useState(() => loadWorkspaceFromStorage());
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [isSessionLoggedIn, setIsSessionLoggedIn] = useState<boolean>(true);
+  const [isSessionLoggedIn, setIsSessionLoggedIn] = useState<boolean>(false);
+  const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<'local' | 'synced' | 'unverified'>('local');
 
-  // Core Data State
-  const [products, setProducts] = useState<ProductItem[]>(INITIAL_PRODUCTS);
-  const [customers, setCustomers] = useState<CustomerProfile[]>(INITIAL_CUSTOMERS);
-  const [sales, setSales] = useState<SaleTransaction[]>(INITIAL_SALES);
-  const [imports, setImports] = useState<ImportTransaction[]>(INITIAL_IMPORTS);
-  const [savedVouchers, setSavedVouchers] =
-    useState<SavedVoucherRecord[]>(INITIAL_SAVED_VOUCHERS);
-  const [backups, setBackups] = useState<BackupEntry[]>(INITIAL_BACKUPS);
-  const [suppliers, setSuppliers] = useState<SupplierProfile[]>(INITIAL_SUPPLIERS);
-  const [warehouses, setWarehouses] = useState<string[]>(INITIAL_WAREHOUSES);
-  const [customerGroups, setCustomerGroups] = useState<string[]>(INITIAL_CUSTOMER_GROUPS);
-  const [productCategories, setProductCategories] = useState<string[]>(
-    INITIAL_PRODUCT_CATEGORIES
+  // Core Data State (Empty by default for production; persisted in localStorage + Firestore)
+  const [products, setProducts] = useState<ProductItem[]>(initialWorkspace.products);
+  const [customers, setCustomers] = useState<CustomerProfile[]>(initialWorkspace.customers);
+  const [sales, setSales] = useState<SaleTransaction[]>(initialWorkspace.sales);
+  const [imports, setImports] = useState<ImportTransaction[]>(initialWorkspace.imports);
+  const [savedVouchers, setSavedVouchers] = useState<SavedVoucherRecord[]>(
+    initialWorkspace.savedVouchers
   );
-  const [receiptGroups, setReceiptGroups] = useState<string[]>(INITIAL_RECEIPT_GROUPS);
-  const [paymentGroups, setPaymentGroups] = useState<string[]>(INITIAL_PAYMENT_GROUPS);
-  const [receiptVouchers, setReceiptVouchers] =
-    useState<CashReceiptVoucher[]>(INITIAL_RECEIPT_VOUCHERS);
-  const [paymentVouchers, setPaymentVouchers] =
-    useState<CashPaymentVoucher[]>(INITIAL_PAYMENT_VOUCHERS);
-  const [staffList, setStaffList] = useState<StaffMember[]>(() => {
-    try {
-      const saved = localStorage.getItem('vtnn_taman_staff_realtime_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed.map((st: StaffMember) => {
-            if (
-              st.uid === 'staff_manager_01' ||
-              st.uid === PRIMARY_ADMIN_UID ||
-              st.username === 'admin'
-            ) {
-              return {
-                ...st,
-                uid: PRIMARY_ADMIN_UID,
-                username: 'admin',
-                displayName:
-                  !st.displayName ||
-                  st.displayName.startsWith('Trần Nhật') ||
-                  st.displayName.includes('Admin')
-                    ? 'Trần Đình Nhất (Quản lý chính)'
-                    : st.displayName,
-                password:
-                  !st.password || st.password === 'taman123' || st.password === '123456'
-                    ? '885300'
-                    : st.password,
-                email: ADMIN_BACKUP_EMAIL,
-                phone: '0393120246',
-                role: 'manager',
-                positionRole: 'primary_manager',
-                assignedWarehouse: 'Tất cả kho',
-                permissions: INITIAL_STAFF[0].permissions,
-                active: true,
-              };
-            }
-            const isSingleWh = st.assignedWarehouse && st.assignedWarehouse !== 'Tất cả kho';
-            if (isSingleWh) {
-              return {
-                ...st,
-                role: 'manager',
-                positionRole: st.positionRole || 'warehouse_manager',
-                permissions: getIndependentWarehouseFullPermissions(),
-              };
-            }
-            return st;
-          });
-        }
-      }
-    } catch {
-      // Fallback to INITIAL_STAFF
-    }
-    return INITIAL_STAFF;
-  });
-  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() => {
-    try {
-      const saved = localStorage.getItem('vtnn_taman_audit_logs_v1');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // Fallback to INITIAL_AUDIT_LOGS
-    }
-    return INITIAL_AUDIT_LOGS;
-  });
-  const [currentStaffId, setCurrentStaffId] = useState<string>(INITIAL_STAFF[0].uid);
+  const [backups, setBackups] = useState<BackupEntry[]>(initialWorkspace.backups);
+  const [suppliers, setSuppliers] = useState<SupplierProfile[]>(initialWorkspace.suppliers);
+  const [warehouses, setWarehouses] = useState<string[]>(initialWorkspace.warehouses);
+  const [customerGroups, setCustomerGroups] = useState<string[]>(
+    initialWorkspace.customerGroups
+  );
+  const [productCategories, setProductCategories] = useState<string[]>(
+    initialWorkspace.productCategories
+  );
+  const [receiptGroups, setReceiptGroups] = useState<string[]>(initialWorkspace.receiptGroups);
+  const [paymentGroups, setPaymentGroups] = useState<string[]>(initialWorkspace.paymentGroups);
+  const [receiptVouchers, setReceiptVouchers] = useState<CashReceiptVoucher[]>(
+    initialWorkspace.receiptVouchers
+  );
+  const [paymentVouchers, setPaymentVouchers] = useState<CashPaymentVoucher[]>(
+    initialWorkspace.paymentVouchers
+  );
+  const [staffList, setStaffList] = useState<StaffMember[]>(initialWorkspace.staffList);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(initialWorkspace.auditLogs);
+  const [currentStaffId, setCurrentStaffId] = useState<string>(
+    initialWorkspace.staffList[0]?.uid || PRIMARY_ADMIN_UID
+  );
   const [saleFormResetKey, setSaleFormResetKey] = useState<number>(0);
 
   // Auth & Role State
-  const [role, setRole] = useState<UserRole>('manager');
+  const [role, setRole] = useState<UserRole>('staff');
   const [isGoogleAuthenticated, setIsGoogleAuthenticated] = useState(false);
-  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(ADMIN_BACKUP_EMAIL);
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
 
   const currentStaff = useMemo(
-    () => staffList.find((s) => s.uid === currentStaffId) || staffList[0],
+    () => staffList.find((s) => s.uid === currentStaffId) || staffList[0] || PRODUCTION_PRIMARY_ADMIN,
     [staffList, currentStaffId]
   );
 
@@ -272,56 +240,86 @@ export default function App() {
     }
   }, [accessScope, activeTab, role]);
 
-  // Real-time persistence of staff permissions via localStorage
-  useEffect(() => {
-    try {
-      const nextJson = JSON.stringify(staffList);
-      if (localStorage.getItem('vtnn_taman_staff_realtime_v1') !== nextJson) {
-        localStorage.setItem('vtnn_taman_staff_realtime_v1', nextJson);
-      }
-    } catch {
-      // ignore storage quota errors
-    }
-  }, [staffList]);
+  // Notification State (declared before workspace persistence effect)
+  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(
+    initialWorkspace.notificationPrefs
+  );
+  const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
+  const [readNotifIds, setReadNotifIds] = useState<Set<string>>(new Set());
+  const [toastBanner, setToastBanner] = useState<string | null>(null);
+  const [autoDailyBackupEnabled, setAutoDailyBackupEnabled] = useState(
+    initialWorkspace.autoDailyBackupEnabled
+  );
 
-  // Real-time persistence of operation audit history via localStorage
+  // Full 2-layer localStorage persistence across F5 reloads
   useEffect(() => {
-    try {
-      const nextJson = JSON.stringify(auditLogs);
-      if (localStorage.getItem('vtnn_taman_audit_logs_v1') !== nextJson) {
-        localStorage.setItem('vtnn_taman_audit_logs_v1', nextJson);
-      }
-    } catch {
-      // ignore storage quota errors
-    }
-  }, [auditLogs]);
+    saveWorkspaceToStorage({
+      version: 2,
+      products,
+      customers,
+      suppliers,
+      sales,
+      imports,
+      receiptVouchers,
+      paymentVouchers,
+      savedVouchers,
+      backups,
+      auditLogs,
+      warehouses,
+      customerGroups,
+      productCategories,
+      receiptGroups,
+      paymentGroups,
+      staffList,
+      notificationPrefs,
+      autoDailyBackupEnabled,
+    });
+  }, [
+    products,
+    customers,
+    suppliers,
+    sales,
+    imports,
+    receiptVouchers,
+    paymentVouchers,
+    savedVouchers,
+    backups,
+    auditLogs,
+    warehouses,
+    customerGroups,
+    productCategories,
+    receiptGroups,
+    paymentGroups,
+    staffList,
+    notificationPrefs,
+    autoDailyBackupEnabled,
+  ]);
 
-  // Cross-tab synchronization via storage event with strict deep-equality guard to prevent update loops
+  // Cross-tab synchronization via storage event
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === 'vtnn_taman_staff_realtime_v1' && e.newValue) {
-        try {
-          const updated = JSON.parse(e.newValue);
-          if (Array.isArray(updated) && updated.length > 0) {
-            setStaffList((prev) =>
-              JSON.stringify(prev) === e.newValue ? prev : updated
-            );
-          }
-        } catch {
-          // ignore
-        }
-      }
-      if (e.key === 'vtnn_taman_audit_logs_v1' && e.newValue) {
-        try {
-          const updatedLogs = JSON.parse(e.newValue);
-          if (Array.isArray(updatedLogs) && updatedLogs.length > 0) {
-            setAuditLogs((prev) =>
-              JSON.stringify(prev) === e.newValue ? prev : updatedLogs
-            );
-          }
-        } catch {
-          // ignore
-        }
+      if (e.key !== WORKSPACE_STORAGE_KEY || !e.newValue) return;
+      try {
+        const parsed = loadWorkspaceFromStorage();
+        setProducts(parsed.products);
+        setCustomers(parsed.customers);
+        setSuppliers(parsed.suppliers);
+        setSales(parsed.sales);
+        setImports(parsed.imports);
+        setReceiptVouchers(parsed.receiptVouchers);
+        setPaymentVouchers(parsed.paymentVouchers);
+        setSavedVouchers(parsed.savedVouchers);
+        setBackups(parsed.backups);
+        setAuditLogs(parsed.auditLogs);
+        setWarehouses(parsed.warehouses);
+        setCustomerGroups(parsed.customerGroups);
+        setProductCategories(parsed.productCategories);
+        setReceiptGroups(parsed.receiptGroups);
+        setPaymentGroups(parsed.paymentGroups);
+        setStaffList(sanitizeStaffListForStorage(parsed.staffList));
+        setNotificationPrefs(parsed.notificationPrefs);
+      } catch {
+        // ignore invalid storage payload
       }
     };
     window.addEventListener('storage', handleStorage);
@@ -473,15 +471,6 @@ export default function App() {
     );
   }, [auditLogs, canFilterMultiWarehouses, selectedFilterWarehouses, currentStaff]);
 
-  // Notification State
-  const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(
-    DEFAULT_NOTIFICATION_PREFS
-  );
-  const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
-  const [readNotifIds, setReadNotifIds] = useState<Set<string>>(new Set());
-  const [toastBanner, setToastBanner] = useState<string | null>(null);
-  const [autoDailyBackupEnabled, setAutoDailyBackupEnabled] = useState(true);
-
   // Cross-module navigation & deep-linked voucher state
   const [preselectedCustomerId, setPreselectedCustomerId] = useState<string | null>(null);
   const [preselectedProductId, setPreselectedProductId] = useState<string | null>(null);
@@ -500,27 +489,112 @@ export default function App() {
     scrollToTopOfPage();
   }, [activeTab, saleFormResetKey]);
 
+  const syncUserSessionFromFirebase = (user: {
+    uid: string;
+    email: string | null;
+    displayName: string | null;
+    emailVerified: boolean;
+  }) => {
+    const emailLower = (user.email || '').trim().toLowerCase();
+    const isRemoteAdmin = isCurrentUserAdmin(user as Parameters<typeof isCurrentUserAdmin>[0]);
+
+    setIsGoogleAuthenticated(true);
+    setCurrentUserEmail(user.email || ADMIN_BACKUP_EMAIL);
+    setCloudSyncStatus(
+      canWriteToFirestore(user as Parameters<typeof canWriteToFirestore>[0]) ? 'synced' : 'unverified'
+    );
+
+    setStaffList((prev) => {
+      const existing = prev.find(
+        (s) =>
+          s.uid === user.uid ||
+          (emailLower && s.email && s.email.toLowerCase() === emailLower)
+      );
+      if (existing) {
+        setCurrentStaffId(existing.uid);
+        setRole(existing.role);
+        return prev;
+      }
+
+      const baseUser =
+        emailLower.split('@')[0]?.replace(/[^a-zA-Z0-9._-]/g, '') ||
+        `user_${user.uid.slice(0, 6)}`;
+      const autoWarehouseName = isRemoteAdmin
+        ? 'Tất cả kho'
+        : formatDefaultWarehouseNameFromGmail(emailLower || `${baseUser}@gmail.com`);
+      if (!isRemoteAdmin) {
+        setWarehouses((wh) =>
+          wh.includes(autoWarehouseName) ? wh : [...wh, autoWarehouseName]
+        );
+      }
+      const nowIso = new Date().toISOString();
+      const created: StaffMember = {
+        uid: isRemoteAdmin ? PRIMARY_ADMIN_UID : user.uid,
+        username: isRemoteAdmin ? 'admin' : baseUser,
+        password: '',
+        displayName: (user.displayName && user.displayName.trim()) || baseUser,
+        phone: isRemoteAdmin ? ADMIN_PRIMARY_PHONE : '',
+        email: emailLower || ADMIN_BACKUP_EMAIL,
+        role: 'manager',
+        positionRole: isRemoteAdmin ? 'primary_manager' : 'warehouse_manager',
+        permissions: isRemoteAdmin
+          ? getDefaultPermissionsForPosition('primary_manager')
+          : getIndependentWarehouseFullPermissions(),
+        assignedWarehouse: autoWarehouseName,
+        active: true,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      setCurrentStaffId(created.uid);
+      setRole(created.role);
+      return [...prev, created];
+    });
+    setIsSessionLoggedIn(true);
+  };
+
   useEffect(() => {
     const unsubscribe = initAuth(
       async (user) => {
-        setIsGoogleAuthenticated(true);
-        setCurrentUserEmail(user.email || ADMIN_BACKUP_EMAIL);
+        syncUserSessionFromFirebase(user);
+        setIsAuthChecking(false);
         try {
-          const isRemoteAdmin =
-            user.uid === PRIMARY_ADMIN_UID ||
-            user.email?.toLowerCase() === ADMIN_BACKUP_EMAIL.toLowerCase();
+          const isRemoteAdmin = isCurrentUserAdmin(user);
           const remote = await fetchUserFirestoreData(user.uid, isRemoteAdmin);
           if (remote) {
-            if (remote.products.length > 0) setProducts(remote.products);
-            if (remote.sales.length > 0) setSales(remote.sales);
-            if (remote.imports.length > 0) setImports(remote.imports);
+            if (remote.products.length > 0) {
+              setProducts((prev) => mergeRecordsById(prev, remote.products));
+            }
+            if (remote.customers.length > 0) {
+              setCustomers((prev) => mergeRecordsById(prev, remote.customers));
+            }
+            if (remote.sales.length > 0) {
+              setSales((prev) => mergeRecordsById(prev, remote.sales));
+            }
+            if (remote.imports.length > 0) {
+              setImports((prev) => mergeRecordsById(prev, remote.imports));
+            }
+            if (remote.backups.length > 0) {
+              setBackups((prev) => {
+                const map = new Map<string, BackupEntry>();
+                prev.forEach((b) => map.set(b.id, b));
+                remote.backups.forEach((b) => {
+                  if (!map.has(b.id)) map.set(b.id, b);
+                });
+                return Array.from(map.values());
+              });
+            }
+            if (remote.notificationPrefs) {
+              setNotificationPrefs(remote.notificationPrefs);
+            }
           }
         } catch (err) {
-          console.error('Firestore initial sync error:', err);
+          console.warn('Firestore initial sync notice:', err);
         }
       },
       () => {
         setIsGoogleAuthenticated(false);
+        setCloudSyncStatus('local');
+        setIsAuthChecking(false);
       }
     );
     return () => unsubscribe();
@@ -533,7 +607,8 @@ export default function App() {
     }, 4500);
   };
 
-  // Generate live notifications based on user preferences
+  // Generate live notifications based on user preferences using real Vietnam date
+  const todayVietnamDate = getTodayVietnamDateStr();
   const notifications = useMemo(
     () =>
       generateSmartNotifications(
@@ -542,9 +617,9 @@ export default function App() {
         visibleImports,
         backups,
         notificationPrefs,
-        DEFAULT_REFERENCE_DATE
+        todayVietnamDate
       ),
-    [visibleProducts, visibleSales, visibleImports, backups, notificationPrefs]
+    [visibleProducts, visibleSales, visibleImports, backups, notificationPrefs, todayVietnamDate]
   );
 
   const unreadNotifCount = useMemo(
@@ -564,7 +639,7 @@ export default function App() {
       try {
         new Notification(title, {
           body,
-          icon: '/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png',
+          icon: '/assets/logo-taman.png',
         });
       } catch {
         // Fallback already shown via toastBanner
@@ -733,9 +808,13 @@ export default function App() {
       );
     }
 
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const newSale: SaleTransaction = {
       id: `sale_${Date.now()}`,
-      invoiceCode: `HD-2611-00${sales.length + 1}`,
+      invoiceCode: generateSequentialVoucherCode(
+        'HD',
+        sales.map((s) => s.invoiceCode)
+      ),
       customerId: payload.customerId,
       customerName: payload.customerName,
       customerPhone: payload.customerPhone,
@@ -766,7 +845,7 @@ export default function App() {
         updatedProduct.warehouseName ||
         'Tâm An Mỹ Ngãi',
       staffName: currentStaff.displayName,
-      ownerId: 'demo_owner',
+      ownerId: activeUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -788,17 +867,19 @@ export default function App() {
       snapshotData: JSON.stringify(newSale),
     });
 
+    let updatedCustomerRef: CustomerProfile | undefined;
     setCustomers((prev) =>
-      prev.map((c) =>
-        c.id === payload.customerId
-          ? {
-              ...c,
-              totalPurchased: c.totalPurchased + summary.totalAmount,
-              totalDebt: c.totalDebt + summary.debtAmount,
-              updatedAt: nowIso,
-            }
-          : c
-      )
+      prev.map((c) => {
+        if (c.id !== payload.customerId) return c;
+        const nextCust = {
+          ...c,
+          totalPurchased: c.totalPurchased + summary.totalAmount,
+          totalDebt: c.totalDebt + summary.debtAmount,
+          updatedAt: nowIso,
+        };
+        updatedCustomerRef = nextCust;
+        return nextCust;
+      })
     );
 
     const stockAlert = evaluateStockAlert(updatedProduct);
@@ -816,11 +897,14 @@ export default function App() {
     }
 
     if (isGoogleAuthenticated) {
-      syncProductToFirestore(updatedProduct, false).catch(console.error);
+      void syncProductToFirestore(updatedProduct, false);
       if (updatedGiftProduct && updatedGiftProduct.id !== updatedProduct.id) {
-        syncProductToFirestore(updatedGiftProduct, false).catch(console.error);
+        void syncProductToFirestore(updatedGiftProduct, false);
       }
-      syncSaleToFirestore(newSale, true).catch(console.error);
+      if (updatedCustomerRef) {
+        void syncCustomerToFirestore(updatedCustomerRef, false);
+      }
+      void syncSaleToFirestore(newSale, true, updatedProduct);
     }
     return newSale;
   };
@@ -855,33 +939,107 @@ export default function App() {
     }
     const existing = sales.find((s) => s.id === saleId);
     const nowIso = new Date().toISOString();
-    setSales((prev) =>
-      prev.map((s) => (s.id === saleId ? updateSaleRecord(s, changes, nowIso) : s))
-    );
-    if (existing) {
-      const updated = updateSaleRecord(existing, changes, nowIso);
-      recordAuditLog({
-        actionCategory: 'update',
-        targetEntity: 'sale',
-        targetCode: updated.invoiceCode,
-        warehouseName: updated.warehouseName,
-        summary: `Chỉnh sửa hóa đơn bán hàng ${updated.invoiceCode} (${updated.customerName})`,
-        details: `Trước khi sửa: SL ${existing.quantity} · Tổng ${formatVND(
-          existing.totalAmount
-        )} · Nợ ${formatVND(existing.debtAmount)} -> Sau khi sửa: SL ${
-          updated.quantity
-        } · Tổng ${formatVND(updated.totalAmount)} · Nợ ${formatVND(updated.debtAmount)}`,
-        snapshotData: JSON.stringify(existing),
-      });
+    if (!existing) return;
+
+    const updated = updateSaleRecord(existing, changes, nowIso);
+    setSales((prev) => prev.map((s) => (s.id === saleId ? updated : s)));
+
+    // Reconcile inventory stock delta when quantity or gift quantity changes
+    const qtyDelta = existing.quantity - updated.quantity;
+    if (qtyDelta !== 0) {
+      setProducts((prev) =>
+        prev.map((p) => {
+          if (p.id !== existing.productId) return p;
+          const nextProd = {
+            ...p,
+            stock: Math.max(0, p.stock + qtyDelta),
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
+          return nextProd;
+        })
+      );
     }
+
+    // Reconcile customer purchase & debt totals
+    const totalDelta = updated.totalAmount - existing.totalAmount;
+    const debtDelta = updated.debtAmount - existing.debtAmount;
+    if (totalDelta !== 0 || debtDelta !== 0) {
+      setCustomers((prev) =>
+        prev.map((c) => {
+          if (c.id !== existing.customerId) return c;
+          const nextCust = {
+            ...c,
+            totalPurchased: Math.max(0, c.totalPurchased + totalDelta),
+            totalDebt: Math.max(0, c.totalDebt + debtDelta),
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncCustomerToFirestore(nextCust, false);
+          return nextCust;
+        })
+      );
+    }
+
+    if (isGoogleAuthenticated) {
+      void syncSaleToFirestore(updated, false);
+    }
+
+    recordAuditLog({
+      actionCategory: 'update',
+      targetEntity: 'sale',
+      targetCode: updated.invoiceCode,
+      warehouseName: updated.warehouseName,
+      summary: `Chỉnh sửa hóa đơn bán hàng ${updated.invoiceCode} (${updated.customerName})`,
+      details: `Trước khi sửa: SL ${existing.quantity} · Tổng ${formatVND(
+        existing.totalAmount
+      )} · Nợ ${formatVND(existing.debtAmount)} -> Sau khi sửa: SL ${
+        updated.quantity
+      } · Tổng ${formatVND(updated.totalAmount)} · Nợ ${formatVND(updated.debtAmount)}`,
+      snapshotData: JSON.stringify(existing),
+    });
     showToast('Quản lý đã cập nhật chỉnh sửa hóa đơn bán hàng thành công.');
   };
 
   const handleDeleteSale = (saleId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = sales.find((s) => s.id === saleId);
+    const nowIso = new Date().toISOString();
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     if (target) {
+      // Restore sold & gift inventory stock
+      setProducts((prev) =>
+        prev.map((p) => {
+          let restoreQty = 0;
+          if (p.id === target.productId) restoreQty += target.quantity;
+          if (target.giftProductId && p.id === target.giftProductId) {
+            restoreQty += target.giftQuantity || 0;
+          }
+          if (restoreQty <= 0) return p;
+          const restored = { ...p, stock: p.stock + restoreQty, updatedAt: nowIso };
+          if (isGoogleAuthenticated) void syncProductToFirestore(restored, false);
+          return restored;
+        })
+      );
+
+      // Reconcile customer purchase & debt totals
+      setCustomers((prev) =>
+        prev.map((c) => {
+          if (c.id !== target.customerId) return c;
+          const nextCust = {
+            ...c,
+            totalPurchased: Math.max(0, c.totalPurchased - target.totalAmount),
+            totalDebt: Math.max(0, c.totalDebt - target.debtAmount),
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncCustomerToFirestore(nextCust, false);
+          return nextCust;
+        })
+      );
+
+      if (isGoogleAuthenticated) {
+        void deleteFirestoreDocIfAdmin('sales', saleId);
+      }
+
       recordAuditLog({
         actionCategory: 'delete',
         targetEntity: 'sale',
@@ -894,11 +1052,11 @@ export default function App() {
           target.unit
         } ${target.productName} · Đã thu: ${formatVND(target.paidAmount)} · Còn nợ: ${formatVND(
           target.debtAmount
-        )}. Đã lưu bản chụp dữ liệu gốc để Quản lý chính (${ADMIN_BACKUP_EMAIL}) kiểm tra & khôi phục.`,
+        )}. Đã hoàn lại tồn kho & lưu bản chụp dữ liệu gốc để khôi phục.`,
         snapshotData: JSON.stringify(target),
       });
     }
-    showToast('Đã xóa hóa đơn khỏi nhật ký bán hàng (Đã ghi vào Lịch sử thao tác).');
+    showToast('Đã xóa hóa đơn khỏi nhật ký bán hàng & hoàn lại tồn kho.');
   };
 
   const handleCreateImport = (payload: {
@@ -926,9 +1084,13 @@ export default function App() {
       payload.paidAmount
     );
 
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const newImport: ImportTransaction = {
       id: `imp_${Date.now()}`,
-      receiptCode: `PN-2611-00${imports.length + 1}`,
+      receiptCode: generateSequentialVoucherCode(
+        'PN',
+        imports.map((i) => i.receiptCode)
+      ),
       supplierName: payload.supplierName,
       supplierPhone: payload.supplierPhone,
       productId: updatedProduct.id,
@@ -948,7 +1110,7 @@ export default function App() {
         updatedProduct.warehouseName ||
         'Tâm An Mỹ Ngãi',
       staffName: currentStaff.displayName,
-      ownerId: 'demo_owner',
+      ownerId: activeUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -977,8 +1139,8 @@ export default function App() {
     );
 
     if (isGoogleAuthenticated) {
-      syncProductToFirestore(updatedProduct, false).catch(console.error);
-      syncImportToFirestore(newImport, true).catch(console.error);
+      void syncProductToFirestore(updatedProduct, false);
+      void syncImportToFirestore(newImport, true, updatedProduct);
     }
     return newImport;
   };
@@ -1005,33 +1167,69 @@ export default function App() {
     }
     const existing = imports.find((imp) => imp.id === importId);
     const nowIso = new Date().toISOString();
-    setImports((prev) =>
-      prev.map((imp) => (imp.id === importId ? updateImportRecord(imp, changes, nowIso) : imp))
-    );
-    if (existing) {
-      const updated = updateImportRecord(existing, changes, nowIso);
-      recordAuditLog({
-        actionCategory: 'update',
-        targetEntity: 'import',
-        targetCode: updated.receiptCode,
-        warehouseName: updated.warehouseName,
-        summary: `Chỉnh sửa phiếu nhập kho ${updated.receiptCode} (${updated.supplierName})`,
-        details: `Trước khi sửa: SL ${existing.quantity} · Tổng ${formatVND(
-          existing.totalCost
-        )} · Nợ NCC ${formatVND(existing.debtAmount)} -> Sau khi sửa: SL ${
-          updated.quantity
-        } · Tổng ${formatVND(updated.totalCost)} · Nợ NCC ${formatVND(updated.debtAmount)}`,
-        snapshotData: JSON.stringify(existing),
-      });
+    if (!existing) return;
+
+    const updated = updateImportRecord(existing, changes, nowIso);
+    setImports((prev) => prev.map((imp) => (imp.id === importId ? updated : imp)));
+
+    const qtyDelta = updated.quantity - existing.quantity;
+    if (qtyDelta !== 0 || updated.unitCost !== existing.unitCost) {
+      setProducts((prev) =>
+        prev.map((p) => {
+          if (p.id !== existing.productId) return p;
+          const nextProd = {
+            ...p,
+            stock: Math.max(0, p.stock + qtyDelta),
+            importPrice: updated.unitCost > 0 ? updated.unitCost : p.importPrice,
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
+          return nextProd;
+        })
+      );
     }
+
+    if (isGoogleAuthenticated) {
+      void syncImportToFirestore(updated, false);
+    }
+
+    recordAuditLog({
+      actionCategory: 'update',
+      targetEntity: 'import',
+      targetCode: updated.receiptCode,
+      warehouseName: updated.warehouseName,
+      summary: `Chỉnh sửa phiếu nhập kho ${updated.receiptCode} (${updated.supplierName})`,
+      details: `Trước khi sửa: SL ${existing.quantity} · Tổng ${formatVND(
+        existing.totalCost
+      )} · Nợ NCC ${formatVND(existing.debtAmount)} -> Sau khi sửa: SL ${
+        updated.quantity
+      } · Tổng ${formatVND(updated.totalCost)} · Nợ NCC ${formatVND(updated.debtAmount)}`,
+      snapshotData: JSON.stringify(existing),
+    });
     showToast('Quản lý đã cập nhật chỉnh sửa phiếu nhập kho thành công.');
   };
 
   const handleDeleteImport = (importId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = imports.find((imp) => imp.id === importId);
+    const nowIso = new Date().toISOString();
     setImports((prev) => prev.filter((imp) => imp.id !== importId));
     if (target) {
+      setProducts((prev) =>
+        prev.map((p) => {
+          if (p.id !== target.productId) return p;
+          const adjusted = {
+            ...p,
+            stock: Math.max(0, p.stock - target.quantity),
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncProductToFirestore(adjusted, false);
+          return adjusted;
+        })
+      );
+      if (isGoogleAuthenticated) {
+        void deleteFirestoreDocIfAdmin('imports', importId);
+      }
       recordAuditLog({
         actionCategory: 'delete',
         targetEntity: 'import',
@@ -1044,11 +1242,11 @@ export default function App() {
           target.unit
         } ${target.productName} · Còn nợ NCC: ${formatVND(
           target.debtAmount
-        )}. Đã lưu bản chụp dữ liệu gốc để Quản lý chính khôi phục khi cần.`,
+        )}. Đã điều chỉnh lại tồn kho & lưu bản chụp dữ liệu gốc để khôi phục.`,
         snapshotData: JSON.stringify(target),
       });
     }
-    showToast('Đã xóa phiếu nhập kho khỏi hệ thống (Đã ghi vào Lịch sử thao tác).');
+    showToast('Đã xóa phiếu nhập kho khỏi hệ thống & cập nhật lại tồn kho.');
   };
 
   const handleCreateSupplierInline = (
@@ -1076,6 +1274,7 @@ export default function App() {
     editingId?: string
   ): ProductItem => {
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh = lockedWarehouse || data.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
     if (editingId) {
       const existing = products.find((p) => p.id === editingId);
@@ -1086,7 +1285,7 @@ export default function App() {
           const updated = { ...p, ...data, warehouseName: resolvedWh, updatedAt: nowIso };
           updatedRef = updated;
           if (isGoogleAuthenticated) {
-            syncProductToFirestore(updated, false).catch(console.error);
+            void syncProductToFirestore(updated, false);
           }
           return updated;
         })
@@ -1110,7 +1309,7 @@ export default function App() {
           ...data,
           warehouseName: resolvedWh,
           id: editingId,
-          ownerId: 'demo_owner',
+          ownerId: activeUid,
           createdAt: nowIso,
           updatedAt: nowIso,
         }
@@ -1120,11 +1319,10 @@ export default function App() {
         ...data,
         warehouseName: resolvedWh,
         id: `prod_${Date.now()}`,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
-        createdAt_unused: undefined,
         updatedAt: nowIso,
-      } as ProductItem;
+      };
       setProducts((prev) => [created, ...prev]);
       recordAuditLog({
         actionCategory: 'create',
@@ -1139,7 +1337,7 @@ export default function App() {
       });
       showToast(`Đã thêm vật tư mới: ${created.name} (${resolvedWh})`);
       if (isGoogleAuthenticated) {
-        syncProductToFirestore(created, true).catch(console.error);
+        void syncProductToFirestore(created, true);
       }
       return created;
     }
@@ -1149,6 +1347,9 @@ export default function App() {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = products.find((p) => p.id === productId);
     setProducts((prev) => prev.filter((p) => p.id !== productId));
+    if (isGoogleAuthenticated) {
+      void deleteFirestoreDocIfAdmin('products', productId);
+    }
     if (target) {
       recordAuditLog({
         actionCategory: 'delete',
@@ -1170,6 +1371,7 @@ export default function App() {
     editingId?: string
   ): CustomerProfile => {
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh =
       lockedWarehouse ||
       data.warehouseName ||
@@ -1190,7 +1392,7 @@ export default function App() {
           };
           updatedRef = updated;
           if (isGoogleAuthenticated) {
-            syncCustomerToFirestore(updated, false).catch(console.error);
+            void syncCustomerToFirestore(updated, false);
           }
           return updated;
         })
@@ -1212,7 +1414,7 @@ export default function App() {
           ...data,
           warehouseName: resolvedWh,
           id: editingId,
-          ownerId: 'demo_owner',
+          ownerId: activeUid,
           createdAt: nowIso,
           updatedAt: nowIso,
         }
@@ -1222,7 +1424,7 @@ export default function App() {
         ...data,
         warehouseName: resolvedWh,
         id: `cust_${Date.now()}`,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -1238,7 +1440,7 @@ export default function App() {
       });
       showToast(`Đã thêm khách hàng mới: ${created.name} (${resolvedWh})`);
       if (isGoogleAuthenticated) {
-        syncCustomerToFirestore(created, true).catch(console.error);
+        void syncCustomerToFirestore(created, true);
       }
       return created;
     }
@@ -1248,6 +1450,10 @@ export default function App() {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = customers.find((c) => c.id === customerId);
     setCustomers((prev) => prev.filter((c) => c.id !== customerId));
+    if (isGoogleAuthenticated) {
+      void deleteFirestoreDocIfAdmin('customers', customerId);
+      void deleteFirestoreDocIfAdmin('customers_private', customerId);
+    }
     if (target) {
       recordAuditLog({
         actionCategory: 'delete',
@@ -1364,7 +1570,7 @@ export default function App() {
           nowIso
         );
         if (isGoogleAuthenticated) {
-          syncSaleToFirestore(updated, false).catch(console.error);
+          void syncSaleToFirestore(updated, false);
         }
         return updated;
       })
@@ -1399,7 +1605,7 @@ export default function App() {
           nowIso
         );
         if (isGoogleAuthenticated) {
-          syncImportToFirestore(updated, false).catch(console.error);
+          void syncImportToFirestore(updated, false);
         }
         return updated;
       })
@@ -1435,6 +1641,7 @@ export default function App() {
   }) => {
     if (params.totalAmount <= 0) return;
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     try {
       const fifoResult = applyCustomerFifoDebtSettlement(
         sales,
@@ -1454,6 +1661,14 @@ export default function App() {
       }
 
       setSales(fifoResult.updatedSales);
+      if (isGoogleAuthenticated) {
+        const settledIds = new Set(fifoResult.settledAllocations.map((a) => a.recordId));
+        fifoResult.updatedSales
+          .filter((s) => settledIds.has(s.id))
+          .forEach((s) => {
+            void syncSaleToFirestore(s, false);
+          });
+      }
 
       // Update customer's totalDebt in customers state
       setCustomers((prev) =>
@@ -1463,11 +1678,13 @@ export default function App() {
             (params.customerPhone && c.phone === params.customerPhone) ||
             c.name.trim().toLowerCase() === params.customerName.trim().toLowerCase();
           if (!isMatched) return c;
-          return {
+          const updatedCust = {
             ...c,
             totalDebt: fifoResult.totalRemainingDebt,
             updatedAt: nowIso,
           };
+          if (isGoogleAuthenticated) void syncCustomerToFirestore(updatedCust, false);
+          return updatedCust;
         })
       );
 
@@ -1477,7 +1694,10 @@ export default function App() {
         fifoResult.unpaidInvoicesOrdered[0]?.warehouseName ||
         'Tâm An Mỹ Ngãi';
 
-      const voucherCode = `PT-2611-00${receiptVouchers.length + 1}`;
+      const voucherCode = generateSequentialVoucherCode(
+        'PT',
+        receiptVouchers.map((r) => r.voucherCode)
+      );
       const allocDesc = fifoResult.settledAllocations
         .map((a) => `${a.code} (${a.date}: -${formatVND(a.allocatedAmount)})`)
         .join(' · ');
@@ -1501,7 +1721,7 @@ export default function App() {
           params.note.trim() ||
           `Quyết toán tổng công nợ phải thu theo thứ tự ngày nợ (${fifoResult.settledAllocations.length} HĐ)`,
         staffName: currentStaff.displayName,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -1548,6 +1768,7 @@ export default function App() {
   }) => {
     if (params.totalAmount <= 0) return;
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     try {
       const fifoResult = applySupplierFifoDebtSettlement(
         imports,
@@ -1566,6 +1787,14 @@ export default function App() {
       }
 
       setImports(fifoResult.updatedImports);
+      if (isGoogleAuthenticated) {
+        const settledIds = new Set(fifoResult.settledAllocations.map((a) => a.recordId));
+        fifoResult.updatedImports
+          .filter((imp) => settledIds.has(imp.id))
+          .forEach((imp) => {
+            void syncImportToFirestore(imp, false);
+          });
+      }
 
       const resolvedWarehouse =
         lockedWarehouse ||
@@ -1573,7 +1802,10 @@ export default function App() {
         fifoResult.unpaidReceiptsOrdered[0]?.warehouseName ||
         'Tâm An Mỹ Ngãi';
 
-      const voucherCode = `PC-2611-00${paymentVouchers.length + 1}`;
+      const voucherCode = generateSequentialVoucherCode(
+        'PC',
+        paymentVouchers.map((p) => p.voucherCode)
+      );
       const allocDesc = fifoResult.settledAllocations
         .map((a) => `${a.code} (${a.date}: -${formatVND(a.allocatedAmount)})`)
         .join(' · ');
@@ -1596,7 +1828,7 @@ export default function App() {
           params.note.trim() ||
           `Quyết toán tổng công nợ phải trả NCC theo thứ tự ngày nợ (${fifoResult.settledAllocations.length} phiếu nhập)`,
         staffName: currentStaff.displayName,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -1630,7 +1862,18 @@ export default function App() {
   };
 
   // Receipt Voucher CRUD Handlers
-  const handleCreateReceiptVoucher = (payload: CreateReceiptVoucherInput) => {
+  const handleCreateReceiptVoucher = (payload: {
+    groupName: string;
+    warehouseName: string;
+    customerId?: string;
+    partnerName: string;
+    partnerPhone: string;
+    amount: number;
+    paymentMethod: string;
+    isDebtSettlement: boolean;
+    countsTowardOtherIncome?: boolean;
+    note: string;
+  }) => {
     if (payload.isDebtSettlement && (payload.customerId || payload.partnerName)) {
       handleSettleCustomerTotalDebtFifo({
         customerId: payload.customerId,
@@ -1645,11 +1888,15 @@ export default function App() {
       return;
     }
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh =
       lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
     const created: CashReceiptVoucher = {
       id: `rv_${Date.now()}`,
-      voucherCode: `PT-2611-00${receiptVouchers.length + 1}`,
+      voucherCode: generateSequentialVoucherCode(
+        'PT',
+        receiptVouchers.map((r) => r.voucherCode)
+      ),
       groupName: payload.groupName || 'Thu khác',
       warehouseName: resolvedWh,
       partnerId: payload.customerId,
@@ -1662,7 +1909,7 @@ export default function App() {
       countsTowardOtherIncome: payload.countsTowardOtherIncome !== false,
       note: payload.note || `Phiếu thu nhóm ${payload.groupName}`,
       staffName: currentStaff.displayName,
-      ownerId: 'demo_owner',
+      ownerId: activeUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -1728,7 +1975,17 @@ export default function App() {
   };
 
   // Payment Voucher CRUD Handlers
-  const handleCreatePaymentVoucher = (payload: CreatePaymentVoucherInput) => {
+  const handleCreatePaymentVoucher = (payload: {
+    groupName: string;
+    warehouseName: string;
+    partnerName: string;
+    partnerPhone: string;
+    amount: number;
+    paymentMethod: string;
+    isDebtSettlement: boolean;
+    countsTowardOperatingExpense?: boolean;
+    note: string;
+  }) => {
     if (payload.isDebtSettlement && payload.partnerName) {
       handleSettleSupplierTotalDebtFifo({
         supplierName: payload.partnerName,
@@ -1742,11 +1999,15 @@ export default function App() {
       return;
     }
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh =
       lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
     const created: CashPaymentVoucher = {
       id: `pv_${Date.now()}`,
-      voucherCode: `PC-2611-00${paymentVouchers.length + 1}`,
+      voucherCode: generateSequentialVoucherCode(
+        'PC',
+        paymentVouchers.map((p) => p.voucherCode)
+      ),
       groupName: payload.groupName || 'Chi phí vận hành khác',
       warehouseName: resolvedWh,
       partnerName: payload.partnerName,
@@ -1758,7 +2019,7 @@ export default function App() {
       countsTowardOperatingExpense: payload.countsTowardOperatingExpense !== false,
       note: payload.note || `Phiếu chi nhóm ${payload.groupName}`,
       staffName: currentStaff.displayName,
-      ownerId: 'demo_owner',
+      ownerId: activeUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -1826,6 +2087,7 @@ export default function App() {
   // Excel Direct Import Handlers across all 5 modules
   const handleImportProductsFromExcel = (rows: Record<string, unknown>[]): number => {
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const added: ProductItem[] = [];
     rows.forEach((r, idx) => {
       const name = String(
@@ -1854,13 +2116,16 @@ export default function App() {
         stock: Math.max(0, Number(r['Tồn Kho Ban Đầu'] || r['Tồn Kho Hiện Tại'] || 10)),
         minStock: Math.max(0, Number(r['Mức Cảnh Báo Tối Thiểu'] || r['Mức Tối Thiểu'] || 5)),
         supplierName: String(r['Nhà Cung Cấp Chính'] || 'Nhà cung cấp VTNN').trim(),
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
     });
     if (added.length > 0) {
       setProducts((prev) => [...added, ...prev]);
+      if (isGoogleAuthenticated) {
+        added.forEach((p) => void syncProductToFirestore(p, true));
+      }
       showToast(`Đã tải lên ${added.length} mặt hàng vật tư từ tệp Excel!`);
     }
     return added.length;
@@ -1868,6 +2133,7 @@ export default function App() {
 
   const handleImportCustomersFromExcel = (rows: Record<string, unknown>[]): number => {
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const added: CustomerProfile[] = [];
     const defaultWh =
       lockedWarehouse ||
@@ -1887,7 +2153,7 @@ export default function App() {
         id: `cust_xl_${Date.now()}_${idx}`,
         code: String(r['Mã KH'] || `KH-XL${customers.length + idx + 1}`).trim(),
         name,
-        phone: phone || '0900000000',
+        phone: phone || '',
         email: String(r['Email'] || '').trim(),
         address: String(r['Địa Chỉ'] || '').trim(),
         group: grp || 'Nhà nông',
@@ -1895,13 +2161,16 @@ export default function App() {
         totalPurchased: Math.max(0, Number(r['Tổng Mua (VNĐ)'] || 0)),
         totalDebt: Math.max(0, Number(r['Dư Nợ Hiện Tại (VNĐ)'] || 0)),
         warehouseName: wh,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
     });
     if (added.length > 0) {
       setCustomers((prev) => [...added, ...prev]);
+      if (isGoogleAuthenticated) {
+        added.forEach((c) => void syncCustomerToFirestore(c, true));
+      }
       showToast(`Đã tải lên ${added.length} hồ sơ khách hàng từ tệp Excel!`);
     }
     return added.length;
@@ -1909,6 +2178,8 @@ export default function App() {
 
   const handleImportSalesFromExcel = (rows: Record<string, unknown>[]): number => {
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedSales: SaleTransaction[] = [];
     rows.forEach((r, idx) => {
       const custName = String(r['Tên Khách Hàng'] || '').trim();
@@ -1932,14 +2203,14 @@ export default function App() {
         totalAmount: sum.totalAmount,
         paidAmount: sum.paidAmount,
         debtAmount: sum.debtAmount,
-        dueDate: String(r['Hạn Thanh Toán Nợ (YYYY-MM-DD)'] || '2026-11-30').trim(),
+        dueDate: String(r['Hạn Thanh Toán Nợ (YYYY-MM-DD)'] || defaultDueDate).trim(),
         status: sum.status,
         note: String(r['Ghi Chú Đơn Hàng'] || 'Nhập từ Excel').trim(),
         warehouseName:
           lockedWarehouse ||
           String(r['Kho Xuất Bán'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim(),
         staffName: currentStaff.displayName,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -1953,6 +2224,8 @@ export default function App() {
 
   const handleImportWarehouseFromExcel = (rows: Record<string, unknown>[]): number => {
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedImports: ImportTransaction[] = [];
     rows.forEach((r, idx) => {
       const prodName = String(r['Tên Vật Tư Nhập Kho'] || r['Sản Phẩm'] || '').trim();
@@ -1978,14 +2251,14 @@ export default function App() {
         totalCost: sum.totalCost,
         paidAmount: sum.paidAmount,
         debtAmount: sum.debtAmount,
-        dueDate: String(r['Hạn Trả Nợ NCC (YYYY-MM-DD)'] || '2026-11-30').trim(),
+        dueDate: String(r['Hạn Trả Nợ NCC (YYYY-MM-DD)'] || defaultDueDate).trim(),
         status: sum.status,
         note: String(r['Ghi Chú Lô Nhập'] || 'Nhập từ Excel').trim(),
         warehouseName:
           lockedWarehouse ||
           String(r['Kho Nhập Hàng'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim(),
         staffName: currentStaff.displayName,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -2032,19 +2305,81 @@ export default function App() {
     return updatedCount;
   };
 
-  // Staff Account Login, Password Change, Gmail Recovery & Per-Staff [X] Permission Handlers
-  const handleLoginStaff = (usernameOrEmail: string, password: string) => {
-    const query = usernameOrEmail.trim().toLowerCase();
+  // Staff Account Login, Password Change & Per-Staff [X] Permission Handlers (Production-hardened)
+  const handleLoginStaff = async (
+    usernameOrEmail: string,
+    password: string
+  ): Promise<{ ok: boolean; message: string }> => {
+    const trimmedInput = usernameOrEmail.trim();
+    const query = trimmedInput.toLowerCase();
+    if (!query || !password) {
+      return { ok: false, message: 'Vui lòng nhập đầy đủ Email/Tên đăng nhập và Mật khẩu.' };
+    }
+
+    // 1. If input is an email address, verify via Firebase Authentication first
+    if (query.includes('@')) {
+      try {
+        const fbRes = await firebaseSignInWithEmailPassword(query, password);
+        syncUserSessionFromFirebase(fbRes.user);
+        showToast(`Đăng nhập thành công (${fbRes.user.email || query})!`);
+        return {
+          ok: true,
+          message: `Đăng nhập thành công (${fbRes.user.email || query})!`,
+        };
+      } catch (err) {
+        const code = (err as { code?: string })?.code || '';
+        if (code === 'auth/too-many-requests') {
+          return {
+            ok: false,
+            message: 'Tài khoản tạm thời bị giới hạn do nhập sai nhiều lần. Vui lòng thử lại sau ít phút.',
+          };
+        }
+        // Fallback to local hashed staff account only if an internal hashed password is stored
+        const matchedLocal = staffList.find(
+          (s) => s.email && s.email.toLowerCase() === query && isHashedPassword(s.password)
+        );
+        if (!matchedLocal) {
+          return {
+            ok: false,
+            message:
+              'Email hoặc mật khẩu không đúng (hoặc tài khoản dùng Đăng nhập bằng Google — vui lòng bấm "Đăng nhập bằng Google").',
+          };
+        }
+        if (!matchedLocal.active) {
+          return {
+            ok: false,
+            message: `Tài khoản "${matchedLocal.username}" đã bị khóa bởi Quản lý chính.`,
+          };
+        }
+        const okHash = await verifyPassword(password, matchedLocal.password, matchedLocal.uid);
+        if (!okHash) {
+          return { ok: false, message: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại.' };
+        }
+        setCurrentStaffId(matchedLocal.uid);
+        setRole(matchedLocal.role);
+        setCurrentUserEmail(matchedLocal.email || ADMIN_BACKUP_EMAIL);
+        setIsSessionLoggedIn(true);
+        showToast(
+          `Đã đăng nhập: ${matchedLocal.displayName} — Kho làm việc: ${matchedLocal.assignedWarehouse}`
+        );
+        return {
+          ok: true,
+          message: `Đăng nhập thành công (${matchedLocal.displayName})! Kho làm việc: ${matchedLocal.assignedWarehouse}.`,
+        };
+      }
+    }
+
+    // 2. Internal username/phone login using salted SHA-256 hash verification
+    const digitsQuery = query.replace(/\D+/g, '');
     const matched = staffList.find(
       (s) =>
         s.username.toLowerCase() === query ||
-        (s.email && s.email.toLowerCase() === query) ||
-        (s.phone && s.phone.replace(/\D+/g, '') === query.replace(/\D+/g, '') && query.length >= 9)
+        (s.phone && digitsQuery.length >= 9 && s.phone.replace(/\D+/g, '') === digitsQuery)
     );
     if (!matched) {
       return {
         ok: false,
-        message: `Không tìm thấy tài khoản hoặc Gmail "${usernameOrEmail}".`,
+        message: `Không tìm thấy tài khoản "${usernameOrEmail}".`,
       };
     }
     if (!matched.active) {
@@ -2053,8 +2388,13 @@ export default function App() {
         message: `Tài khoản "${matched.username}" đã bị khóa bởi Quản lý chính.`,
       };
     }
-    if (matched.password !== password) {
-      return { ok: false, message: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại.' };
+    const isPasswordValid = await verifyPassword(password, matched.password, matched.uid);
+    if (!isPasswordValid) {
+      return {
+        ok: false,
+        message:
+          'Mật khẩu không chính xác (hoặc tài khoản này cần đăng nhập bằng nút Google / Email Firebase).',
+      };
     }
     setCurrentStaffId(matched.uid);
     setRole(matched.role);
@@ -2112,10 +2452,10 @@ export default function App() {
 
     const newStaff: StaffMember = {
       uid: isAdminEmail ? PRIMARY_ADMIN_UID : googleUid || `staff_google_${Date.now()}`,
-      username: baseUser,
-      password: `taman_${Date.now().toString().slice(-4)}`,
+      username: isAdminEmail ? 'admin' : baseUser,
+      password: '',
       displayName: (googleDisplayName && googleDisplayName.trim()) || baseUser,
-      phone: '',
+      phone: isAdminEmail ? ADMIN_PRIMARY_PHONE : '',
       email: trimmedEmail,
       role: 'manager',
       positionRole: isAdminEmail ? 'primary_manager' : 'warehouse_manager',
@@ -2127,7 +2467,7 @@ export default function App() {
       createdAt: nowIso,
       updatedAt: nowIso,
     };
-    setStaffList((prev) => [...prev, newStaff]);
+    setStaffList((prev) => (prev.some((s) => s.uid === newStaff.uid) ? prev : [...prev, newStaff]));
     setCurrentStaffId(newStaff.uid);
     setRole(newStaff.role);
     setCurrentUserEmail(newStaff.email);
@@ -2142,231 +2482,143 @@ export default function App() {
     };
   };
 
-  const handleSignUpStaff = (payload: {
+  const handleSignUpStaff = async (payload: {
     displayName: string;
     emailOrPhone: string;
     username?: string;
     password: string;
     provider: 'email_password' | 'phone' | 'google';
-  }) => {
+  }): Promise<{ ok: boolean; message: string }> => {
     const query = payload.emailOrPhone.trim().toLowerCase();
-    const nowIso = new Date().toISOString();
-    const existing = staffList.find(
-      (s) =>
-        (s.email && s.email.toLowerCase() === query) ||
-        s.username.toLowerCase() === query ||
-        (s.phone &&
-          query.replace(/\D+/g, '').length >= 9 &&
-          s.phone.replace(/\D+/g, '') === query.replace(/\D+/g, ''))
-    );
+    if (!query || !query.endsWith('@gmail.com')) {
+      return {
+        ok: false,
+        message: 'Chỉ cho phép đăng ký tài khoản mới bằng địa chỉ Gmail (@gmail.com).',
+      };
+    }
 
-    if (existing) {
-      const updatedStaff: StaffMember = {
-        ...existing,
-        displayName: payload.displayName || existing.displayName,
-        password: payload.password || existing.password,
+    const alreadyExistsLocally = staffList.some(
+      (s) => s.email && s.email.toLowerCase() === query
+    );
+    if (alreadyExistsLocally) {
+      return {
+        ok: false,
+        message: `Địa chỉ Gmail "${query}" đã được đăng ký trước đó. Vui lòng chuyển sang tab Đăng nhập hoặc dùng Quên mật khẩu.`,
+      };
+    }
+
+    try {
+      const fbSignUp = await firebaseSignUpWithEmailPassword({
+        email: query,
+        password: payload.password,
+        displayName: payload.displayName.trim(),
+      });
+
+      const nowIso = new Date().toISOString();
+      const isPrimary = isCurrentUserAdmin(fbSignUp.user);
+      const baseUsername =
+        (payload.username || query.split('@')[0] || `nv_${Date.now().toString().slice(-4)}`)
+          .replace(/[^a-zA-Z0-9._-]/g, '')
+          .toLowerCase() || `nv_${Date.now().toString().slice(-4)}`;
+      const uniqueUsername = staffList.some((s) => s.username.toLowerCase() === baseUsername)
+        ? `${baseUsername}_${Date.now().toString().slice(-3)}`
+        : baseUsername;
+      const posRole: StaffPositionRole = isPrimary ? 'primary_manager' : 'warehouse_manager';
+      const autoWarehouseName = isPrimary
+        ? 'Tất cả kho'
+        : formatDefaultWarehouseNameFromGmail(query);
+
+      if (!isPrimary) {
+        setWarehouses((prev) =>
+          prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
+        );
+      }
+
+      const newUid = isPrimary ? PRIMARY_ADMIN_UID : fbSignUp.user.uid;
+      const hashedPass = await hashPassword(payload.password, newUid);
+
+      const created: StaffMember = {
+        uid: newUid,
+        username: isPrimary ? 'admin' : uniqueUsername,
+        password: hashedPass,
+        displayName: payload.displayName.trim() || uniqueUsername,
+        phone: isPrimary ? ADMIN_PRIMARY_PHONE : '',
+        email: query,
+        role: 'manager',
+        positionRole: posRole,
+        permissions: isPrimary
+          ? getDefaultPermissionsForPosition('primary_manager')
+          : getIndependentWarehouseFullPermissions(),
+        assignedWarehouse: autoWarehouseName,
+        active: true,
+        createdAt: nowIso,
         updatedAt: nowIso,
       };
-      setStaffList((prev) =>
-        prev.map((s) => (s.uid === existing.uid ? updatedStaff : s))
-      );
-      setCurrentStaffId(updatedStaff.uid);
-      setRole(updatedStaff.role);
-      setCurrentUserEmail(updatedStaff.email || ADMIN_BACKUP_EMAIL);
+
+      setStaffList((prev) => [...prev, created]);
+      setCurrentStaffId(created.uid);
+      setRole(created.role);
+      setCurrentUserEmail(created.email);
+      setIsGoogleAuthenticated(true);
+      setCloudSyncStatus(fbSignUp.user.emailVerified ? 'synced' : 'unverified');
       setIsSessionLoggedIn(true);
       showToast(
-        `Đã đồng bộ tài khoản & đăng nhập: ${updatedStaff.displayName} — Kho: ${updatedStaff.assignedWarehouse}`
+        `Đã đăng ký Gmail @${created.username} — Kho độc lập: ${created.assignedWarehouse}${
+          fbSignUp.verificationSent ? ' · Đã gửi email xác minh Cloud' : ''
+        }`
       );
       return {
         ok: true,
-        message: `Đã kích hoạt & đăng nhập tài khoản ${updatedStaff.displayName} (${query}) thành công!`,
+        message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tạo kho riêng "${created.assignedWarehouse}".${
+          fbSignUp.verificationSent
+            ? ' Vui lòng kiểm tra hộp thư Gmail để xác minh email và bật đồng bộ Cloud.'
+            : ''
+        }`,
       };
-    }
-
-    const isPrimary =
-      query === ADMIN_BACKUP_EMAIL.toLowerCase() ||
-      query.replace(/\D+/g, '') === ADMIN_PRIMARY_PHONE;
-    const baseUsername =
-      (payload.username || query.split('@')[0] || `nv_${Date.now().toString().slice(-4)}`)
-        .replace(/[^a-zA-Z0-9._-]/g, '')
-        .toLowerCase() || `nv_${Date.now().toString().slice(-4)}`;
-    const uniqueUsername = staffList.some((s) => s.username.toLowerCase() === baseUsername)
-      ? `${baseUsername}_${Date.now().toString().slice(-3)}`
-      : baseUsername;
-    const posRole: StaffPositionRole = isPrimary ? 'primary_manager' : 'warehouse_manager';
-    const autoWarehouseName = isPrimary
-      ? 'Tất cả kho'
-      : formatDefaultWarehouseNameFromGmail(query);
-
-    if (!isPrimary) {
-      setWarehouses((prev) =>
-        prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
-      );
-    }
-
-    const created: StaffMember = {
-      uid: isPrimary ? PRIMARY_ADMIN_UID : `staff_${Date.now()}`,
-      username: uniqueUsername,
-      password: payload.password,
-      displayName: payload.displayName.trim() || uniqueUsername,
-      phone: query.includes('@') ? '' : payload.emailOrPhone.trim(),
-      email: query.includes('@') ? query : `${uniqueUsername}@gmail.com`,
-      role: 'manager',
-      positionRole: posRole,
-      permissions: isPrimary
-        ? getDefaultPermissionsForPosition('primary_manager')
-        : getIndependentWarehouseFullPermissions(),
-      assignedWarehouse: autoWarehouseName,
-      active: true,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-
-    setStaffList((prev) => [...prev, created]);
-    setCurrentStaffId(created.uid);
-    setRole(created.role);
-    setCurrentUserEmail(created.email);
-    setIsSessionLoggedIn(true);
-    showToast(
-      `Đã đăng ký tài khoản Gmail @${created.username} (${created.displayName}) — Tự động tạo kho độc lập: ${created.assignedWarehouse}`
-    );
-    return {
-      ok: true,
-      message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tự động tạo kho riêng "${created.assignedWarehouse}" với đầy đủ chức năng độc lập.`,
-    };
-  };
-
-  const handlePrimaryPhoneOtpLogin = (
-    phone: string,
-    otpCode: string,
-    displayName?: string,
-    isSignUp?: boolean
-  ) => {
-    const cleanDigits = phone.replace(/\D+/g, '');
-    const normalizedLocalPhone = cleanDigits.startsWith('84')
-      ? `0${cleanDigits.slice(2)}`
-      : cleanDigits;
-
-    const matchedByPhone = staffList.find(
-      (s) => s.phone && s.phone.replace(/\D+/g, '') === normalizedLocalPhone
-    );
-
-    if (matchedByPhone) {
-      setCurrentStaffId(matchedByPhone.uid);
-      setRole(matchedByPhone.role);
-      setCurrentUserEmail(matchedByPhone.email || ADMIN_BACKUP_EMAIL);
-      setIsSessionLoggedIn(true);
-      showToast(
-        `Đã xác thực OTP (${otpCode}) cho SĐT ${normalizedLocalPhone} — Đăng nhập ${matchedByPhone.displayName}!`
-      );
+    } catch (err) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/email-already-in-use') {
+        return {
+          ok: false,
+          message: `Gmail "${query}" đã tồn tại trên hệ thống Firebase Authentication. Vui lòng đăng nhập hoặc dùng chức năng Quên mật khẩu.`,
+        };
+      }
+      if (code === 'auth/weak-password') {
+        return {
+          ok: false,
+          message: 'Mật khẩu quá yếu. Vui lòng chọn mật khẩu tối thiểu 6 ký tự.',
+        };
+      }
       return {
-        ok: true,
-        message: `Xác thực mã OTP thành công! Đã đăng nhập tài khoản ${matchedByPhone.displayName} (${normalizedLocalPhone}).`,
+        ok: false,
+        message:
+          err instanceof Error
+            ? `Không thể đăng ký tài khoản: ${err.message}`
+            : 'Không thể đăng ký tài khoản mới. Vui lòng thử lại.',
       };
     }
-
-    if (isSignUp || normalizedLocalPhone !== ADMIN_PRIMARY_PHONE) {
-      return handleSignUpStaff({
-        displayName: displayName || `Nhân sự (${normalizedLocalPhone})`,
-        emailOrPhone: normalizedLocalPhone,
-        username: `sdt_${normalizedLocalPhone.slice(-6)}`,
-        password: otpCode || 'taman2026',
-        provider: 'phone',
-      });
-    }
-
-    const primaryOwner =
-      staffList.find(
-        (s) =>
-          s.email.toLowerCase() === ADMIN_BACKUP_EMAIL ||
-          s.phone.replace(/\D+/g, '') === ADMIN_PRIMARY_PHONE
-      ) || staffList[0];
-    setCurrentStaffId(primaryOwner.uid);
-    setRole('manager');
-    setCurrentUserEmail(ADMIN_BACKUP_EMAIL);
-    setIsSessionLoggedIn(true);
-    showToast(
-      `Đã xác thực mã OTP (${otpCode}) từ SĐT chính ${phone} — Đăng nhập Quản lý chính (${ADMIN_BACKUP_EMAIL})!`
-    );
-    return {
-      ok: true,
-      message: `Xác thực mã OTP thành công! Đã đăng nhập Quản lý chính (${ADMIN_BACKUP_EMAIL} / ${ADMIN_PRIMARY_PHONE}).`,
-    };
   };
 
   const handleLogoutApp = () => {
-    if (isGoogleAuthenticated) {
-      logoutUser().catch(() => {});
-    }
+    logoutUser().catch(() => {});
     setIsGoogleAuthenticated(false);
+    setCloudSyncStatus('local');
     setIsSessionLoggedIn(false);
+    setCurrentUserEmail(null);
     setMobileMenuOpen(false);
     showToast(
       `Đã thoát đăng nhập khỏi tài khoản @${currentStaff.username} (${currentStaff.displayName}). Vui lòng đăng nhập lại để tiếp tục.`
     );
   };
 
-  const handleResetPasswordViaGmail = (payload: {
-    uid: string;
-    gmail: string;
-    newPassword: string;
-  }): { ok: boolean; message: string; log?: GmailRecoveryLog } => {
-    const target = staffList.find((s) => s.uid === payload.uid);
-    if (!target) {
-      return { ok: false, message: 'Không tìm thấy tài khoản nhân viên.' };
-    }
-    if (!payload.gmail || !payload.gmail.includes('@')) {
-      return {
-        ok: false,
-        message: 'Vui lòng nhập địa chỉ Gmail hợp lệ để nhận mật khẩu khôi phục.',
-      };
-    }
-    if (payload.newPassword.length < 4) {
-      return { ok: false, message: 'Mật khẩu tạo lại phải có tối thiểu 4 ký tự.' };
-    }
-
-    const nowIso = new Date().toISOString();
-    setStaffList((prev) =>
-      prev.map((s) =>
-        s.uid === payload.uid
-          ? {
-              ...s,
-              email: payload.gmail,
-              password: payload.newPassword,
-              updatedAt: nowIso,
-            }
-          : s
-      )
-    );
-
-    const log: GmailRecoveryLog = {
-      id: `rec_${Date.now()}`,
-      username: target.username,
-      displayName: target.displayName,
-      recipientGmail: payload.gmail,
-      newPasswordIssued: payload.newPassword,
-      sentAt: new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
-    };
-
-    showToast(
-      `Đã tạo lại mật khẩu mới cho @${target.username} và gửi về Gmail: ${payload.gmail}`
-    );
-
-    return {
-      ok: true,
-      message: `Đã gửi mật khẩu mới (${payload.newPassword}) của tài khoản @${target.username} về địa chỉ Gmail: ${payload.gmail}!`,
-      log,
-    };
-  };
-
-  const handleUpdateStaffProfile = (payload: {
+  const handleUpdateStaffProfile = async (payload: {
     uid: string;
     displayName: string;
     phone: string;
     email: string;
     newPassword?: string;
     customWarehouseName?: string;
-  }) => {
+  }): Promise<{ ok: boolean; message: string }> => {
     const target = staffList.find((s) => s.uid === payload.uid);
     if (!target) {
       return { ok: false, message: 'Không tìm thấy tài khoản cần cập nhật.' };
@@ -2454,6 +2706,10 @@ export default function App() {
       );
     }
 
+    const nextPasswordHash = payload.newPassword
+      ? await hashPassword(payload.newPassword, target.uid)
+      : target.password;
+
     setStaffList((prev) =>
       prev.map((s) =>
         s.uid === payload.uid
@@ -2462,7 +2718,7 @@ export default function App() {
               displayName: payload.displayName || s.displayName,
               phone: payload.phone || s.phone,
               email: payload.email || s.email,
-              password: payload.newPassword ? payload.newPassword : s.password,
+              password: nextPasswordHash,
               assignedWarehouse: nextWarehouse,
               updatedAt: nowIso,
             }
@@ -2496,19 +2752,25 @@ export default function App() {
     };
   };
 
-  const handleChangeStaffPassword = (
+  const handleChangeStaffPassword = async (
     uid: string,
     currentPass: string,
     newPass: string
-  ) => {
+  ): Promise<{ ok: boolean; message: string }> => {
     const target = staffList.find((s) => s.uid === uid);
     if (!target) return { ok: false, message: 'Không tìm thấy tài khoản.' };
-    if (target.password !== currentPass) {
-      return { ok: false, message: 'Mật khẩu hiện tại không đúng.' };
+    if (isHashedPassword(target.password)) {
+      const okOld = await verifyPassword(currentPass, target.password, target.uid);
+      if (!okOld) {
+        return { ok: false, message: 'Mật khẩu hiện tại không đúng.' };
+      }
+    } else if (!currentPass) {
+      return { ok: false, message: 'Vui lòng nhập mật khẩu hiện tại.' };
     }
     const nowIso = new Date().toISOString();
+    const hashed = await hashPassword(newPass, target.uid);
     setStaffList((prev) =>
-      prev.map((s) => (s.uid === uid ? { ...s, password: newPass, updatedAt: nowIso } : s))
+      prev.map((s) => (s.uid === uid ? { ...s, password: hashed, updatedAt: nowIso } : s))
     );
     showToast(`Đã đổi mật khẩu mới thành công cho tài khoản @${target.username}!`);
     return {
@@ -2517,7 +2779,7 @@ export default function App() {
     };
   };
 
-  const handleCreateStaffAccount = (payload: {
+  const handleCreateStaffAccount = async (payload: {
     username: string;
     password: string;
     displayName: string;
@@ -2527,7 +2789,7 @@ export default function App() {
     positionRole: StaffPositionRole;
     permissions: StaffFunctionalPermission[];
     assignedWarehouse: string;
-  }) => {
+  }): Promise<{ ok: boolean; message: string }> => {
     if (!canAccountCreateStaff(currentStaff)) {
       return {
         ok: false,
@@ -2550,10 +2812,12 @@ export default function App() {
       };
     }
     const nowIso = new Date().toISOString();
+    const newUid = `staff_${Date.now()}`;
+    const hashedPassword = await hashPassword(payload.password, newUid);
     const created: StaffMember = {
-      uid: `staff_${Date.now()}`,
+      uid: newUid,
       username: payload.username,
-      password: payload.password,
+      password: hashedPassword,
       displayName: payload.displayName,
       phone: payload.phone,
       email: payload.email || `${payload.username}@vtnntaman.vn`,
@@ -2575,7 +2839,7 @@ export default function App() {
       details: `Vai trò: ${getPositionRoleLabel(created.positionRole)} · Kho: ${
         created.assignedWarehouse
       } · Quyền [X]: ${(created.permissions || []).join(', ')}`,
-      snapshotData: JSON.stringify(created),
+      snapshotData: JSON.stringify({ ...created, password: '' }),
     });
     showToast(
       `Đã tạo tài khoản @${created.username} (${getPositionRoleLabel(
@@ -2584,7 +2848,7 @@ export default function App() {
     );
     return {
       ok: true,
-      message: `Đã cấp tài khoản @${created.username} (Mật khẩu: ${created.password}) · Vai trò: ${getPositionRoleLabel(
+      message: `Đã cấp tài khoản @${created.username} · Vai trò: ${getPositionRoleLabel(
         created.positionRole
       )} · Kho quản lý: ${created.assignedWarehouse}`,
     };
@@ -2671,11 +2935,12 @@ export default function App() {
     showToast('Quản lý chính đã lưu phân quyền [X] vai trò & chức năng cho tài khoản!');
   };
 
-  const handleResetStaffPasswordByManager = (uid: string, newPass: string) => {
+  const handleResetStaffPasswordByManager = async (uid: string, newPass: string) => {
     if (!canAccountCreateStaff(currentStaff)) return;
     const nowIso = new Date().toISOString();
+    const hashed = await hashPassword(newPass, uid);
     setStaffList((prev) =>
-      prev.map((s) => (s.uid === uid ? { ...s, password: newPass, updatedAt: nowIso } : s))
+      prev.map((s) => (s.uid === uid ? { ...s, password: hashed, updatedAt: nowIso } : s))
     );
     showToast('Đã cấp lại mật khẩu mới cho nhân sự.');
   };
@@ -2757,6 +3022,7 @@ export default function App() {
       );
     } catch (err) {
       const nowStr = new Date().toISOString().slice(0, 16).replace('T', ' ');
+      const activeUid = auth.currentUser?.uid || currentStaff.uid;
       const fallbackEntry: BackupEntry = {
         id: `bk_local_${Date.now()}`,
         fileName: `VTNN_TamAn_Backup_${new Date().toISOString().slice(0, 10)}.json`,
@@ -2765,7 +3031,7 @@ export default function App() {
         triggerType: 'manual',
         recordCount: products.length + customers.length + sales.length + imports.length,
         auditLogCount: auditLogs.length,
-        ownerId: 'demo_owner',
+        ownerId: activeUid,
         createdAt: nowStr,
         status: 'completed',
         snapshotPayload,
@@ -2788,7 +3054,7 @@ export default function App() {
 
   const handleDeleteBackupRecord = async (backup: BackupEntry) => {
     try {
-      await deleteBackupFileFromDrive(backup.driveFileId);
+      await deleteBackupFileFromDrive(backup.driveFileId, backup.id);
       setBackups((prev) => prev.filter((b) => b.id !== backup.id));
       recordAuditLog({
         actionCategory: 'delete',
@@ -3193,6 +3459,7 @@ export default function App() {
       const result = await googleSignInWithRole(requestedRole);
       if (result && result.user && result.user.email) {
         setIsGoogleAuthenticated(true);
+        setCloudSyncStatus(canWriteToFirestore(result.user) ? 'synced' : 'unverified');
         return handleGoogleLoginByEmail(
           result.user.email,
           result.user.displayName || undefined,
@@ -3204,7 +3471,22 @@ export default function App() {
         message:
           'Không nhận được địa chỉ Gmail từ tài khoản Google đã chọn. Vui lòng chọn một tài khoản Gmail hợp lệ.',
       };
-    } catch {
+    } catch (err) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/unauthorized-domain') {
+        const host = typeof window !== 'undefined' ? window.location.hostname : 'vtnntaman.com';
+        return {
+          ok: false,
+          message: `Tên miền "${host}" chưa được cấp phép trong Firebase Console -> Authentication -> Settings -> Authorized domains. Vui lòng thêm "${host}" vào Firebase hoặc đăng nhập bằng Email/Tên đăng nhập.`,
+        };
+      }
+      if (code === 'auth/popup-blocked') {
+        return {
+          ok: false,
+          message:
+            'Trình duyệt đang chặn cửa sổ bật lên (Pop-up) của Google Sign-In. Vui lòng cho phép Pop-up và thử lại.',
+        };
+      }
       return {
         ok: false,
         message:
@@ -3223,7 +3505,7 @@ export default function App() {
     const { urgency } = evaluateDebtUrgency(
       i.dueDate,
       i.debtAmount,
-      DEFAULT_REFERENCE_DATE,
+      todayVietnamDate,
       notificationPrefs.leadDays
     );
     return urgency === 'overdue' || urgency === 'due_soon';
@@ -3281,6 +3563,22 @@ export default function App() {
 
   const activeNavLabel = navItems.find((n) => n.id === activeTab)?.label || 'Tổng quan';
 
+  if (isAuthChecking) {
+    return (
+      <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col items-center justify-center p-4">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-8 py-7 flex flex-col items-center gap-3 text-center">
+          <img
+            src="/assets/logo-taman.png"
+            alt="Logo VTNN Tâm An"
+            className="w-14 h-14 object-contain rounded-xl border border-emerald-200 p-1.5 bg-emerald-50"
+          />
+          <div className="text-sm font-bold text-slate-900">VTNN Tâm An</div>
+          <div className="text-xs text-slate-500">Đang kiểm tra phiên đăng nhập an toàn...</div>
+        </div>
+      </div>
+    );
+  }
+
   // When not logged in, render ONLY the clean, centered outer login screen (no sidebar, no top bar)
   if (!isSessionLoggedIn) {
     return (
@@ -3292,10 +3590,8 @@ export default function App() {
           currentUserEmail={currentUserEmail}
           onGoogleManagerLogin={() => handleGoogleLogin('manager')}
           onGoogleLoginByEmail={handleGoogleLoginByEmail}
-          onPrimaryPhoneOtpLogin={handlePrimaryPhoneOtpLogin}
           onLoginStaff={handleLoginStaff}
           onSignUpStaff={handleSignUpStaff}
-          onResetPasswordViaGmail={handleResetPasswordViaGmail}
           onUpdateStaffProfile={handleUpdateStaffProfile}
           isSessionLoggedIn={isSessionLoggedIn}
           onLogout={handleLogoutApp}
@@ -3312,7 +3608,7 @@ export default function App() {
           {/* Brand Lockup with Attached VTNN Tâm An Logo */}
           <div className="p-5 border-b border-slate-200 flex items-center gap-3">
             <img
-              src="/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png"
+              src="/assets/logo-taman.png"
               alt="Logo VTNN Tâm An"
               referrerPolicy="no-referrer"
               className="w-11 h-11 rounded-lg object-contain bg-white border border-slate-200 shrink-0 p-0.5"
@@ -3642,6 +3938,25 @@ export default function App() {
           )}
         </header>
 
+        {/* Cloud Sync / Email Verification Notice Banner */}
+        {cloudSyncStatus === 'unverified' && (
+          <div className="mx-4 sm:mx-6 mt-3 px-4 py-2.5 bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-lg flex flex-wrap items-center justify-between gap-2">
+            <span>
+              Dữ liệu đang được lưu an toàn tại máy. Vui lòng xác minh hộp thư Gmail để bật đồng bộ Cloud Firestore.
+            </span>
+            <button
+              type="button"
+              onClick={async () => {
+                const res = await resendVerificationEmail();
+                showToast(res.message);
+              }}
+              className="px-3 py-1 font-bold bg-amber-600 hover:bg-amber-700 text-white rounded-md whitespace-nowrap"
+            >
+              Gửi lại email xác minh
+            </button>
+          </div>
+        )}
+
         {/* Toast Notification Banner */}
         {toastBanner && (
           <div
@@ -3668,7 +3983,7 @@ export default function App() {
               <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div className="flex items-start sm:items-center gap-3.5 sm:gap-4">
                   <img
-                    src="/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png"
+                    src="/assets/logo-taman.png"
                     alt="Logo Vật tư Nông nghiệp Tâm An"
                     referrerPolicy="no-referrer"
                     className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-contain border border-slate-200 p-1 shrink-0 bg-white"
@@ -3909,7 +4224,7 @@ export default function App() {
                         const { urgency, daysRemaining } = evaluateDebtUrgency(
                           imp.dueDate,
                           imp.debtAmount,
-                          DEFAULT_REFERENCE_DATE,
+                          todayVietnamDate,
                           notificationPrefs.leadDays
                         );
                         return (
@@ -4041,9 +4356,10 @@ export default function App() {
                 <div className="grid grid-cols-3 sm:flex sm:flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => {
+                    onClick={async () => {
+                      const { exportPeriodicReportExcel } = await import('./utils/exportReports');
                       const file = exportPeriodicReportExcel({
-                        periodLabel: 'Tháng 11/2026',
+                        periodLabel: getCurrentMonthRangeVietnam().label,
                         products: visibleProducts,
                         customers: visibleCustomers,
                         sales: visibleSales,
@@ -4057,9 +4373,10 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
+                    onClick={async () => {
+                      const { exportPeriodicReportPDF } = await import('./utils/exportReports');
                       const file = exportPeriodicReportPDF({
-                        periodLabel: 'Tháng 11/2026',
+                        periodLabel: getCurrentMonthRangeVietnam().label,
                         products: visibleProducts,
                         customers: visibleCustomers,
                         sales: visibleSales,
@@ -4083,6 +4400,13 @@ export default function App() {
             </div>
           )}
 
+          <Suspense
+            fallback={
+              <div className="bg-white rounded-xl border border-slate-200 p-8 text-center text-xs text-slate-500">
+                Đang tải mô-đun làm việc...
+              </div>
+            }
+          >
           {isSessionLoggedIn && activeTab === 'sales' && (
             <SalesLogView
               products={visibleProducts}
@@ -4282,16 +4606,13 @@ export default function App() {
               currentUserEmail={currentUserEmail}
               onGoogleManagerLogin={() => handleGoogleLogin('manager')}
               onGoogleLoginByEmail={handleGoogleLoginByEmail}
-              onPrimaryPhoneOtpLogin={handlePrimaryPhoneOtpLogin}
               onAddWarehouse={handleAddWarehouse}
-              onLoginStaff={handleLoginStaff}
               onChangePassword={handleChangeStaffPassword}
               onCreateStaffAccount={handleCreateStaffAccount}
               onUpdateStaffWarehouse={handleUpdateStaffWarehouse}
               onUpdateStaffPermissions={handleUpdateStaffPermissions}
               onResetStaffPasswordByManager={handleResetStaffPasswordByManager}
               onToggleStaffActive={handleToggleStaffActive}
-              onResetPasswordViaGmail={handleResetPasswordViaGmail}
               onUpdateStaffProfile={handleUpdateStaffProfile}
               isSessionLoggedIn={isSessionLoggedIn}
               onLogout={handleLogoutApp}
@@ -4342,6 +4663,7 @@ export default function App() {
               onNotifyToast={showToast}
             />
           )}
+          </Suspense>
         </main>
       </div>
 
@@ -4365,7 +4687,7 @@ export default function App() {
         onUpdatePrefs={(newPrefs) => {
           setNotificationPrefs(newPrefs);
           if (isGoogleAuthenticated) {
-            syncNotificationPrefsToFirestore(newPrefs, true).catch(console.error);
+            void syncNotificationPrefsToFirestore(newPrefs, true);
           }
           showToast('Đã lưu cài đặt tùy chỉnh thông báo đẩy.');
         }}

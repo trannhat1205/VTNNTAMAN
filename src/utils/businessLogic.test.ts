@@ -52,7 +52,15 @@ import {
   extractCustomWarehouseSuffix,
   normalizeCustomTamAnWarehouseName,
   getIndependentWarehouseFullPermissions,
+  generateSequentialVoucherCode,
+  getCurrentMonthRangeVietnam,
+  getTodayVietnamDateStr,
 } from './businessLogic';
+import { hashPassword, isHashedPassword, verifyPassword } from './authSecurity';
+import {
+  createEmptyWorkspaceState,
+  sanitizeStaffListForStorage,
+} from '../services/localPersistence';
 import {
   CustomerProfile,
   ImportTransaction,
@@ -1780,6 +1788,45 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
     2
   );
 });
+
+test('Production hardening: sequential voucher codes, Vietnam dates, SHA-256 password hashing, and clean empty workspace', async () => {
+  const fixedDate = new Date('2026-11-23T14:00:00.000Z');
+  assert.equal(getTodayVietnamDateStr(fixedDate), '2026-11-23');
+  const monthRange = getCurrentMonthRangeVietnam(fixedDate);
+  assert.equal(monthRange.from, '2026-11-01');
+  assert.equal(monthRange.to, '2026-11-30');
+
+  assert.equal(generateSequentialVoucherCode('HD', [], fixedDate), 'HD-2611-001');
+  assert.equal(
+    generateSequentialVoucherCode('HD', ['HD-2611-001', 'HD-2611-004'], fixedDate),
+    'HD-2611-005'
+  );
+
+  const hashed = await hashPassword('MatKhauManh#2026', 'uid_test_1');
+  assert.equal(isHashedPassword(hashed), true);
+  assert.equal(await verifyPassword('MatKhauManh#2026', hashed, 'uid_test_1'), true);
+  assert.equal(await verifyPassword('SaiMatKhau', hashed, 'uid_test_1'), false);
+  assert.equal(await verifyPassword('885300', '885300', 'uid_test_1'), false);
+
+  const emptyWs = createEmptyWorkspaceState();
+  assert.equal(emptyWs.products.length, 0);
+  assert.equal(emptyWs.customers.length, 0);
+  assert.equal(emptyWs.sales.length, 0);
+  assert.equal(emptyWs.imports.length, 0);
+  assert.equal(emptyWs.receiptVouchers.length, 0);
+  assert.equal(emptyWs.paymentVouchers.length, 0);
+  assert.equal(emptyWs.staffList.length, 1);
+  assert.equal(emptyWs.staffList[0].password, '');
+
+  const sanitized = sanitizeStaffListForStorage([
+    {
+      ...emptyWs.staffList[0],
+      password: 'plaintext_should_be_stripped',
+    },
+  ]);
+  assert.equal(sanitized[0].password, '');
+});
+
 
 
 

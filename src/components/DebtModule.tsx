@@ -26,6 +26,7 @@ import {
   DEBT_TERM_DAY_OPTIONS,
   evaluateDebtUrgency,
   formatVND,
+  getTodayVietnamDateStr,
   matchDebtTermDays,
   normalizeVietnameseSearch,
   previewCustomerFifoDebtSettlement,
@@ -211,22 +212,23 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   const totalSupplierDebt = supplierDebts.reduce((sum, i) => sum + i.debtAmount, 0);
   const totalCustomerDebt = customerDebts.reduce((sum, s) => sum + s.debtAmount, 0);
 
+  const todayStr = getTodayVietnamDateStr();
   const overdueSuppliers = supplierDebts.filter(
-    (i) => evaluateDebtUrgency(i.dueDate, i.debtAmount, '2026-11-16', leadDays).urgency === 'overdue'
+    (i) => evaluateDebtUrgency(i.dueDate, i.debtAmount, todayStr, leadDays).urgency === 'overdue'
   );
   const dueSoonSuppliers = supplierDebts.filter(
-    (i) => evaluateDebtUrgency(i.dueDate, i.debtAmount, '2026-11-16', leadDays).urgency === 'due_soon'
+    (i) => evaluateDebtUrgency(i.dueDate, i.debtAmount, todayStr, leadDays).urgency === 'due_soon'
   );
 
   const overdueCustomers = customerDebts.filter(
-    (s) => evaluateDebtUrgency(s.dueDate, s.debtAmount, '2026-11-16', leadDays).urgency === 'overdue'
+    (s) => evaluateDebtUrgency(s.dueDate, s.debtAmount, todayStr, leadDays).urgency === 'overdue'
   );
   const dueSoonCustomers = customerDebts.filter(
-    (s) => evaluateDebtUrgency(s.dueDate, s.debtAmount, '2026-11-16', leadDays).urgency === 'due_soon'
+    (s) => evaluateDebtUrgency(s.dueDate, s.debtAmount, todayStr, leadDays).urgency === 'due_soon'
   );
 
   const filteredSupplierDebts = supplierDebts.filter((item) => {
-    const { urgency } = evaluateDebtUrgency(item.dueDate, item.debtAmount, '2026-11-16', leadDays);
+    const { urgency } = evaluateDebtUrgency(item.dueDate, item.debtAmount, todayStr, leadDays);
     if (urgencyFilter === 'overdue' && urgency !== 'overdue') return false;
     if (urgencyFilter === 'due_soon' && urgency !== 'due_soon') return false;
     const q = normalizeVietnameseSearch(searchTerm);
@@ -238,7 +240,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   });
 
   const filteredCustomerDebts = customerDebts.filter((item) => {
-    const { urgency } = evaluateDebtUrgency(item.dueDate, item.debtAmount, '2026-11-16', leadDays);
+    const { urgency } = evaluateDebtUrgency(item.dueDate, item.debtAmount, todayStr, leadDays);
     if (urgencyFilter === 'overdue' && urgency !== 'overdue') return false;
     if (urgencyFilter === 'due_soon' && urgency !== 'due_soon') return false;
     const q = normalizeVietnameseSearch(searchTerm);
@@ -1228,7 +1230,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                 const { urgency, daysRemaining } = evaluateDebtUrgency(
                   imp.dueDate,
                   imp.debtAmount,
-                  '2026-11-16',
+                  todayStr,
                   leadDays
                 );
                 const isHighlighted = selectedLinkedVoucherId === imp.id;
@@ -1426,7 +1428,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                     const { urgency, daysRemaining } = evaluateDebtUrgency(
                       imp.dueDate,
                       imp.debtAmount,
-                      '2026-11-16',
+                      todayStr,
                       leadDays
                     );
                     const isHighlighted = selectedLinkedVoucherId === imp.id;
@@ -1600,7 +1602,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                 const { urgency, daysRemaining } = evaluateDebtUrgency(
                   sale.dueDate,
                   sale.debtAmount,
-                  '2026-11-16',
+                  todayStr,
                   leadDays
                 );
                 const isHighlighted = selectedLinkedVoucherId === sale.id;
@@ -1798,7 +1800,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                     const { urgency, daysRemaining } = evaluateDebtUrgency(
                       sale.dueDate,
                       sale.debtAmount,
-                      '2026-11-16',
+                      todayStr,
                       leadDays
                     );
                     const isHighlighted = selectedLinkedVoucherId === sale.id;

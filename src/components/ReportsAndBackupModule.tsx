@@ -58,8 +58,12 @@ import {
   formatVND,
   generateFiscalYearOptions,
   generateSmartReportRecommendations,
+  getCurrentMonthRangeVietnam,
+  getCurrentQuarterRangeVietnam,
   getDefaultPermissionsForPosition,
   getPositionRoleLabel,
+  getRecentDaysRangeVietnam,
+  getTodayVietnamDateStr,
   isDateWithinRange,
   normalizeVietnameseSearch,
   parseAndValidateBackupPayload,
@@ -229,8 +233,12 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
   const allowedCategories = accessScope.allowedReportCategories;
 
   // Date range state (Từ ngày ... Đến ngày ...)
-  const [fromDate, setFromDate] = useState<string>('2026-11-01');
-  const [toDate, setToDate] = useState<string>('2026-11-30');
+  const todayStr = getTodayVietnamDateStr();
+  const currentMonthRange = useMemo(() => getCurrentMonthRangeVietnam(), []);
+  const recent7DaysRange = useMemo(() => getRecentDaysRangeVietnam(7), []);
+  const currentQuarterRange = useMemo(() => getCurrentQuarterRangeVietnam(), []);
+  const [fromDate, setFromDate] = useState<string>(currentMonthRange.from);
+  const [toDate, setToDate] = useState<string>(currentMonthRange.to);
   const [activeCategory, setActiveCategory] = useState<ReportModuleCategory>('overview');
   const [reportSearch, setReportSearch] = useState<string>('');
 
@@ -774,7 +782,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                     type="text"
                     value={reportSearch}
                     onChange={(e) => setReportSearch(e.target.value)}
-                    placeholder="Gõ mã HĐ-2611..., PN-2611..., tên vật tư, tên khách hàng..."
+                    placeholder="Gõ mã phiếu, tên vật tư, tên khách hàng..."
                     className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-200 rounded-lg text-slate-900"
                   />
                 </div>
@@ -785,11 +793,11 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs font-semibold text-slate-600 mr-1">Chọn nhanh kỳ:</span>
                 {[
-                  { label: 'Hôm nay (16/11)', from: '2026-11-16', to: '2026-11-16' },
-                  { label: '7 ngày gần nhất', from: '2026-11-10', to: '2026-11-18' },
-                  { label: 'Tháng 11/2026', from: '2026-11-01', to: '2026-11-30' },
-                  { label: 'Quý 4/2026', from: '2026-10-01', to: '2026-12-31' },
-                  { label: 'Toàn bộ lịch sử', from: '2025-01-01', to: '2027-12-31' },
+                  { label: `Hôm nay (${todayStr.slice(8, 10)}/${todayStr.slice(5, 7)})`, from: todayStr, to: todayStr },
+                  { label: '7 ngày gần nhất', from: recent7DaysRange.from, to: recent7DaysRange.to },
+                  { label: currentMonthRange.label, from: currentMonthRange.from, to: currentMonthRange.to },
+                  { label: currentQuarterRange.label, from: currentQuarterRange.from, to: currentQuarterRange.to },
+                  { label: 'Toàn bộ lịch sử', from: '2020-01-01', to: '2035-12-31' },
                 ].map((preset) => (
                   <button
                     key={preset.label}
@@ -4951,18 +4959,18 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
         </div>
       )}
 
-      {/* Confirmation Modal before uploading to Google Drive */}
+      {/* Confirmation Modal before creating Cloud / Firebase Storage backup */}
       {confirmBackupModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-2.5 sm:p-4"
           role="dialog"
           aria-modal="true"
-          aria-label="Xác nhận sao lưu dữ liệu lên Google Drive"
+          aria-label="Xác nhận sao lưu dữ liệu lên hệ thống lưu trữ"
         >
           <div className="bg-white rounded-xl border border-slate-200 w-full max-w-md flex flex-col overflow-hidden shadow-xl">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <h3 className="text-sm sm:text-base font-bold text-slate-900">
-                Xác nhận tạo bản sao lưu trên Google Drive?
+                Xác nhận tạo bản sao lưu dữ liệu?
               </h3>
               <button
                 type="button"
@@ -4975,7 +4983,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
             <div className="p-5 space-y-4 text-xs text-slate-600">
               <p>
                 Tạo tệp sao lưu mới chứa toàn bộ dữ liệu kinh doanh và {auditLogs.length} bản ghi
-                lịch sử thao tác lên Google Drive ({ADMIN_BACKUP_EMAIL}).
+                lịch sử thao tác trên Firebase Storage ({ADMIN_BACKUP_EMAIL}).
               </p>
               <div className="flex items-center justify-end gap-3">
                 <button

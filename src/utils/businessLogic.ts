@@ -234,10 +234,86 @@ export function evaluateStockAlert(product: Pick<ProductItem, 'stock' | 'minStoc
   return 'normal';
 }
 
+export function getTodayVietnamDateStr(dateInput: Date = new Date()): string {
+  const vnTime = new Date(dateInput.getTime() + 7 * 60 * 60 * 1000);
+  return vnTime.toISOString().slice(0, 10);
+}
+
+export function getCurrentMonthRangeVietnam(dateInput: Date = new Date()): {
+  from: string;
+  to: string;
+  label: string;
+} {
+  const todayStr = getTodayVietnamDateStr(dateInput);
+  const year = Number(todayStr.slice(0, 4));
+  const month = Number(todayStr.slice(5, 7));
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const mm = String(month).padStart(2, '0');
+  return {
+    from: `${year}-${mm}-01`,
+    to: `${year}-${mm}-${String(lastDay).padStart(2, '0')}`,
+    label: `Tháng ${mm}/${year}`,
+  };
+}
+
+export function getRecentDaysRangeVietnam(
+  days: number,
+  dateInput: Date = new Date()
+): { from: string; to: string } {
+  const to = getTodayVietnamDateStr(dateInput);
+  const safeDays = Math.max(0, Math.round(days) - 1);
+  const parts = to.split('-').map(Number);
+  const startUtc = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2] - safeDays));
+  return {
+    from: startUtc.toISOString().slice(0, 10),
+    to,
+  };
+}
+
+export function getCurrentQuarterRangeVietnam(dateInput: Date = new Date()): {
+  from: string;
+  to: string;
+  label: string;
+} {
+  const todayStr = getTodayVietnamDateStr(dateInput);
+  const year = Number(todayStr.slice(0, 4));
+  const month = Number(todayStr.slice(5, 7));
+  const quarter = Math.floor((month - 1) / 3) + 1;
+  const startMonth = (quarter - 1) * 3 + 1;
+  const endMonth = startMonth + 2;
+  const lastDay = new Date(Date.UTC(year, endMonth, 0)).getUTCDate();
+  return {
+    from: `${year}-${String(startMonth).padStart(2, '0')}-01`,
+    to: `${year}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`,
+    label: `Quý ${quarter}/${year}`,
+  };
+}
+
+export function generateSequentialVoucherCode(
+  prefix: string,
+  existingCodes: string[],
+  dateInput: Date = new Date()
+): string {
+  const todayStr = getTodayVietnamDateStr(dateInput);
+  const yymm = `${todayStr.slice(2, 4)}${todayStr.slice(5, 7)}`;
+  const fullPrefix = `${prefix}-${yymm}-`;
+  let maxSeq = 0;
+  for (const code of existingCodes) {
+    if (typeof code === 'string' && code.startsWith(fullPrefix)) {
+      const tail = Number(code.slice(fullPrefix.length));
+      if (!Number.isNaN(tail) && tail > maxSeq) {
+        maxSeq = tail;
+      }
+    }
+  }
+  const nextSeq = maxSeq + 1;
+  return `${fullPrefix}${String(nextSeq).padStart(3, '0')}`;
+}
+
 export function evaluateDebtUrgency(
   dueDateStr: string,
   debtAmount: number,
-  referenceDateStr = '2026-11-16',
+  referenceDateStr = getTodayVietnamDateStr(),
   leadDays = 5
 ): { urgency: DebtUrgencyLevel; daysRemaining: number } {
   if (debtAmount <= 0 || !dueDateStr) {
@@ -274,7 +350,7 @@ export interface CustomerLedgerMetrics {
 export function computeCustomerLedger(
   customer: CustomerProfile,
   sales: SaleTransaction[],
-  referenceDateStr = '2026-11-16',
+  referenceDateStr = getTodayVietnamDateStr(),
   leadDays = 5
 ): CustomerLedgerMetrics {
   const customerSales = sales
@@ -356,7 +432,7 @@ export function filterCustomers(
   searchQuery: string,
   groupFilter: CustomerGroup | 'all',
   debtFilter: CustomerDebtFilter,
-  referenceDateStr = '2026-11-16',
+  referenceDateStr = getTodayVietnamDateStr(),
   leadDays = 5
 ): { customer: CustomerProfile; ledger: CustomerLedgerMetrics }[] {
   const q = normalizeVietnameseSearch(searchQuery);
@@ -393,7 +469,7 @@ export function generateSmartNotifications(
   imports: ImportTransaction[],
   backups: BackupEntry[],
   prefs: NotificationPrefs,
-  referenceDateStr = '2026-11-16'
+  referenceDateStr = getTodayVietnamDateStr()
 ): AppNotification[] {
   const notifications: AppNotification[] = [];
   const leadDays = prefs.leadDays || 5;

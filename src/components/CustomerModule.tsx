@@ -31,6 +31,9 @@ import {
   evaluateDebtUrgency,
   filterCustomers,
   formatVND,
+  getCurrentMonthRangeVietnam,
+  getRecentDaysRangeVietnam,
+  getTodayVietnamDateStr,
   previewCustomerFifoDebtSettlement,
 } from '../utils/businessLogic';
 import {
@@ -95,8 +98,11 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
   );
 
   // Date-range filter for "Danh sách tổng hợp các mặt hàng đã nhận & còn nợ (Từ ngày ... đến ngày ...)"
-  const [itemsFromDate, setItemsFromDate] = useState('2026-11-01');
-  const [itemsToDate, setItemsToDate] = useState('2026-11-30');
+  const currentMonthRange = useMemo(() => getCurrentMonthRangeVietnam(), []);
+  const recent7DaysRange = useMemo(() => getRecentDaysRangeVietnam(7), []);
+  const todayStr = getTodayVietnamDateStr();
+  const [itemsFromDate, setItemsFromDate] = useState(currentMonthRange.from);
+  const [itemsToDate, setItemsToDate] = useState(currentMonthRange.to);
   const [onlyUnpaidItems, setOnlyUnpaidItems] = useState(false);
   const [isBatchCollectOpen, setIsBatchCollectOpen] = useState(false);
   const [batchCollectAmount, setBatchCollectAmount] = useState('');
@@ -129,7 +135,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
     searchQuery,
     groupFilter,
     debtFilter,
-    '2026-11-16',
+    todayStr,
     leadDays
   );
 
@@ -599,9 +605,9 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1">
                     {[
-                      { label: 'Tháng 11/2026', from: '2026-11-01', to: '2026-11-30' },
-                      { label: '7 ngày qua', from: '2026-11-10', to: '2026-11-18' },
-                      { label: 'Tất cả kỳ', from: '2025-01-01', to: '2027-12-31' },
+                      { label: currentMonthRange.label, from: currentMonthRange.from, to: currentMonthRange.to },
+                      { label: '7 ngày qua', from: recent7DaysRange.from, to: recent7DaysRange.to },
+                      { label: 'Tất cả kỳ', from: '2020-01-01', to: '2035-12-31' },
                     ].map((preset) => (
                       <button
                         key={preset.label}
@@ -805,7 +811,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                       const { urgency, daysRemaining } = evaluateDebtUrgency(
                         tx.dueDate,
                         tx.debtAmount,
-                        '2026-11-16',
+                        todayStr,
                         leadDays
                       );
                       return (

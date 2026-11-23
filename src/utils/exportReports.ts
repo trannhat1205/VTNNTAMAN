@@ -12,6 +12,7 @@ import {
   evaluateDebtUrgency,
   evaluateStockAlert,
   formatVND,
+  getTodayVietnamDateStr,
   ReceivedItemReportRow,
   SmartReportRecommendation,
   TaxAuthorityFinancialStatementResult,
@@ -24,7 +25,7 @@ let cachedLogoImage: HTMLImageElement | null = null;
 if (typeof window !== 'undefined' && typeof Image !== 'undefined') {
   const img = new Image();
   img.crossOrigin = 'anonymous';
-  img.src = '/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png';
+  img.src = '/assets/logo-taman.png';
   img.onload = () => {
     cachedLogoImage = img;
   };
@@ -1057,6 +1058,7 @@ export function downloadExcelTemplate(moduleType: ExcelModuleType): string {
   const wb = XLSX.utils.book_new();
   let fileName = 'Mau_Du_Lieu_VTNN_TamAn.xlsx';
 
+  const todayStr = getTodayVietnamDateStr();
   if (moduleType === 'sales') {
     const sampleRows = [
       {
@@ -1069,7 +1071,7 @@ export function downloadExcelTemplate(moduleType: ExcelModuleType): string {
         'Số Lượng Bán': 5,
         'Đơn Giá Bán (VNĐ)': 350000,
         'Khách Đã Trả (VNĐ)': 1750000,
-        'Hạn Thanh Toán Nợ (YYYY-MM-DD)': '2026-11-25',
+        'Hạn Thanh Toán Nợ (YYYY-MM-DD)': todayStr,
         'Ghi Chú Đơn Hàng': 'Mẫu nhập đơn bán hàng từ Excel',
       },
       {
@@ -1082,7 +1084,7 @@ export function downloadExcelTemplate(moduleType: ExcelModuleType): string {
         'Số Lượng Bán': 4,
         'Đơn Giá Bán (VNĐ)': 760000,
         'Khách Đã Trả (VNĐ)': 1500000,
-        'Hạn Thanh Toán Nợ (YYYY-MM-DD)': '2026-11-28',
+        'Hạn Thanh Toán Nợ (YYYY-MM-DD)': todayStr,
         'Ghi Chú Đơn Hàng': 'Ghi nợ phần còn lại hẹn cuối vụ trả',
       },
     ];
@@ -1103,7 +1105,7 @@ export function downloadExcelTemplate(moduleType: ExcelModuleType): string {
         'Đơn Giá Nhập (VNĐ)': 285000,
         'Giá Bán Lẻ Đề Xuất (VNĐ)': 350000,
         'Đã Thanh Toán NCC (VNĐ)': 5000000,
-        'Hạn Trả Nợ NCC (YYYY-MM-DD)': '2026-11-30',
+        'Hạn Trả Nợ NCC (YYYY-MM-DD)': todayStr,
         'Ghi Chú Lô Nhập': 'Nhập bổ sung kho vụ Đông Xuân',
       },
     ];
@@ -1165,17 +1167,18 @@ export function downloadExcelTemplate(moduleType: ExcelModuleType): string {
     XLSX.utils.book_append_sheet(wb, ws, 'Mau_Khach_Hang');
     fileName = 'Mau_Ho_So_Khach_Hang_TamAn.xlsx';
   } else if (moduleType === 'debts') {
+    const yymm = `${todayStr.slice(2, 4)}${todayStr.slice(5, 7)}`;
     const sampleRows = [
       {
         'Loại Công Nợ (KH / NCC)': 'KH',
-        'Mã Hóa Đơn / Mã Phiếu Nhập': 'HD-2611-001',
+        'Mã Hóa Đơn / Mã Phiếu Nhập': `HD-${yymm}-001`,
         'Tên Đối Tác': 'Ông Nguyễn Văn Hòa',
         'Số Tiền Thanh Toán Đợt Này (VNĐ)': 2000000,
         'Ghi Chú Thanh Toán': 'Thu nợ một phần qua chuyển khoản',
       },
       {
         'Loại Công Nợ (KH / NCC)': 'NCC',
-        'Mã Hóa Đơn / Mã Phiếu Nhập': 'PN-2611-001',
+        'Mã Hóa Đơn / Mã Phiếu Nhập': `PN-${yymm}-001`,
         'Tên Đối Tác': 'Công ty CP Phân bón Bình Điền',
         'Số Tiền Thanh Toán Đợt Này (VNĐ)': 5000000,
         'Ghi Chú Thanh Toán': 'Chuyển khoản trả nợ lô phân NPK',

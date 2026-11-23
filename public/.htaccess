@@ -2,21 +2,23 @@
   RewriteEngine On
   RewriteBase /
 
-  # If the requested file or directory exists directly in the root, serve it
+  # Enforce HTTPS in production (skip localhost/127.0.0.1)
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !https
+  RewriteCond %{HTTP_HOST} !^localhost [NC]
+  RewriteCond %{HTTP_HOST} !^127\.0\.0\.1 [NC]
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Block access to hidden dotfiles (except .well-known for SSL verification)
+  RewriteRule ^\.well-known/ - [L]
+  RewriteRule (^|/)\. - [F,L]
+
+  # Serve existing files and directories directly
   RewriteCond %{REQUEST_FILENAME} -f [OR]
   RewriteCond %{REQUEST_FILENAME} -d
   RewriteRule ^ - [L]
 
-  # If Hostinger deploys the GitHub repo root directly to public_html,
-  # transparently serve compiled assets from dist/ when they exist
-  RewriteCond %{DOCUMENT_ROOT}/dist/%{REQUEST_URI} -f
-  RewriteRule ^(.*)$ dist/$1 [L]
-
-  # Route root or SPA navigation requests to dist/index.html if present
-  RewriteCond %{DOCUMENT_ROOT}/dist/index.html -f
-  RewriteRule ^ dist/index.html [L]
-
-  # Standard SPA fallback when Document Root is already set to dist/
+  # SPA fallback to index.html
   RewriteRule ^index\.html$ - [L]
   RewriteRule . /index.html [L]
 </IfModule>
@@ -26,4 +28,30 @@
   AddType text/css .css
   AddType application/json .json
   AddType image/svg+xml .svg
+</IfModule>
+
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/css application/javascript application/json image/svg+xml
+</IfModule>
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Cross-Origin-Opener-Policy "same-origin-allow-popups"
+
+  <FilesMatch "^index\.html$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+    Header set Expires "0"
+  </FilesMatch>
+</IfModule>
+
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/html "access plus 0 seconds"
+  ExpiresByType application/javascript "access plus 1 year"
+  ExpiresByType text/css "access plus 1 year"
+  ExpiresByType image/png "access plus 1 month"
+  ExpiresByType image/svg+xml "access plus 1 month"
 </IfModule>

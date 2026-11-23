@@ -2,18 +2,28 @@
   RewriteEngine On
   RewriteBase /
 
+  # Enforce HTTPS in production (skip localhost/127.0.0.1)
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !https
+  RewriteCond %{HTTP_HOST} !^localhost [NC]
+  RewriteCond %{HTTP_HOST} !^127\.0\.0\.1 [NC]
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Block direct web access to source directories and config files if deployed from repo root
+  RewriteRule ^(src|flutter_mobile|node_modules|\.git|\.github)(/|$) - [F,L]
+  RewriteRule ^(package\.json|package-lock\.json|bun\.lock|tsconfig\.json|vite\.config\.ts|eslint\.config\.mjs|firestore\.rules|firestore\.rules\.test\.ts|security_spec\.md|firebase-blueprint\.json|firebase-applet-config\.json|metadata\.json|\.env.*|\.gitignore)$ - [F,L]
+
+  # Allow ACME/SSL challenge
+  RewriteRule ^\.well-known/ - [L]
+
   # Do not rewrite requests that already point to dist/
   RewriteRule ^dist/ - [L]
 
-  # Serve compiled static files from dist/ if they exist (e.g. /assets/*, /favicon.ico)
+  # Serve compiled static files from dist/ if they exist
   RewriteCond %{DOCUMENT_ROOT}/dist/$1 -f
   RewriteRule ^(.*)$ dist/$1 [L]
 
-  # Serve existing static files in public/ if requested directly
-  RewriteCond %{DOCUMENT_ROOT}/public/$1 -f
-  RewriteRule ^(.*)$ public/$1 [L]
-
-  # Route all root and SPA paths to the compiled dist/index.html
+  # Route all root and SPA navigation requests to dist/index.html
   RewriteCond %{DOCUMENT_ROOT}/dist/index.html -f
   RewriteRule ^ dist/index.html [L]
 </IfModule>
@@ -23,4 +33,11 @@
   AddType text/css .css
   AddType application/json .json
   AddType image/svg+xml .svg
+</IfModule>
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Cross-Origin-Opener-Policy "same-origin-allow-popups"
 </IfModule>

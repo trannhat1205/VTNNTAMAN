@@ -29,6 +29,8 @@ import {
   computeReceivedItemsAndDebtReport,
   DEBT_TERM_DAY_OPTIONS,
   formatVND,
+  getCurrentMonthRangeVietnam,
+  getTodayVietnamDateStr,
   matchDebtTermDays,
 } from '../utils/businessLogic';
 import {
@@ -112,8 +114,10 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   const [selectedQuickFillId, setSelectedQuickFillId] = useState<string>('');
 
   // Combined General Voucher ("Phiếu tổng hợp chung các mặt hàng đã nhận & còn nợ từ ngày ... đến ngày ...")
-  const [combinedFromDate, setCombinedFromDate] = useState<string>('2026-11-01');
-  const [combinedToDate, setCombinedToDate] = useState<string>('2026-11-30');
+  const currentMonthRange = useMemo(() => getCurrentMonthRangeVietnam(), []);
+  const todayDateStr = getTodayVietnamDateStr();
+  const [combinedFromDate, setCombinedFromDate] = useState<string>(currentMonthRange.from);
+  const [combinedToDate, setCombinedToDate] = useState<string>(currentMonthRange.to);
   const [combinedCustomerId, setCombinedCustomerId] = useState<string>('all');
   const [combinedOnlyUnpaid, setCombinedOnlyUnpaid] = useState<boolean>(false);
 
@@ -292,7 +296,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         customerName: partnerName.trim() || 'Khách hàng',
         customerPhone: partnerPhone.trim(),
         customerAddress: partnerAddress.trim(),
-        invoiceCode: refCode.trim() || 'HD-2611',
+        invoiceCode: refCode.trim() || 'HD-MOI',
         previousDebt: prevDebtNum,
         collectedAmount: paidNum,
         remainingDebt,
@@ -307,7 +311,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         voucherCode: code,
         supplierName: partnerName.trim() || 'Nhà cung cấp VTNN',
         supplierPhone: partnerPhone.trim(),
-        receiptCode: refCode.trim() || 'PN-2611',
+        receiptCode: refCode.trim() || 'PN-MOI',
         previousDebt: prevDebtNum,
         paidAmount: paidNum,
         remainingDebt,
@@ -722,7 +726,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                 id="voucher-quickfill-select"
                 value={selectedQuickFillId}
                 onChange={(val) => handleQuickFill(val)}
-                placeholder="Gõ mã phiếu (HD-2611...), tên khách hàng, SĐT hoặc tên vật tư để chọn nhanh..."
+                placeholder="Gõ mã phiếu, tên khách hàng, SĐT hoặc tên vật tư để chọn nhanh..."
                 emptyOptionLabel="-- Màn hình trống (Tự điền mới) --"
                 options={
                   activeVoucher === 'sale_invoice' || activeVoucher === 'customer_receipt'
@@ -754,7 +758,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                   type="text"
                   value={voucherCode}
                   onChange={(e) => setVoucherCode(e.target.value)}
-                  placeholder="VD: HD-2611-009 / PT-001"
+                  placeholder="VD: HD-001 / PT-001"
                   className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                 />
               </div>
@@ -768,7 +772,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                     id="vc-ref"
                     value={refCode}
                     onChange={setRefCode}
-                    placeholder="Gõ mã HD-2611... hoặc tên đối tác để chọn nhanh"
+                    placeholder="Gõ mã hóa đơn hoặc tên đối tác để chọn nhanh"
                     suggestions={
                       activeVoucher === 'customer_receipt'
                         ? sales.map((s) => ({
@@ -1140,7 +1144,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
           <div className="flex items-center justify-between border-b border-slate-200 pb-4">
             <div className="flex items-center gap-3">
               <img
-                src="/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png"
+                src="/assets/logo-taman.png"
                 alt="Logo VTNN Tâm An"
                 className="w-12 h-12 rounded-lg object-contain border border-slate-200 p-0.5"
               />
@@ -1166,7 +1170,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                 : 'PHIẾU NHẬP KHO VẬT TƯ NÔNG NGHIỆP'}
             </h4>
             <p className="text-xs font-mono text-slate-500 mt-0.5">
-              Mã phiếu: {voucherCode || '(Tự động cấp khi xuất)'} · Ngày lập: 2026-11-16
+              Mã phiếu: {voucherCode || '(Tự động cấp khi xuất)'} · Ngày lập: {todayDateStr}
             </p>
           </div>
 

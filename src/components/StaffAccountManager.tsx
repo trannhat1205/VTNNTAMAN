@@ -116,25 +116,17 @@ interface InitialLoginScreenPortalProps {
     googleDisplayName?: string,
     googleUid?: string
   ) => { ok: boolean; message: string };
-  onPrimaryPhoneOtpLogin: (
-    phone: string,
-    otpCode: string,
-    displayName?: string,
-    isSignUp?: boolean
-  ) => { ok: boolean; message: string };
-  onLoginStaff: (usernameOrEmail: string, password: string) => { ok: boolean; message: string };
+  onLoginStaff: (
+    usernameOrEmail: string,
+    password: string
+  ) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onSignUpStaff?: (payload: {
     displayName: string;
     emailOrPhone: string;
     username?: string;
     password: string;
     provider: 'email_password' | 'phone' | 'google';
-  }) => { ok: boolean; message: string };
-  onResetPasswordViaGmail: (payload: {
-    uid: string;
-    gmail: string;
-    newPassword: string;
-  }) => { ok: boolean; message: string; log?: GmailRecoveryLog };
+  }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onUpdateStaffProfile: (payload: {
     uid: string;
     displayName: string;
@@ -142,7 +134,7 @@ interface InitialLoginScreenPortalProps {
     email: string;
     newPassword?: string;
     customWarehouseName?: string;
-  }) => { ok: boolean; message: string };
+  }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onOpenCreateStaffSection?: () => void;
   onDismissBanner?: () => void;
   isCollapsible?: boolean;
@@ -151,19 +143,16 @@ interface InitialLoginScreenPortalProps {
 }
 
 /**
- * Authentication Screen (Gmail & Google Auth — Phone Auth removed per requirements):
- * - Tabs: Đăng nhập (Sign-in) | Đăng ký tài khoản bằng Gmail (Sign-up) | Quên mật khẩu (Forgot Password)
+ * Authentication Screen (Production-hardened Gmail & Google Auth):
+ * - Tabs: Đăng nhập (Sign-in) | Đăng ký tài khoản bằng Gmail (Sign-up) | Quên mật khẩu (Firebase Reset Email)
  * - Each new Gmail sign-up automatically creates an independent warehouse named:
  *   "TÂM AN " + uppercase Gmail local-part (e.g. vtnntaman@gmail.com -> TÂM AN VTNNTAMAN)
  *   with full independent warehouse management functions.
  */
 export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> = ({
-  staffList,
   onGoogleManagerLogin,
-  onGoogleLoginByEmail,
   onLoginStaff,
   onSignUpStaff,
-  onResetPasswordViaGmail,
 }) => {
   const [authMode, setAuthMode] = useState<'login' | 'signup' | 'forgot_password'>('login');
 
@@ -171,6 +160,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [isGoogleSigningIn, setIsGoogleSigningIn] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [loginFeedback, setLoginFeedback] = useState<{
     type: 'error' | 'success';
     text: string;
@@ -188,41 +178,12 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
     [signUpEmail]
   );
 
-  // 3. Forgot password (Firebase Password Reset Email + Staff Password Reset) state
-  const [forgotStaffUid, setForgotStaffUid] = useState<string>(
-    staffList.find((s) => s.role === 'staff')?.uid || staffList[0]?.uid || ''
-  );
-  const [forgotGmailInput, setForgotGmailInput] = useState<string>(() => {
-    const first = staffList.find((s) => s.role === 'staff') || staffList[0];
-    return first?.email || '';
-  });
-  const [forgotNewPassword, setForgotNewPassword] = useState<string>('taman2026');
+  // 3. Forgot password (Firebase Password Reset Email only — no local enumeration or overwrite)
+  const [forgotGmailInput, setForgotGmailInput] = useState<string>('');
   const [forgotFeedback, setForgotFeedback] = useState<{
     type: 'error' | 'success';
     text: string;
   } | null>(null);
-  const [recentRecoveryLogs, setRecentRecoveryLogs] = useState<GmailRecoveryLog[]>([]);
-
-  const staffAccountOptions = useMemo<SearchableOptionItem[]>(
-    () =>
-      staffList.map((st) => ({
-        value: st.uid,
-        label: `${st.displayName} (@${st.username})`,
-        subLabel: `${getPositionRoleLabel(st.positionRole)} · Kho: ${st.assignedWarehouse}`,
-        badge: st.assignedWarehouse,
-        keywords: `${st.username} ${st.displayName} ${st.email} ${st.phone} ${st.assignedWarehouse}`,
-      })),
-    [staffList]
-  );
-
-  const handleSelectStaffForForgot = (uid: string) => {
-    setForgotStaffUid(uid);
-    const found = staffList.find((s) => s.uid === uid);
-    if (found) {
-      setForgotGmailInput(found.email || '');
-      setForgotFeedback(null);
-    }
-  };
 
   const handleSwitchAuthMode = (nextMode: 'login' | 'signup' | 'forgot_password') => {
     setAuthMode(nextMode);
@@ -232,6 +193,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const trimmedUser = loginUsername.trim();
     if (!trimmedUser || !loginPassword) {
       setLoginFeedback({
@@ -241,30 +203,25 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
       return;
     }
 
-    // Attempt Firebase Email/Password authentication in background if input is an email address
-    if (trimmedUser.includes('@')) {
-      import('../services/firebaseService')
-        .then(({ firebaseSignInWithEmailPassword }) =>
-          firebaseSignInWithEmailPassword(trimmedUser, loginPassword)
-        )
-        .catch(() => {
-          // Proceed with local/synced staff verification
-        });
-    }
-
-    const res = onLoginStaff(trimmedUser, loginPassword);
-    setLoginFeedback({
-      type: res.ok ? 'success' : 'error',
-      text: res.message,
-    });
-    if (res.ok) {
-      setLoginUsername('');
-      setLoginPassword('');
+    setIsSubmitting(true);
+    try {
+      const res = await onLoginStaff(trimmedUser, loginPassword);
+      setLoginFeedback({
+        type: res.ok ? 'success' : 'error',
+        text: res.message,
+      });
+      if (res.ok) {
+        setLoginUsername('');
+        setLoginPassword('');
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  const handleSignUpEmailSubmit = (e: React.FormEvent) => {
+  const handleSignUpEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const trimmedEmail = signUpEmail.trim().toLowerCase();
     const trimmedName = signUpDisplayName.trim() || trimmedEmail.split('@')[0] || 'Chủ kho Tâm An';
 
@@ -290,40 +247,33 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
       return;
     }
 
-    import('../services/firebaseService')
-      .then(({ firebaseSignUpWithEmailPassword }) =>
-        firebaseSignUpWithEmailPassword({
-          email: trimmedEmail,
-          password: signUpPassword,
+    setIsSubmitting(true);
+    try {
+      if (onSignUpStaff) {
+        const res = await onSignUpStaff({
           displayName: trimmedName,
-        })
-      )
-      .catch(() => {
-        // If account already exists in Firebase or offline, continue registering/linking in app state
-      });
-
-    if (onSignUpStaff) {
-      const res = onSignUpStaff({
-        displayName: trimmedName,
-        emailOrPhone: trimmedEmail,
-        password: signUpPassword,
-        provider: 'email_password',
-      });
-      setLoginFeedback({
-        type: res.ok ? 'success' : 'error',
-        text: res.message,
-      });
-    } else {
-      const res = onLoginStaff(trimmedEmail, signUpPassword);
-      setLoginFeedback({
-        type: res.ok ? 'success' : 'error',
-        text: res.message,
-      });
+          emailOrPhone: trimmedEmail,
+          password: signUpPassword,
+          provider: 'email_password',
+        });
+        setLoginFeedback({
+          type: res.ok ? 'success' : 'error',
+          text: res.message,
+        });
+      } else {
+        const res = await onLoginStaff(trimmedEmail, signUpPassword);
+        setLoginFeedback({
+          type: res.ok ? 'success' : 'error',
+          text: res.message,
+        });
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   const handleGoogleButtonClick = async () => {
-    if (isGoogleSigningIn) return;
+    if (isGoogleSigningIn || isSubmitting) return;
     setIsGoogleSigningIn(true);
     setLoginFeedback({
       type: 'success',
@@ -349,36 +299,44 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
 
   const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const trimmedEmail = forgotGmailInput.trim().toLowerCase();
     if (!trimmedEmail || !trimmedEmail.includes('@')) {
       setForgotFeedback({
         type: 'error',
-        text: 'Vui lòng nhập địa chỉ Email / Gmail hợp lệ để nhận liên kết và mật khẩu khôi phục.',
+        text: 'Vui lòng nhập địa chỉ Email / Gmail hợp lệ để nhận liên kết đặt lại mật khẩu.',
       });
       return;
     }
 
-    // Trigger Firebase Auth sendPasswordResetEmail
+    setIsSubmitting(true);
     try {
       const { firebaseSendPasswordResetEmail } = await import('../services/firebaseService');
       await firebaseSendPasswordResetEmail(trimmedEmail);
-    } catch {
-      // Continue with local recovery sync as well
-    }
-
-    const res = onResetPasswordViaGmail({
-      uid: forgotStaffUid,
-      gmail: trimmedEmail,
-      newPassword: forgotNewPassword.trim(),
-    });
-    setForgotFeedback({
-      type: res.ok ? 'success' : 'error',
-      text: res.ok
-        ? `${res.message} (Đồng thời đã gửi yêu cầu đặt lại mật khẩu qua Firebase Authentication tới ${trimmedEmail})`
-        : res.message,
-    });
-    if (res.ok && res.log) {
-      setRecentRecoveryLogs((prev) => [res.log!, ...prev]);
+      setForgotFeedback({
+        type: 'success',
+        text: `Nếu địa chỉ email ${trimmedEmail} đã đăng ký trên hệ thống, liên kết đặt lại mật khẩu từ Firebase Authentication đã được gửi tới hộp thư của bạn (vui lòng kiểm tra cả mục Spam).`,
+      });
+    } catch (err) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/invalid-email') {
+        setForgotFeedback({
+          type: 'error',
+          text: 'Địa chỉ email không đúng định dạng.',
+        });
+      } else if (code === 'auth/too-many-requests') {
+        setForgotFeedback({
+          type: 'error',
+          text: 'Bạn đã gửi yêu cầu quá nhiều lần. Vui lòng thử lại sau ít phút.',
+        });
+      } else {
+        setForgotFeedback({
+          type: 'success',
+          text: `Nếu địa chỉ email ${trimmedEmail} đã đăng ký trên hệ thống, liên kết đặt lại mật khẩu từ Firebase Authentication đã được gửi tới hộp thư của bạn (vui lòng kiểm tra cả mục Spam).`,
+        });
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -392,7 +350,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
         <div className="flex flex-col items-center text-center mb-5">
           <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-200 p-2 flex items-center justify-center shadow-xs mb-2.5">
             <img
-              src="/assets/aistudio/Logo_n_ng_nghi_p_T_m_An_a19723bb.png"
+              src="/assets/logo-taman.png"
               alt="Logo VTNN Tâm An"
               referrerPolicy="no-referrer"
               className="w-full h-full object-contain"
@@ -488,10 +446,11 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
 
                 <button
                   type="submit"
-                  className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
+                  disabled={isSubmitting}
+                  className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
                 >
                   <LogIn className="w-4 h-4 shrink-0" />
-                  <span>Đăng nhập bằng Gmail / Mật khẩu</span>
+                  <span>{isSubmitting ? 'Đang đăng nhập...' : 'Đăng nhập bằng Gmail / Mật khẩu'}</span>
                 </button>
               </form>
             )}
@@ -580,10 +539,11 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
 
                 <button
                   type="submit"
-                  className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
+                  disabled={isSubmitting}
+                  className="w-full py-2.5 px-4 text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 active:bg-emerald-900 rounded-full transition-colors shadow-xs flex items-center justify-center gap-2"
                 >
                   <UserPlus className="w-4 h-4 shrink-0" />
-                  <span>Đăng ký tài khoản Gmail & Tạo kho riêng</span>
+                  <span>{isSubmitting ? 'Đang đăng ký...' : 'Đăng ký tài khoản Gmail & Tạo kho riêng'}</span>
                 </button>
               </form>
             )}
@@ -658,7 +618,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
           </div>
         )}
 
-        {/* VIEW 2: FORGOT PASSWORD (FIREBASE PASSWORD RESET EMAIL + STAFF PASSWORD SYNC) */}
+        {/* VIEW 2: FORGOT PASSWORD (FIREBASE PASSWORD RESET EMAIL ONLY) */}
         {authMode === 'forgot_password' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -688,7 +648,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                     onClick={() => handleSwitchAuthMode('login')}
                     className="font-bold text-emerald-800 underline block"
                   >
-                    Đăng nhập ngay với mật khẩu mới →
+                    Quay lại màn hình đăng nhập →
                   </button>
                 )}
               </div>
@@ -697,26 +657,10 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
             <form onSubmit={handleForgotSubmit} className="space-y-3.5">
               <div>
                 <label
-                  htmlFor="forgot-staff-select"
-                  className="block text-xs font-semibold text-slate-700 mb-1"
-                >
-                  Tài khoản nhân sự cần lấy lại mật khẩu *
-                </label>
-                <SearchableSelect
-                  id="forgot-staff-select"
-                  value={forgotStaffUid}
-                  options={staffAccountOptions}
-                  onChange={handleSelectStaffForForgot}
-                  placeholder="-- Chọn tài khoản nhân sự --"
-                />
-              </div>
-
-              <div>
-                <label
                   htmlFor="forgot-gmail-input"
                   className="block text-xs font-semibold text-slate-700 mb-1"
                 >
-                  Địa chỉ Email / Gmail nhận khôi phục mật khẩu *
+                  Địa chỉ Email / Gmail đã đăng ký *
                 </label>
                 <input
                   id="forgot-gmail-input"
@@ -724,71 +668,23 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                   required
                   value={forgotGmailInput}
                   onChange={(e) => setForgotGmailInput(e.target.value)}
-                  placeholder="VD: nhanvien@gmail.com"
+                  placeholder="VD: vtnntaman@gmail.com"
                   className="w-full px-3.5 py-2.5 text-sm font-mono bg-white border border-slate-300 rounded-xl"
                 />
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label
-                    htmlFor="forgot-new-password"
-                    className="block text-xs font-semibold text-slate-700"
-                  >
-                    Mật khẩu tạo lại *
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setForgotNewPassword(`taman${Math.floor(1000 + Math.random() * 9000)}`)
-                    }
-                    className="text-[11px] font-semibold text-emerald-700 hover:underline flex items-center gap-1"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Tạo ngẫu nhiên</span>
-                  </button>
-                </div>
-                <PasswordInputWithEye
-                  id="forgot-new-password"
-                  required
-                  defaultVisible={true}
-                  value={forgotNewPassword}
-                  onChange={setForgotNewPassword}
-                  placeholder="Nhập mật khẩu mới..."
-                />
+                <p className="text-[11px] text-slate-500 mt-1.5 leading-relaxed">
+                  Hệ thống sẽ gửi email chứa liên kết đặt lại mật khẩu bảo mật qua Firebase Authentication. Đối với tài khoản nội bộ chưa liên kết Gmail, vui lòng liên hệ Quản lý chính để cấp lại mật khẩu.
+                </p>
               </div>
 
               <button
                 type="submit"
-                className="w-full py-2.5 px-4 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-full transition-colors flex items-center justify-center gap-2"
+                disabled={isSubmitting}
+                className="w-full py-2.5 px-4 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-60 rounded-full transition-colors flex items-center justify-center gap-2"
               >
                 <Mail className="w-4 h-4 shrink-0" />
-                <span>Gửi Email Đặt Lại Mật Khẩu (Firebase Auth & Gmail)</span>
+                <span>{isSubmitting ? 'Đang gửi...' : 'Gửi Email Đặt Lại Mật Khẩu'}</span>
               </button>
             </form>
-
-            {recentRecoveryLogs.length > 0 && (
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                <div className="text-[11px] font-bold text-slate-700 flex items-center gap-1">
-                  <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Hộp thư khôi phục qua Gmail:</span>
-                </div>
-                {recentRecoveryLogs.slice(0, 2).map((log) => (
-                  <div
-                    key={log.id}
-                    className="p-2.5 bg-white rounded-lg border border-emerald-200 text-xs space-y-0.5"
-                  >
-                    <div className="font-bold text-emerald-800 truncate">
-                      Tới: {log.recipientGmail}
-                    </div>
-                    <div className="text-slate-600">
-                      TK: <strong>@{log.username}</strong> — MK mới:{' '}
-                      <strong className="font-mono text-slate-900">{log.newPasswordIssued}</strong>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -808,14 +704,12 @@ interface StaffAccountManagerProps {
     googleDisplayName?: string,
     googleUid?: string
   ) => { ok: boolean; message: string };
-  onPrimaryPhoneOtpLogin?: (phone: string, otpCode: string) => { ok: boolean; message: string };
   onAddWarehouse: (warehouseName: string) => void;
-  onLoginStaff: (username: string, password: string) => { ok: boolean; message: string };
   onChangePassword: (
     uid: string,
     currentPass: string,
     newPass: string
-  ) => { ok: boolean; message: string };
+  ) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onCreateStaffAccount: (payload: {
     username: string;
     password: string;
@@ -826,7 +720,7 @@ interface StaffAccountManagerProps {
     positionRole: StaffPositionRole;
     permissions: StaffFunctionalPermission[];
     assignedWarehouse: string;
-  }) => { ok: boolean; message: string };
+  }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onUpdateStaffWarehouse: (uid: string, warehouseName: string) => void;
   onUpdateStaffPermissions?: (
     uid: string,
@@ -834,13 +728,8 @@ interface StaffAccountManagerProps {
     permissions: StaffFunctionalPermission[],
     assignedWarehouse: string
   ) => void;
-  onResetStaffPasswordByManager: (uid: string, newPass: string) => void;
+  onResetStaffPasswordByManager: (uid: string, newPass: string) => Promise<void> | void;
   onToggleStaffActive: (uid: string) => void;
-  onResetPasswordViaGmail: (payload: {
-    uid: string;
-    gmail: string;
-    newPassword: string;
-  }) => { ok: boolean; message: string; log?: GmailRecoveryLog };
   onUpdateStaffProfile: (payload: {
     uid: string;
     displayName: string;
@@ -848,7 +737,7 @@ interface StaffAccountManagerProps {
     email: string;
     newPassword?: string;
     customWarehouseName?: string;
-  }) => { ok: boolean; message: string };
+  }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   isSessionLoggedIn?: boolean;
   onLogout?: () => void;
 }
@@ -857,9 +746,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   staffList,
   currentStaff,
   warehouses,
-  onGoogleManagerLogin = () => {},
   onAddWarehouse,
-  onLoginStaff,
   onChangePassword,
   onCreateStaffAccount,
   onUpdateStaffWarehouse,
@@ -938,11 +825,6 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
 
   // Real-time permission update banner
   const [realtimeBanner, setRealtimeBanner] = useState<string | null>(null);
-
-  // Toggle visibility of passwords in the Staff Table
-  const [visibleTablePassUids, setVisibleTablePassUids] = useState<Set<string>>(
-    () => new Set(['staff_manager_01'])
-  );
 
   // Manager Reset Password Modal State
   const [resettingStaff, setResettingStaff] = useState<StaffMember | null>(null);
@@ -1045,7 +927,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     }
   };
 
-  const handleChangePasswordSubmit = (e: React.FormEvent) => {
+  const handleChangePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newPass.length < 4) {
       setPassFeedback({
@@ -1061,7 +943,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       });
       return;
     }
-    const res = onChangePassword(currentStaff.uid, oldPass, newPass);
+    const res = await onChangePassword(currentStaff.uid, oldPass, newPass);
     setPassFeedback({
       type: res.ok ? 'success' : 'error',
       text: res.message,
@@ -1073,7 +955,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     }
   };
 
-  const handlePersonalGmailSupplementSubmit = (e: React.FormEvent) => {
+  const handlePersonalGmailSupplementSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!onUpdateStaffProfile) return;
     const trimmedEmail = personalEmail.trim().toLowerCase();
@@ -1101,7 +983,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       ? normalizeCustomTamAnWarehouseName(personalWarehouseSuffix, trimmedEmail)
       : undefined;
 
-    const res = onUpdateStaffProfile({
+    const res = await onUpdateStaffProfile({
       uid: targetPersonalStaff.uid,
       displayName: trimmedName || targetPersonalStaff.displayName,
       phone: trimmedPhone,
@@ -1132,7 +1014,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     return trimmed;
   };
 
-  const handleCreateAccountSubmit = (e: React.FormEvent) => {
+  const handleCreateAccountSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canCreateAndAssignRoles) {
       setCreateFeedback({
@@ -1164,7 +1046,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
         ? 'manager'
         : 'staff';
 
-    const res = onCreateStaffAccount({
+    const res = await onCreateStaffAccount({
       username: newUsername.trim(),
       password: newInitialPassword,
       displayName: newDisplayName.trim(),
@@ -1476,7 +1358,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     defaultVisible={true}
                     value={newInitialPassword}
                     onChange={setNewInitialPassword}
-                    placeholder="VD: taman2026"
+                    placeholder="Nhập mật khẩu (tối thiểu 6 ký tự)"
                   />
                 </div>
               </div>
@@ -1718,7 +1600,6 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
 
             <div className="divide-y divide-slate-200">
               {visibleStaffRows.map((st) => {
-                const isPassShown = visibleTablePassUids.has(st.uid);
                 const perms =
                   st.permissions ||
                   getDefaultPermissionsForPosition(st.positionRole || 'sales_warehouse_staff');
@@ -1745,52 +1626,14 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-3 gap-y-1">
                           <span className="font-mono">Gmail: {st.email || 'Chưa bổ sung'}</span>
                           {st.phone && <span className="font-mono">SĐT: {st.phone}</span>}
-                          <span className="inline-flex items-center gap-1 font-mono">
-                            MK:{' '}
-                            <strong>
-                              {canCreateAndAssignRoles || st.uid === currentStaff.uid
-                                ? isPassShown
-                                  ? st.password
-                                  : '••••••'
-                                : '••••••'}
-                            </strong>
-                            {(canCreateAndAssignRoles || st.uid === currentStaff.uid) && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setVisibleTablePassUids((prev) => {
-                                    const next = new Set(prev);
-                                    if (next.has(st.uid)) next.delete(st.uid);
-                                    else next.add(st.uid);
-                                    return next;
-                                  });
-                                }}
-                                title={isPassShown ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
-                                className="p-0.5 text-slate-500 hover:text-emerald-700 rounded"
-                              >
-                                {isPassShown ? (
-                                  <EyeOff className="w-3.5 h-3.5" />
-                                ) : (
-                                  <Eye className="w-3.5 h-3.5" />
-                                )}
-                              </button>
-                            )}
+                          <span className="inline-flex items-center gap-1 font-mono text-slate-500">
+                            Bảo mật: <strong>Đã mã hóa SHA-256 / Firebase Auth</strong>
                           </span>
                         </div>
                       </div>
 
                       {/* Action Buttons for Staff Row */}
                       <div className="flex flex-wrap items-center gap-1.5">
-                        {canCreateAndAssignRoles && st.uid !== currentStaff.uid && (
-                          <button
-                            type="button"
-                            onClick={() => onLoginStaff(st.username, st.password)}
-                            className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg flex items-center gap-1"
-                          >
-                            <UserCheck className="w-3.5 h-3.5" />
-                            <span>Xem giao diện TK này</span>
-                          </button>
-                        )}
                         {canCreateAndAssignRoles && (
                           <button
                             type="button"
@@ -1837,7 +1680,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                               type="button"
                               onClick={() => {
                                 setResettingStaff(st);
-                                setResetPasswordValue(st.password);
+                                setResetPasswordValue('');
                               }}
                               className="px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-lg"
                             >
@@ -2534,10 +2377,10 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
               </button>
             </div>
             <form
-              onSubmit={(e) => {
+              onSubmit={async (e) => {
                 e.preventDefault();
                 if (!resetPasswordValue.trim()) return;
-                onResetStaffPasswordByManager(resettingStaff.uid, resetPasswordValue.trim());
+                await onResetStaffPasswordByManager(resettingStaff.uid, resetPasswordValue.trim());
                 setResettingStaff(null);
               }}
               className="flex flex-col flex-1 min-h-0 overflow-hidden"
