@@ -64,6 +64,8 @@ import {
 import {
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
+  buildGoogleAiModeUrl,
+  buildUnverifiedExternalLookupNotice,
   buildWarehouseReportSnapshot,
   checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
@@ -1883,27 +1885,39 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
   assert.equal(debtRouting.targetModel, 'gemma-4-26b-a4b-it');
   assert.equal(debtRouting.enableExternalSearch, false);
 
-  // Auto-routing: External product/company questions escalate to Gemini 4 Hydrogen + Google Search
+  // Auto-routing: External product/company questions route to Flash-Lite + Google Search (cost-saving + verified!)
   const senBayRouting = classifyQueryRoutingAndCostConfig(
     'sản phẩm Sen Bay của công ty thuốc bảo vệ thực vật GAP là sản phẩm gì?'
   );
   assert.equal(senBayRouting.queryScope, 'external');
-  assert.equal(senBayRouting.targetModel, 'gemini-4-hydrogen');
-  assert.equal(senBayRouting.thinkingLevel, 'LOW');
+  assert.equal(senBayRouting.targetModel, 'gemini-3.1-flash-lite');
+  assert.deepEqual(senBayRouting.fallbackModels, ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']);
+  assert.equal(senBayRouting.thinkingLevel, 'MINIMAL');
   assert.equal(senBayRouting.enableExternalSearch, true);
-  assert.ok(senBayRouting.maxOutputTokens >= 2048);
+  assert.equal(senBayRouting.requireVerifiedSearch, true);
 
-  // Auto-routing: External market price queries escalate to Gemini 4 Hydrogen + Google Search
+  const gap3Routing = classifyQueryRoutingAndCostConfig(
+    'gap 3 của công ty đồng tháp sen hồng là gì'
+  );
+  assert.equal(gap3Routing.queryScope, 'external');
+  assert.equal(gap3Routing.targetModel, 'gemini-3.1-flash-lite');
+  assert.deepEqual(gap3Routing.fallbackModels, ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']);
+  assert.equal(gap3Routing.enableExternalSearch, true);
+  assert.equal(gap3Routing.requireVerifiedSearch, true);
+
+  // Auto-routing: External market price queries route to Flash-Lite + Google Search (saves ~70-80% tokens)
   const ricePriceRouting = classifyQueryRoutingAndCostConfig('giá lúa om18 hôm nay bao nhiêu');
   assert.equal(ricePriceRouting.queryScope, 'external');
-  assert.equal(ricePriceRouting.targetModel, 'gemini-4-hydrogen');
+  assert.equal(ricePriceRouting.targetModel, 'gemini-3.1-flash-lite');
   assert.equal(ricePriceRouting.enableExternalSearch, true);
+  assert.equal(ricePriceRouting.requireVerifiedSearch, true);
 
   // Auto-routing: General agronomy tips use Gemini 4 Hydrogen deep reasoning without unnecessary search grounding
   const agroRouting = classifyQueryRoutingAndCostConfig('Kỹ thuật bón phân NPK cho lúa');
   assert.equal(agroRouting.queryScope, 'external');
   assert.equal(agroRouting.targetModel, 'gemini-4-hydrogen');
   assert.equal(agroRouting.enableExternalSearch, false);
+  assert.equal(agroRouting.requireVerifiedSearch, false);
 
   // Complex forecasting/reconciliation escalates to Gemini 4 Hydrogen
   const complexRouting = classifyQueryRoutingAndCostConfig(
@@ -1912,7 +1926,17 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
   assert.equal(complexRouting.targetModel, 'gemini-4-hydrogen');
   assert.equal(complexRouting.isComplexQuery, true);
 
-  // Explicit manual model choice is respected
+  // Safety guard: Even if user manually selects Gemma 4 26B for an external product lookup,
+  // it safely upgrades to Flash-Lite + Google Search so pesticide facts are never guessed
+  const gemmaExternalSafety = classifyQueryRoutingAndCostConfig(
+    'gap 3 của công ty đồng tháp sen hồng là gì',
+    'gemma-4-26b-a4b-it'
+  );
+  assert.equal(gemmaExternalSafety.targetModel, 'gemini-3.1-flash-lite');
+  assert.equal(gemmaExternalSafety.enableExternalSearch, true);
+  assert.equal(gemmaExternalSafety.requireVerifiedSearch, true);
+
+  // Explicit manual model choice for internal lookup is respected
   const userSelectedLite = classifyQueryRoutingAndCostConfig(
     'Kiểm tra tồn kho',
     'gemini-3.1-flash-lite'
@@ -1929,6 +1953,7 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
   assert.equal(shouldEnableExternalWebSearch('giá phân bón hiện nay thế nào'), true);
   assert.equal(shouldEnableExternalWebSearch('giá lúa om18 hôm nay bao nhiêu'), true);
   assert.equal(shouldEnableExternalWebSearch('sản phẩm Sen Bay của công ty thuốc bảo vệ thực vật GAP là sản phẩm gì?'), true);
+  assert.equal(shouldEnableExternalWebSearch('gap 3 của công ty đồng tháp sen hồng là gì'), true);
 
   const scope = evaluateStaffAccessScope(PRODUCTION_PRIMARY_ADMIN);
   assert.equal(scope.allowedTabs.includes('gemini_chat'), true);
@@ -1945,14 +1970,19 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
     paymentVouchers: INITIAL_PAYMENT_VOUCHERS,
   });
 
-  // System instructions: internal mode omits market benchmark block; external mode allows non-warehouse lookup
+  // System instructions: internal mode omits market benchmark block; external mode is compact and strictly anti-hallucination
   const internalSys = buildGeminiSystemInstruction(snapshot, 'internal');
   assert.ok(internalSys.includes('SỐ LIỆU BÁO CÁO THỜI GIAN THỰC CỦA KHO'));
   assert.equal(internalSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP'), false);
 
   const externalSys = buildGeminiSystemInstruction(snapshot, 'external');
-  assert.ok(externalSys.includes('TUYỆT ĐỐI KHÔNG'));
-  assert.ok(externalSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP'));
+  assert.ok(externalSys.includes('TUYỆT ĐỐI KHÔNG tự đoán'));
+  assert.equal(externalSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP'), false);
+
+  // Google AI Mode URL & unverified notice helpers
+  const aiModeUrl = buildGoogleAiModeUrl('gap 3 của công ty đồng tháp sen hồng là gì');
+  assert.ok(aiModeUrl.startsWith('https://www.google.com/search?udm=50&q='));
+  assert.ok(buildUnverifiedExternalLookupNotice('gap 3').includes('Kiểm chứng trên Google Chế độ AI'));
 
   // Helper checks: thought stripping & grounding source extraction
   const cleanedText = extractVisibleTextFromGeminiParts([

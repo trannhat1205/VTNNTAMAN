@@ -221,12 +221,16 @@ const server = http.createServer(async (req, res) => {
             const fallbackModels =
               requested === 'auto'
                 ? isExternal
-                  ? ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+                  ? ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
                   : ['gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
                 : requested === 'gemma-4-26b-a4b-it'
-                ? ['gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+                ? isExternal
+                  ? ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+                  : ['gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
                 : requested === 'gemini-3.1-flash-lite'
-                ? ['gemini-3.1-flash-lite', 'gemma-4-26b-a4b-it', 'gemini-4-hydrogen']
+                ? isExternal
+                  ? ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+                  : ['gemini-3.1-flash-lite', 'gemma-4-26b-a4b-it', 'gemini-4-hydrogen']
                 : ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
 
             const historyContents = Array.isArray(parsed.history)
@@ -244,7 +248,7 @@ const server = http.createServer(async (req, res) => {
                   : {}),
                 contents: [...historyContents, { role: 'user', parts: [{ text: message }] }],
                 generationConfig: {
-                  maxOutputTokens: candidateModel === 'gemini-4-hydrogen' ? 2048 : 1200,
+                  maxOutputTokens: candidateModel === 'gemini-4-hydrogen' ? 2048 : 1400,
                   thinkingConfig: {
                     thinkingLevel: candidateModel === 'gemini-4-hydrogen' ? 'LOW' : 'MINIMAL',
                   },
@@ -267,8 +271,9 @@ const server = http.createServer(async (req, res) => {
                 .map((p) => p.text)
                 .join('')
                 .trim();
-              if (text) {
+              if (text && !text.startsWith('google:search{') && !text.startsWith('call:google:search')) {
                 const chunks = json?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+                if (useSearch && chunks.length === 0) continue;
                 const sources = chunks
                   .map((c) => c?.web)
                   .filter((w) => w && w.uri)
@@ -288,6 +293,7 @@ const server = http.createServer(async (req, res) => {
                     modelUsed: candidateModel,
                     queryScope: isExternal ? 'external' : 'internal',
                     apiConnected: true,
+                    verifiedWebSearch: sources.length > 0,
                     keyState: 'connected',
                     sources,
                     usage: { totalTokens },
@@ -296,6 +302,22 @@ const server = http.createServer(async (req, res) => {
                 );
                 return;
               }
+            }
+            if (isExternal) {
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(
+                JSON.stringify({
+                  text: `### Chưa thể xác thực thông tin qua Google Search lúc này\n\nHệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Google Search cho câu hỏi: **"${message}"**. Vui lòng bấm **"Kiểm chứng trên Google Chế độ AI (0 token)"** bên dưới hoặc thử lại sau vài giây.`,
+                  modelUsed: fallbackModels[0],
+                  queryScope: 'external',
+                  apiConnected: true,
+                  verifiedWebSearch: false,
+                  sources: [],
+                  usage: { totalTokens: 0 },
+                  quota,
+                })
+              );
+              return;
             }
           }
         } catch {

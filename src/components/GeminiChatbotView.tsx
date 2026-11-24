@@ -4,6 +4,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  ExternalLink,
   History,
   MessageSquarePlus,
   Send,
@@ -26,6 +27,8 @@ import {
   AccountDailyAiQuota,
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
+  buildGoogleAiModeUrl,
+  buildUnverifiedExternalLookupNotice,
   buildWarehouseReportSnapshot,
   checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
@@ -63,6 +66,8 @@ export interface GeminiChatMessage {
   apiConnected?: boolean;
   usedWebSearch?: boolean;
   tokensUsed?: number;
+  sourceQuery?: string;
+  queryScope?: 'internal' | 'external';
 }
 
 export interface GeminiChatSession {
@@ -84,7 +89,7 @@ interface GeminiChatbotViewProps {
   paymentVouchers: CashPaymentVoucher[];
 }
 
-const CLIENT_AI_CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v2';
+const CLIENT_AI_CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v3';
 
 function loadAccountDailyQuotaFromStorage(
   quotaStorageKey: string,
@@ -586,6 +591,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     let tokensUsedCount = 0;
     let isCachedHit = false;
     let quotaBlockedByServer = false;
+    let unverifiedExternalBlocked = false;
     let serverReturnedQuota: AccountDailyAiQuota | null = null;
 
     // Rule 3: Check 6-hour client response cache for repeated popular/warehouse queries
@@ -718,14 +724,20 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
           for (const candidateModel of routing.fallbackModels) {
             const allowNativeSearch =
               routing.enableExternalSearch && candidateModel !== 'gemma-4-26b-a4b-it';
-            const searchAttempts = allowNativeSearch ? [true, false] : [false];
+            const searchAttempts = routing.requireVerifiedSearch
+              ? allowNativeSearch
+                ? [true]
+                : []
+              : allowNativeSearch
+              ? [true, false]
+              : [false];
 
             for (const useGoogleSearch of searchAttempts) {
               try {
                 const controller = new AbortController();
                 const timer = setTimeout(
                   () => controller.abort(),
-                  useGoogleSearch ? 22000 : 16000
+                  useGoogleSearch ? 25000 : 16000
                 );
 
                 const thinkingLevel =
@@ -737,7 +749,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 const maxOutputTokens =
                   candidateModel === 'gemini-4-hydrogen'
                     ? Math.max(2048, routing.maxOutputTokens)
-                    : Math.max(1200, routing.maxOutputTokens);
+                    : Math.max(1400, routing.maxOutputTokens);
 
                 const directResponse = await fetch(
                   `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${encodeURIComponent(
@@ -778,13 +790,23 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                   json.candidates?.[0]?.content?.parts
                 );
 
-                if (visibleText) {
-                  replyText = visibleText;
-                  usedModelId = candidateModel;
-                  apiConnectedFlag = true;
+                if (
+                  visibleText &&
+                  !visibleText.startsWith('google:search{') &&
+                  !visibleText.startsWith('call:google:search')
+                ) {
                   const groundingLinks = extractGroundingSourcesFromMetadata(
                     json.candidates?.[0]?.groundingMetadata
                   );
+
+                  // Reject ungrounded guesses when verified search is required; escalate to next model
+                  if (routing.requireVerifiedSearch && groundingLinks.length === 0) {
+                    continue;
+                  }
+
+                  replyText = visibleText;
+                  usedModelId = candidateModel;
+                  apiConnectedFlag = true;
                   if (groundingLinks.length > 0) {
                     replySources = groundingLinks;
                     usedWebSearchFlag = true;
@@ -803,17 +825,29 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         }
       }
 
-      // Step C: Emergency offline report fallback when both backend & direct API fail
+      // Step C: Safe unverified lookup notice OR emergency offline report fallback
       if (!replyText && !quotaBlockedByServer) {
-        if (replySources.length === 0 && shouldEnableExternalWebSearch(promptText)) {
-          replySources = await fetchBrowserWikipediaFallback(promptText);
+        if (routing.requireVerifiedSearch) {
+          replyText = buildUnverifiedExternalLookupNotice(promptText);
+          unverifiedExternalBlocked = true;
+          tokensUsedCount = 0;
+        } else {
+          if (replySources.length === 0 && shouldEnableExternalWebSearch(promptText)) {
+            replySources = await fetchBrowserWikipediaFallback(promptText);
+          }
+          replyText = generateSmartReportAnswer(promptText, reportSnapshot, replySources);
+          tokensUsedCount = 0;
         }
-        replyText = generateSmartReportAnswer(promptText, reportSnapshot, replySources);
-        tokensUsedCount = 0;
       }
 
-      // Save successful non-blocked result to 6-hour client response cache
-      if (replyText && !quotaBlockedByServer) {
+      // Save verified non-blocked result to 6-hour client response cache
+      const canCacheReply =
+        Boolean(replyText) &&
+        !quotaBlockedByServer &&
+        !unverifiedExternalBlocked &&
+        (!routing.requireVerifiedSearch || replySources.length > 0);
+
+      if (canCacheReply) {
         try {
           const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
           const parsedCache = rawCache ? JSON.parse(rawCache) : {};
@@ -876,6 +910,8 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       apiConnected: apiConnectedFlag,
       usedWebSearch: usedWebSearchFlag,
       tokensUsed: tokensUsedCount,
+      sourceQuery: promptText,
+      queryScope: routing.queryScope,
     };
 
     setSessions((prev) =>
@@ -1206,6 +1242,27 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                               </div>
                             </div>
                           )}
+                          {(msg.queryScope === 'external' ||
+                            msg.usedWebSearch ||
+                            (msg.sources && msg.sources.length > 0)) &&
+                            msg.sourceQuery && (
+                              <div className="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                                <a
+                                  href={buildGoogleAiModeUrl(msg.sourceQuery)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 hover:from-blue-100 hover:to-indigo-100 border border-indigo-200/80 text-[11px] font-bold text-indigo-800 transition"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                                  <span>Kiểm chứng trên Google Chế độ AI (0 token)</span>
+                                </a>
+                                {typeof msg.tokensUsed === 'number' && msg.tokensUsed > 0 && (
+                                  <span className="text-[10px] text-slate-400 font-medium">
+                                    Tiêu thụ: {msg.tokensUsed.toLocaleString('vi-VN')} token
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-400">
                             <span className="flex flex-wrap items-center gap-1.5">
                               <Bot className="w-3.5 h-3.5 text-indigo-500 shrink-0" />

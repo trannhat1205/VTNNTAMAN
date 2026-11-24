@@ -37,7 +37,7 @@ export const GEMINI_MODEL_OPTIONS: GeminiModelOption[] = [
     badge: 'Mặc định',
     tier: 'auto',
     description:
-      'Thích ứng với nhu cầu của bạn · Ưu tiên miễn phí cho kho riêng, tự bật tư duy chuyên sâu khi tra cứu bên ngoài',
+      'Thích ứng thông minh · Miễn phí cho kho riêng, Flash-Lite + Google Search tiết kiệm cho tra cứu bên ngoài, Hydrogen cho phân tích sâu',
   },
   {
     id: 'gemma-4-26b-a4b-it',
@@ -442,11 +442,16 @@ export function shouldEnableExternalWebSearch(rawQuery: string): boolean {
     'là sản phẩm gì',
     'là thuốc gì',
     'là phân gì',
+    'là gì',
     'của công ty',
     'công ty thuốc',
     'công ty bvtv',
     'bảo vệ thực vật',
     'hoạt chất',
+    'thành phần',
+    'công dụng',
+    'cách dùng',
+    'liều lượng',
     'hãng nào',
     'nhà sản xuất',
   ];
@@ -485,12 +490,12 @@ export function shouldEnableExternalWebSearch(rawQuery: string): boolean {
 }
 
 /**
- * Rule 1 & Rule 2 (Auto-routing, Free-first Internal Warehouse vs Deep External Reasoning):
- * - 'auto' (default):
- *   - Internal warehouse questions -> 'gemma-4-26b-a4b-it' (Free) with MINIMAL thinking.
- *   - Complex multi-period accounting/forecasting OR external product/market/agronomy questions
- *     -> 'gemini-4-hydrogen' (Deep reasoning) with LOW/MEDIUM thinking + Google Search when needed.
- * - Fallback chain ensures continuity if any single model is rate-limited.
+ * Rule 1 & Rule 2 (3-Tier Cost-Optimized Auto-Routing & Verified Grounding):
+ * - Tier 1 (Internal warehouse queries) -> 'gemma-4-26b-a4b-it' (Free) with MINIMAL thinking.
+ * - Tier 2 (External product/company/market lookup) -> 'gemini-3.1-flash-lite' + Google Search
+ *   (~70-80% fewer tokens than Hydrogen, with automatic fallback to 'gemini-4-hydrogen' + Search).
+ *   Sets requireVerifiedSearch: true so unverified guesses without Search grounding are rejected.
+ * - Tier 3 (Complex forecasting/reconciliation or deep agronomy) -> 'gemini-4-hydrogen'.
  */
 export interface GeminiCostRoutingDecision {
   selectedOption: GeminiModelOptionId;
@@ -501,6 +506,7 @@ export interface GeminiCostRoutingDecision {
   thinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM';
   maxOutputTokens: number;
   enableExternalSearch: boolean;
+  requireVerifiedSearch: boolean;
   routingReason: string;
 }
 
@@ -545,7 +551,24 @@ export function classifyQueryRoutingAndCostConfig(
         thinkingLevel: 'MINIMAL',
         maxOutputTokens: 1200,
         enableExternalSearch: false,
+        requireVerifiedSearch: false,
         routingReason: 'Ưu tiên mô hình miễn phí cho câu hỏi nội bộ kho riêng',
+      };
+    }
+
+    if (queryScope === 'external' && enableExternalSearch && !isComplexQuery) {
+      return {
+        selectedOption,
+        targetModel: 'gemini-3.1-flash-lite',
+        fallbackModels: ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
+        queryScope,
+        isComplexQuery,
+        thinkingLevel: 'MINIMAL',
+        maxOutputTokens: 1400,
+        enableExternalSearch: true,
+        requireVerifiedSearch: true,
+        routingReason:
+          'Tra cứu bên ngoài bằng Flash-Lite + Google Search (tiết kiệm token, xác thực nguồn)',
       };
     }
 
@@ -563,6 +586,7 @@ export function classifyQueryRoutingAndCostConfig(
         thinkingLevel: 'LOW',
         maxOutputTokens: 2048,
         enableExternalSearch: false,
+        requireVerifiedSearch: false,
         routingReason: 'Phân tích/dự báo chuyên sâu dữ liệu kho',
       };
     }
@@ -576,12 +600,31 @@ export function classifyQueryRoutingAndCostConfig(
       thinkingLevel: isComplexQuery ? 'MEDIUM' : 'LOW',
       maxOutputTokens: isComplexQuery ? 2800 : 2048,
       enableExternalSearch,
+      requireVerifiedSearch: enableExternalSearch,
       routingReason:
-        'Câu hỏi thông tin bên ngoài trang — tự động bật tư duy chuyên sâu',
+        'Câu hỏi chuyên sâu bên ngoài — bật Gemini 4 Hydrogen tư duy sâu',
     };
   }
 
   if (selectedOption === 'gemma-4-26b-a4b-it') {
+    if (enableExternalSearch) {
+      // Safety guard: Gemma 4 does not support Google Search Grounding; escalate safely
+      // to Flash-Lite + Google Search so pesticide/product facts are never guessed.
+      return {
+        selectedOption,
+        targetModel: 'gemini-3.1-flash-lite',
+        fallbackModels: ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'],
+        queryScope,
+        isComplexQuery,
+        thinkingLevel: 'MINIMAL',
+        maxOutputTokens: 1400,
+        enableExternalSearch: true,
+        requireVerifiedSearch: true,
+        routingReason:
+          'Tự động chuyển sang Flash-Lite + Google Search để xác thực sản phẩm bên ngoài',
+      };
+    }
+
     return {
       selectedOption,
       targetModel: 'gemma-4-26b-a4b-it',
@@ -595,6 +638,7 @@ export function classifyQueryRoutingAndCostConfig(
       thinkingLevel: 'MINIMAL',
       maxOutputTokens: 1200,
       enableExternalSearch: false,
+      requireVerifiedSearch: false,
       routingReason: 'Mô hình miễn phí (thủ công)',
     };
   }
@@ -603,16 +647,15 @@ export function classifyQueryRoutingAndCostConfig(
     return {
       selectedOption,
       targetModel: 'gemini-3.1-flash-lite',
-      fallbackModels: [
-        'gemini-3.1-flash-lite',
-        'gemma-4-26b-a4b-it',
-        'gemini-4-hydrogen',
-      ],
+      fallbackModels: enableExternalSearch
+        ? ['gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+        : ['gemini-3.1-flash-lite', 'gemma-4-26b-a4b-it', 'gemini-4-hydrogen'],
       queryScope,
       isComplexQuery,
       thinkingLevel: 'MINIMAL',
       maxOutputTokens: 1400,
       enableExternalSearch,
+      requireVerifiedSearch: enableExternalSearch,
       routingReason: 'Gemini 3.1 Flash-Lite cơ bản (thủ công)',
     };
   }
@@ -626,6 +669,7 @@ export function classifyQueryRoutingAndCostConfig(
     thinkingLevel: isComplexQuery ? 'MEDIUM' : 'LOW',
     maxOutputTokens: isComplexQuery ? 2800 : 2048,
     enableExternalSearch,
+    requireVerifiedSearch: enableExternalSearch,
     routingReason: 'Gemini 4 Hydrogen chuyên sâu (thủ công)',
   };
 }
@@ -1074,25 +1118,21 @@ QUY TẮC BẢO MẬT:
   if (mode === 'external') {
     const briefCatalogNames =
       snapshot.catalogProducts.length === 0
-        ? 'Kho hiện chưa có danh mục sản phẩm.'
+        ? 'Kho hiện chưa có danh mục.'
         : snapshot.catalogProducts
-            .slice(0, 25)
-            .map((p) => `${p.name} (tồn ${p.stock} ${p.unit}, bán ${formatVND(p.sellPrice)})`)
+            .slice(0, 15)
+            .map((p) => `${p.name} (tồn ${p.stock} ${p.unit})`)
             .join('; ');
 
-    return `Bạn là **Trợ lý A.I — VTNN Tâm An**, chuyên gia tư vấn nông nghiệp, thuốc bảo vệ thực vật, phân bón và thị trường vật tư nông nghiệp Việt Nam (Ngày hiện tại: **${snapshot.generatedAt}**).
+    return `Bạn là **Trợ lý A.I — VTNN Tâm An** (Ngày: **${snapshot.generatedAt}**).
 
-NHIỆM VỤ KHI NGƯỜI DÙNG HỎI THÔNG TIN BÊN NGOÀI TRANG:
-- Dùng kiến thức chuyên sâu và kết quả tìm kiếm Google Search (nếu có) để trả lời **TRỰC TIẾP, CHÍNH XÁC VÀ ĐẦY ĐỦ** về sản phẩm BVTV, hoạt chất, công ty sản xuất/phân phối, giá phân bón/lúa gạo/nông sản thị trường, kỹ thuật canh tác, sâu bệnh hoặc quy định hộ kinh doanh.
-- **TUYỆT ĐỐI KHÔNG** từ chối trả lời chỉ vì sản phẩm đó không có trong kho nội bộ, và **KHÔNG** đổ ra báo cáo doanh thu/công nợ 0đ của kho khi người dùng không hỏi số liệu kho.
-- Nếu sản phẩm hoặc nhóm hàng tương đương hiện có bán trong kho **${snapshot.warehouseLabel}**, bạn có thể ghi chú ngắn gọn 1 dòng ở cuối để người dùng tham khảo.
+QUY TẮC BẮT BUỘC KHI TRA CỨU SẢN PHẨM BVTV / PHÂN BÓN / THÔNG TIN BÊN NGOÀI:
+- BẮT BUỘC dùng công cụ Google Search để kiểm chứng tên sản phẩm, công ty, phân loại chính xác (thuốc trừ bệnh hay trừ sâu/trừ cỏ), hoạt chất và hướng dẫn sử dụng thực tế trước khi trả lời.
+- TUYỆT ĐỐI KHÔNG tự đoán hoặc bịa nhóm hoạt chất (như Neonicotinoid, Pyrethroid, Avermectin...) nếu kết quả tìm kiếm không xác nhận. Nếu tìm kiếm không có thông tin chắc chắn, phải nói rõ là chưa tìm thấy nguồn chính thức và đề nghị xem nhãn chai hoặc bấm nút "Kiểm chứng trên Google Chế độ AI".
+- Không từ chối trả lời chỉ vì sản phẩm chưa có trong kho, và KHÔNG đổ ra báo cáo doanh thu/công nợ 0đ của kho.
+- Trả lời ngắn gọn, súc tích, chính xác bằng tiếng Việt (Markdown). Nếu kho **${snapshot.warehouseLabel}** có bán mặt hàng trùng tên thì ghi chú 1 dòng ở cuối.
 
-Danh mục tóm tắt hiện có tại kho ${snapshot.warehouseLabel} (chỉ để tham khảo thêm nếu liên quan): ${briefCatalogNames}
-
-${AGRICULTURAL_MARKET_BENCHMARK_CONTEXT}
-
-QUY TẮC TRÌNH BÀY:
-- Trả lời bằng tiếng Việt rõ ràng, chuyên nghiệp, có cấu trúc Markdown dễ đọc.`;
+Danh mục tóm tắt tại kho ${snapshot.warehouseLabel}: ${briefCatalogNames}`;
   }
 
   return `Bạn là **Trợ lý A.I — VTNN Tâm An**, trợ lý trí tuệ nhân tạo tích hợp trực tiếp trong hệ thống Quản lý Bán hàng, Kho & Công nợ Vật tư Nông nghiệp Tâm An.
@@ -1112,6 +1152,21 @@ ${internalWarehouseBlock}
 QUY TẮC TRÌNH BÀY:
 - Trả lời bằng tiếng Việt rõ ràng, chuyên nghiệp, sử dụng định dạng Markdown (in đậm số tiền quan trọng, dùng danh sách gạch đầu dòng để dễ đọc).
 - Tuyệt đối chỉ sử dụng dữ liệu của kho **${snapshot.warehouseLabel}** khi báo cáo nội bộ, đảm bảo tính bảo mật và độc lập dữ liệu của kho.`;
+}
+
+export function buildGoogleAiModeUrl(query: string): string {
+  const cleanQuery = (query || '').normalize('NFC').trim().slice(0, 220);
+  return `https://www.google.com/search?udm=50&q=${encodeURIComponent(cleanQuery)}`;
+}
+
+export function buildUnverifiedExternalLookupNotice(query: string): string {
+  const cleanQuery = (query || '').normalize('NFC').trim();
+  return `### Chưa thể xác thực thông tin qua Google Search lúc này
+
+Hệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Google Search cho câu hỏi: **"${cleanQuery}"**.
+
+- Để đảm bảo an toàn tuyệt đối (không tự suy đoán tên hoạt chất hoặc nhầm lẫn giữa thuốc trừ bệnh / thuốc trừ sâu), Trợ lý A.I tạm dừng việc tự trả lời khi chưa có nguồn xác thực.
+- Bạn hãy bấm nút **"Kiểm chứng trên Google Chế độ AI (0 token)"** ngay bên dưới để xem trực tiếp kết quả chính xác nhất từ Google, hoặc kiểm tra nhãn bao bì sản phẩm và thử hỏi lại sau vài giây.`;
 }
 
 export interface AccountDailyAiQuota {

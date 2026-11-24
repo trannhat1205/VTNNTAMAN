@@ -6,6 +6,7 @@ import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
   AccountDailyAiQuota,
   AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
+  buildUnverifiedExternalLookupNotice,
   checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
   DEFAULT_GEMINI_MODEL,
@@ -425,6 +426,7 @@ async function startServer() {
       const effectiveSystemInstruction = [
         baseSys,
         routing.queryScope === 'internal' ||
+        routing.queryScope === 'external' ||
         baseSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP')
           ? ''
           : AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
@@ -441,7 +443,13 @@ async function startServer() {
         for (const candidateModel of routing.fallbackModels) {
           const allowNativeSearch =
             routing.enableExternalSearch && candidateModel !== 'gemma-4-26b-a4b-it';
-          const searchAttempts = allowNativeSearch ? [true, false] : [false];
+          const searchAttempts = routing.requireVerifiedSearch
+            ? allowNativeSearch
+              ? [true]
+              : []
+            : allowNativeSearch
+            ? [true, false]
+            : [false];
 
           for (const useGoogleSearch of searchAttempts) {
             try {
@@ -455,7 +463,7 @@ async function startServer() {
               const maxOutputTokens =
                 candidateModel === 'gemini-4-hydrogen'
                   ? Math.max(2048, routing.maxOutputTokens)
-                  : Math.max(1200, routing.maxOutputTokens);
+                  : Math.max(1400, routing.maxOutputTokens);
 
               const response = await withTimeout(
                 ai.models.generateContent({
@@ -474,7 +482,7 @@ async function startServer() {
                     ...(useGoogleSearch ? { tools: [{ googleSearch: {} }] } : {}),
                   },
                 }),
-                useGoogleSearch ? 22000 : 15000
+                useGoogleSearch ? 25000 : 15000
               );
 
               const visiblePartsText = extractVisibleTextFromGeminiParts(
@@ -492,6 +500,12 @@ async function startServer() {
                 const groundingSources = extractGroundingSourcesFromMetadata(
                   response.candidates?.[0]?.groundingMetadata
                 );
+
+                // Reject ungrounded guesses when verified search is required; escalate to next model
+                if (routing.requireVerifiedSearch && groundingSources.length === 0) {
+                  continue;
+                }
+
                 const combinedSources: GroundingSourceLink[] =
                   groundingSources.length > 0
                     ? groundingSources
@@ -532,6 +546,7 @@ async function startServer() {
                   queryScope: routing.queryScope,
                   routingReason: routing.routingReason,
                   apiConnected: true,
+                  verifiedWebSearch: groundingSources.length > 0,
                   keyState: 'connected' as GeminiKeyStatusState,
                   maskedKey: maskApiKey(apiKey),
                   sources: combinedSources,
@@ -541,10 +556,25 @@ async function startServer() {
                 return;
               }
             } catch {
-              // try without search or next model/key
+              // try next model or candidate key
             }
           }
         }
+      }
+
+      if (routing.requireVerifiedSearch) {
+        res.status(200).json({
+          text: buildUnverifiedExternalLookupNotice(normalizedMessage),
+          modelUsed: routing.targetModel,
+          queryScope: routing.queryScope,
+          routingReason: routing.routingReason,
+          apiConnected: true,
+          verifiedWebSearch: false,
+          sources: [],
+          usage: { totalTokens: 0 },
+          quota: quotaCheck.normalizedQuota,
+        });
+        return;
       }
 
       const fallbackSources = routing.enableExternalSearch
