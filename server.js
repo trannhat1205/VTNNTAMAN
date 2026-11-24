@@ -144,12 +144,17 @@ const server = http.createServer(async (req, res) => {
               apiKey,
               httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
             });
+            const targetModel = parsed.model || 'gemini-3.1-flash-lite';
+            const thinkingLevel =
+              targetModel === 'gemini-3.1-flash-lite'
+                ? ThinkingLevel.MINIMAL
+                : ThinkingLevel.LOW;
             const chat = ai.chats.create({
-              model: parsed.model || 'gemini-4-hydrogen',
+              model: targetModel,
               config: {
                 ...(parsed.systemInstruction ? { systemInstruction: parsed.systemInstruction } : {}),
-                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                tools: [{ googleSearch: {} }],
+                thinkingConfig: { thinkingLevel },
+                maxOutputTokens: 1000,
               },
             });
             const reply = await chat.sendMessage({ message });
@@ -158,7 +163,7 @@ const server = http.createServer(async (req, res) => {
               res.end(
                 JSON.stringify({
                   text: reply.text.trim(),
-                  modelUsed: parsed.model || 'gemini-4-hydrogen',
+                  modelUsed: targetModel,
                   apiConnected: true,
                   keyState: 'connected',
                 })

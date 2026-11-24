@@ -23,12 +23,16 @@ import {
   SupplierProfile,
 } from '../types';
 import {
+  buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildWarehouseReportSnapshot,
+  classifyQueryRoutingAndCostConfig,
+  DEFAULT_GEMINI_MODEL,
   GEMINI_MODEL_OPTIONS,
+  GEMINI_QUERY_CACHE_TTL_MS,
   GeminiModelOptionId,
   generateSmartReportAnswer,
-  isPureInternalWarehouseQuery,
+  shouldEnableExternalWebSearch,
 } from '../utils/geminiReportAssistant';
 import { formatVND } from '../utils/businessLogic';
 
@@ -306,7 +310,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   });
 
   const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0]?.id || '');
-  const [selectedModel, setSelectedModel] = useState<GeminiModelOptionId>('gemini-4-hydrogen');
+  const [selectedModel, setSelectedModel] = useState<GeminiModelOptionId>(DEFAULT_GEMINI_MODEL);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [inputPrompt, setInputPrompt] = useState('');
@@ -455,10 +459,12 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       }),
     };
 
-    const previousHistory = activeSession.messages.map((m) => ({
-      role: m.role,
-      text: m.text.normalize('NFC'),
-    }));
+    const previousHistory = activeSession.messages
+      .slice(-8)
+      .map((m) => ({
+        role: m.role,
+        text: m.text.normalize('NFC'),
+      }));
 
     const updatedTitle =
       activeSession.messages.length === 0
@@ -485,72 +491,130 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     }
     setIsGenerating(true);
 
+    const routing = classifyQueryRoutingAndCostConfig(promptText, selectedModel);
+    const cacheKey = buildGeminiQueryCacheKey(promptText, reportSnapshot, routing.targetModel);
+    const CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v1';
+
     let replyText = '';
-    let usedModelId: GeminiModelOptionId = selectedModel;
+    let usedModelId: GeminiModelOptionId = routing.targetModel;
     let replySources: GeminiGroundingSource[] = [];
     let apiConnectedFlag = false;
 
-    const payloadBody = JSON.stringify({
-      message: promptText,
-      history: previousHistory,
-      model: selectedModel,
-      systemInstruction,
-    });
-
-    const isLocalOrCloudRun =
-      typeof window !== 'undefined' &&
-      (window.location.hostname === 'localhost' ||
-        window.location.hostname === '127.0.0.1' ||
-        window.location.hostname.endsWith('.run.app'));
-
-    const candidateEndpoints = isLocalOrCloudRun
-      ? ['/api/gemini/chat']
-      : ['/api/gemini/chat', ...REMOTE_GEMINI_API_FALLBACKS];
-
-    for (const endpoint of candidateEndpoints) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 22000);
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: payloadBody,
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
-
-        const contentType = response.headers.get('content-type') || '';
-        if (response.ok && contentType.includes('application/json')) {
-          const data = (await response.json()) as {
-            text?: string;
-            modelUsed?: GeminiModelOptionId;
+    // Rule 3: Check 6-hour client response cache for repeated popular/warehouse queries
+    try {
+      const rawCache = localStorage.getItem(CACHE_STORAGE_KEY);
+      if (rawCache) {
+        const parsedCache = JSON.parse(rawCache) as Record<
+          string,
+          {
+            text: string;
+            modelUsed: GeminiModelOptionId;
             sources?: GeminiGroundingSource[];
             apiConnected?: boolean;
-          };
-          if (typeof data.apiConnected === 'boolean') {
-            apiConnectedFlag = data.apiConnected;
+            cachedAt: number;
           }
-          if (Array.isArray(data.sources) && data.sources.length > 0) {
-            replySources = data.sources;
-          }
-          if (data.text && data.text.trim()) {
-            replyText = data.text.trim();
-            if (data.modelUsed) {
-              usedModelId = data.modelUsed;
-            }
-            break;
-          }
+        >;
+        const cachedEntry = parsedCache[cacheKey];
+        if (
+          cachedEntry &&
+          cachedEntry.text &&
+          Date.now() - cachedEntry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
+        ) {
+          replyText = cachedEntry.text;
+          usedModelId = cachedEntry.modelUsed || routing.targetModel;
+          replySources = Array.isArray(cachedEntry.sources) ? cachedEntry.sources : [];
+          apiConnectedFlag = Boolean(cachedEntry.apiConnected);
         }
-      } catch {
-        // Try next candidate endpoint or client-side fallback
       }
+    } catch {
+      // ignore localStorage read errors
     }
 
     if (!replyText) {
-      if (replySources.length === 0 && !isPureInternalWarehouseQuery(promptText)) {
-        replySources = await fetchBrowserWikipediaFallback(promptText);
+      const payloadBody = JSON.stringify({
+        message: promptText,
+        history: previousHistory,
+        model: routing.targetModel,
+        systemInstruction,
+      });
+
+      const isLocalOrCloudRun =
+        typeof window !== 'undefined' &&
+        (window.location.hostname === 'localhost' ||
+          window.location.hostname === '127.0.0.1' ||
+          window.location.hostname.endsWith('.run.app'));
+
+      const candidateEndpoints = isLocalOrCloudRun
+        ? ['/api/gemini/chat']
+        : ['/api/gemini/chat', ...REMOTE_GEMINI_API_FALLBACKS];
+
+      for (const endpoint of candidateEndpoints) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 22000);
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payloadBody,
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
+
+          const contentType = response.headers.get('content-type') || '';
+          if (response.ok && contentType.includes('application/json')) {
+            const data = (await response.json()) as {
+              text?: string;
+              modelUsed?: GeminiModelOptionId;
+              sources?: GeminiGroundingSource[];
+              apiConnected?: boolean;
+            };
+            if (typeof data.apiConnected === 'boolean') {
+              apiConnectedFlag = data.apiConnected;
+            }
+            if (Array.isArray(data.sources) && data.sources.length > 0) {
+              replySources = data.sources;
+            }
+            if (data.text && data.text.trim()) {
+              replyText = data.text.trim();
+              if (data.modelUsed) {
+                usedModelId = data.modelUsed;
+              }
+              break;
+            }
+          }
+        } catch {
+          // Try next candidate endpoint or client-side fallback
+        }
       }
-      replyText = generateSmartReportAnswer(promptText, reportSnapshot, replySources);
+
+      if (!replyText) {
+        if (replySources.length === 0 && shouldEnableExternalWebSearch(promptText)) {
+          replySources = await fetchBrowserWikipediaFallback(promptText);
+        }
+        replyText = generateSmartReportAnswer(promptText, reportSnapshot, replySources);
+      }
+
+      // Save result to 6-hour client response cache (prune old entries > 40)
+      try {
+        const rawCache = localStorage.getItem(CACHE_STORAGE_KEY);
+        const parsedCache = rawCache ? JSON.parse(rawCache) : {};
+        const now = Date.now();
+        const freshEntries = Object.entries(parsedCache).filter(([, val]) => {
+          const entry = val as { cachedAt?: number };
+          return entry && typeof entry.cachedAt === 'number' && now - entry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS;
+        });
+        const pruned = Object.fromEntries(freshEntries.slice(-40));
+        pruned[cacheKey] = {
+          text: replyText,
+          modelUsed: usedModelId,
+          sources: replySources,
+          apiConnected: apiConnectedFlag,
+          cachedAt: now,
+        };
+        localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(pruned));
+      } catch {
+        // ignore storage quota errors
+      }
     }
 
     const modelMessage: GeminiChatMessage = {

@@ -62,10 +62,14 @@ import {
   sanitizeStaffListForStorage,
 } from '../services/localPersistence';
 import {
+  buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildWarehouseReportSnapshot,
+  classifyQueryRoutingAndCostConfig,
+  DEFAULT_GEMINI_MODEL,
   GEMINI_MODEL_OPTIONS,
   generateSmartReportAnswer,
+  shouldEnableExternalWebSearch,
 } from './geminiReportAssistant';
 import {
   CustomerProfile,
@@ -1842,10 +1846,44 @@ test('Production hardening: sequential voucher codes, Vietnam dates, SHA-256 pas
   assert.equal(sanitized[0].password, '');
 });
 
-test('Gemini Report Assistant: builds accurate warehouse report snapshot, system instruction, and answers in-app and external queries', () => {
+test('Gemini Report Assistant: builds accurate warehouse report snapshot, system instruction, cost-optimized model routing, and answers in-app and external queries', () => {
   assert.equal(GEMINI_MODEL_OPTIONS.length, 4);
-  assert.equal(GEMINI_MODEL_OPTIONS[0].id, 'gemini-4-hydrogen');
-  assert.equal(GEMINI_MODEL_OPTIONS[1].id, 'gemini-3.1-flash-lite');
+  assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.1-flash-lite');
+  assert.equal(GEMINI_MODEL_OPTIONS[0].id, 'gemini-3.1-flash-lite');
+  assert.equal(GEMINI_MODEL_OPTIONS[0].badge, 'Cơ bản');
+  assert.equal(GEMINI_MODEL_OPTIONS[1].id, 'gemini-4-hydrogen');
+
+  // Rule 1 & Rule 2: Simple warehouse / price queries default to gemini-3.1-flash-lite with MINIMAL thinking & 900 maxOutputTokens
+  const simpleRouting = classifyQueryRoutingAndCostConfig('Tóm tắt báo cáo doanh thu kho');
+  assert.equal(simpleRouting.targetModel, 'gemini-3.1-flash-lite');
+  assert.equal(simpleRouting.thinkingLevel, 'MINIMAL');
+  assert.equal(simpleRouting.maxOutputTokens, 900);
+  assert.equal(simpleRouting.isComplexQuery, false);
+  assert.equal(simpleRouting.enableExternalSearch, false);
+
+  // Complex reconciliation/forecasting escalates to gemini-4-hydrogen with 1400 maxOutputTokens
+  const complexRouting = classifyQueryRoutingAndCostConfig(
+    'Phân tích sâu và dự báo dòng tiền, đối soát công nợ chiến lược 6 tháng tới'
+  );
+  assert.equal(complexRouting.targetModel, 'gemini-4-hydrogen');
+  assert.equal(complexRouting.thinkingLevel, 'LOW');
+  assert.equal(complexRouting.maxOutputTokens, 1400);
+  assert.equal(complexRouting.isComplexQuery, true);
+
+  // Explicit user selection of larger model is respected
+  const userSelectedNeon = classifyQueryRoutingAndCostConfig(
+    'Kiểm tra tồn kho',
+    'gemini-4-neon'
+  );
+  assert.equal(userSelectedNeon.targetModel, 'gemini-4-neon');
+  assert.equal(userSelectedNeon.thinkingLevel, 'LOW');
+
+  // Rule 3: External web search only enabled when query genuinely requires fresh external info
+  assert.equal(shouldEnableExternalWebSearch('Tóm tắt báo cáo doanh thu kho hiện tại'), false);
+  assert.equal(shouldEnableExternalWebSearch('Danh sách khách hàng đang nợ quá hạn'), false);
+  assert.equal(shouldEnableExternalWebSearch('Kỹ thuật bón phân NPK cho lúa'), false);
+  assert.equal(shouldEnableExternalWebSearch('giá phân bón hiện nay thế nào'), true);
+  assert.equal(shouldEnableExternalWebSearch('giá lúa om18 hôm nay bao nhiêu'), true);
 
   const scope = evaluateStaffAccessScope(PRODUCTION_PRIMARY_ADMIN);
   assert.equal(scope.allowedTabs.includes('gemini_chat'), true);
@@ -1861,6 +1899,15 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, system
     receiptVouchers: INITIAL_RECEIPT_VOUCHERS,
     paymentVouchers: INITIAL_PAYMENT_VOUCHERS,
   });
+
+  // Rule 3: Cache key differentiates internal warehouse state vs external market queries
+  const internalKey1 = buildGeminiQueryCacheKey('Tóm tắt báo cáo doanh thu', snapshot);
+  const internalKey2 = buildGeminiQueryCacheKey('  Tóm tắt   báo cáo doanh thu ', snapshot);
+  assert.equal(internalKey1, internalKey2);
+  assert.ok(internalKey1.startsWith('vtnn_ai_cache_int_'));
+
+  const extKey = buildGeminiQueryCacheKey('giá phân bón hiện nay thế nào', snapshot);
+  assert.ok(extKey.startsWith('vtnn_ai_cache_ext_'));
 
   assert.equal(snapshot.warehouseLabel, 'Tâm An Mỹ Ngãi');
   assert.equal(snapshot.productsCount, INITIAL_PRODUCTS.length);
@@ -1907,4 +1954,5 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, system
   const agroAns = generateSmartReportAnswer('Kỹ thuật bón phân cho lúa và sầu riêng', snapshot);
   assert.ok(agroAns.includes('Tư vấn Kỹ thuật Nông nghiệp'));
 });
+
 

@@ -11,10 +11,12 @@ import {
 import { formatVND } from './businessLogic';
 
 export type GeminiModelOptionId =
-  | 'gemini-4-hydrogen'
   | 'gemini-3.1-flash-lite'
+  | 'gemini-4-hydrogen'
   | 'gemini-4-neon'
   | 'gemini-4-carbon';
+
+export const DEFAULT_GEMINI_MODEL: GeminiModelOptionId = 'gemini-3.1-flash-lite';
 
 export interface GeminiModelOption {
   id: GeminiModelOptionId;
@@ -25,16 +27,16 @@ export interface GeminiModelOption {
 
 export const GEMINI_MODEL_OPTIONS: GeminiModelOption[] = [
   {
+    id: 'gemini-3.1-flash-lite',
+    label: 'Gemini 3.1 Flash-Lite',
+    badge: 'Cơ bản',
+    description: 'Tra cứu dữ liệu kho, tồn kho, công nợ, giá bán cơ bản & tốc độ cao',
+  },
+  {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen',
     badge: 'Tiêu chuẩn',
     description: 'Phân tích báo cáo kho, công nợ, doanh thu & trả lời đa lĩnh vực',
-  },
-  {
-    id: 'gemini-3.1-flash-lite',
-    label: 'Gemini 3.1 Flash-Lite',
-    badge: 'Tốc độ cao',
-    description: 'Phản hồi tức thì các câu hỏi tra cứu số liệu nhanh',
   },
   {
     id: 'gemini-4-neon',
@@ -229,6 +231,148 @@ export function isPureInternalWarehouseQuery(rawQuery: string): boolean {
     'phiếu chi',
   ];
   return hasAnyKeyword(q, internalIndicators);
+}
+
+/**
+ * Rule 3 (Selective External Web Search):
+ * Only enable external web search when the query genuinely needs fresh external information
+ * (e.g. today's market prices for rice/fertilizer/produce, weather, breaking news, new regulations).
+ */
+export function shouldEnableExternalWebSearch(rawQuery: string): boolean {
+  if (isPureInternalWarehouseQuery(rawQuery)) {
+    return false;
+  }
+  const q = normalizeVietnameseQuery(rawQuery);
+  const freshExternalKeywords = [
+    'giá phân',
+    'phân bón hiện nay',
+    'phân bón hôm nay',
+    'giá đạm',
+    'giá urê',
+    'giá ure',
+    'giá dap',
+    'giá kali',
+    'giá npk',
+    'giá lúa',
+    'giá gạo',
+    'lúa hôm nay',
+    'lúa hiện nay',
+    'om18',
+    'om 18',
+    'đài thơm',
+    'ir504',
+    'om5451',
+    'st24',
+    'st25',
+    'nàng hoa',
+    'giá thuốc',
+    'giá sầu riêng',
+    'sầu riêng hôm nay',
+    'giá mít',
+    'giá xoài',
+    'giá cà phê',
+    'giá tiêu',
+    'giá ớt',
+    'giá nông sản',
+    'thị trường hôm nay',
+    'thị trường hiện nay',
+    'thời tiết',
+    'tin tức',
+    'quy định mới',
+    'nghị định mới',
+    'mới nhất',
+  ];
+  return hasAnyKeyword(q, freshExternalKeywords);
+}
+
+/**
+ * Rule 1 & Rule 2 (Difficulty-based Model Routing, Thinking Tokens & Output Length Control):
+ * - Simple questions / warehouse lookup / inventory / debt / basic prices -> Gemini 3.1 Flash-Lite
+ *   with MINIMAL thinking and compact maxOutputTokens (900).
+ * - Complex reconciliation, forecasting, or deep analysis -> routes to larger model only when
+ *   the user explicitly selects a larger model or when the query exceeds the complexity threshold.
+ */
+export interface GeminiCostRoutingDecision {
+  targetModel: GeminiModelOptionId;
+  isComplexQuery: boolean;
+  thinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM';
+  maxOutputTokens: number;
+  enableExternalSearch: boolean;
+}
+
+export function classifyQueryRoutingAndCostConfig(
+  rawQuery: string,
+  userSelectedModel: GeminiModelOptionId = DEFAULT_GEMINI_MODEL
+): GeminiCostRoutingDecision {
+  const q = normalizeVietnameseQuery(rawQuery);
+  const complexKeywords = [
+    'đối soát phức tạp',
+    'phân tích chuyên sâu',
+    'phân tích sâu',
+    'dự báo',
+    'chiến lược kinh doanh',
+    'hoạch định',
+    'quyết toán thuế',
+    'báo cáo tài chính năm',
+    'so sánh đa kỳ',
+    'tối ưu dòng tiền dài hạn',
+  ];
+  const isComplexQuery =
+    hasAnyKeyword(q, complexKeywords) || rawQuery.trim().length > 260;
+
+  // If user kept the default model (gemini-3.1-flash-lite), only escalate to gemini-4-hydrogen
+  // when the query crosses the complex analysis/forecasting threshold.
+  // If user explicitly picked a larger model in the dropdown, respect their choice.
+  let targetModel: GeminiModelOptionId = userSelectedModel || DEFAULT_GEMINI_MODEL;
+  if (targetModel === 'gemini-3.1-flash-lite' && isComplexQuery) {
+    targetModel = 'gemini-4-hydrogen';
+  }
+
+  let thinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM' = 'MINIMAL';
+  if (targetModel === 'gemini-3.1-flash-lite') {
+    thinkingLevel = 'MINIMAL';
+  } else if (
+    isComplexQuery &&
+    (targetModel === 'gemini-4-neon' || targetModel === 'gemini-4-carbon')
+  ) {
+    thinkingLevel = 'MEDIUM';
+  } else {
+    thinkingLevel = 'LOW';
+  }
+
+  const maxOutputTokens = isComplexQuery ? 1400 : 900;
+  const enableExternalSearch = shouldEnableExternalWebSearch(rawQuery);
+
+  return {
+    targetModel,
+    isComplexQuery,
+    thinkingLevel,
+    maxOutputTokens,
+    enableExternalSearch,
+  };
+}
+
+/**
+ * Rule 3 (Result Caching for Popular External & Internal Queries):
+ * 6-hour cache TTL so repeated questions about market prices or unchanged warehouse reports
+ * are served immediately from cache without burning extra API or search grounding calls.
+ */
+export const GEMINI_QUERY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+export function buildGeminiQueryCacheKey(
+  rawQuery: string,
+  snapshot: WarehouseReportSnapshot,
+  modelId: GeminiModelOptionId = DEFAULT_GEMINI_MODEL
+): string {
+  const norm = normalizeVietnameseQuery(rawQuery).nfc;
+  const isInternal = isPureInternalWarehouseQuery(rawQuery);
+  if (isInternal) {
+    const whSig = `${snapshot.warehouseLabel}_${snapshot.salesCount}_${snapshot.totalSalesRevenue}_${snapshot.totalCustomerDebt}_${snapshot.totalSupplierDebt}_${snapshot.productsCount}_${snapshot.totalCashIn}_${snapshot.totalCashOut}`;
+    return `vtnn_ai_cache_int_${modelId}_${whSig}_${norm}`;
+  }
+  // External market/agronomy queries share a date-bucketed cache key (valid for 6 hours)
+  const dayBucket = snapshot.generatedAt || new Date().toISOString().slice(0, 10);
+  return `vtnn_ai_cache_ext_${modelId}_${dayBucket}_${norm}`;
 }
 
 export function buildWarehouseReportSnapshot(params: {

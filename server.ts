@@ -5,7 +5,12 @@ import express from 'express';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
   AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
+  classifyQueryRoutingAndCostConfig,
+  DEFAULT_GEMINI_MODEL,
+  GEMINI_QUERY_CACHE_TTL_MS,
+  GeminiModelOptionId,
   isPureInternalWarehouseQuery,
+  shouldEnableExternalWebSearch,
 } from './src/utils/geminiReportAssistant';
 
 const PORT = 3000;
@@ -15,12 +20,28 @@ const BASE_DIR = import.meta.dirname;
 dotenv.config({ path: path.join(BASE_DIR, '.env.local') });
 dotenv.config({ path: path.join(BASE_DIR, '.env') });
 
-const ALLOWED_MODELS = new Set([
-  'gemini-4-hydrogen',
+const ALLOWED_MODELS = new Set<GeminiModelOptionId>([
   'gemini-3.1-flash-lite',
+  'gemini-4-hydrogen',
   'gemini-4-neon',
   'gemini-4-carbon',
 ]);
+
+// Rule 3: 6-hour in-memory caches for external web search results and popular chat responses
+const SERVER_SEARCH_CACHE = new Map<
+  string,
+  { sources: GroundingSourceLink[]; cachedAt: number }
+>();
+
+const SERVER_RESPONSE_CACHE = new Map<
+  string,
+  {
+    text: string;
+    modelUsed: string;
+    sources: GroundingSourceLink[];
+    cachedAt: number;
+  }
+>();
 
 interface ChatHistoryTurn {
   role: 'user' | 'model';
@@ -155,6 +176,28 @@ async function fetchVietnameseWikipediaSearch(
   }
 }
 
+async function getCachedExternalSources(query: string): Promise<GroundingSourceLink[]> {
+  if (!shouldEnableExternalWebSearch(query)) {
+    return [];
+  }
+  const normalizedKey = query.normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const cached = SERVER_SEARCH_CACHE.get(normalizedKey);
+  if (cached && Date.now() - cached.cachedAt < GEMINI_QUERY_CACHE_TTL_MS) {
+    return cached.sources;
+  }
+  const [newsSources, wikiSources] = await Promise.all([
+    fetchLiveGoogleNewsVietnam(query),
+    fetchVietnameseWikipediaSearch(query),
+  ]);
+  const combined = [...newsSources, ...wikiSources].slice(0, 5);
+  if (SERVER_SEARCH_CACHE.size > 100) {
+    const oldestKey = SERVER_SEARCH_CACHE.keys().next().value;
+    if (oldestKey) SERVER_SEARCH_CACHE.delete(oldestKey);
+  }
+  SERVER_SEARCH_CACHE.set(normalizedKey, { sources: combined, cachedAt: Date.now() });
+  return combined;
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -210,6 +253,10 @@ async function startServer() {
           ai.models.generateContent({
             model: 'gemini-3.1-flash-lite',
             contents: 'ping',
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
+              maxOutputTokens: 16,
+            },
           }),
           6000
         );
@@ -246,24 +293,52 @@ async function startServer() {
         return;
       }
 
+      // Rule 1 & Rule 2: Model Routing by difficulty + ThinkingLevel & maxOutputTokens control
+      const validRequestedModel: GeminiModelOptionId =
+        model && ALLOWED_MODELS.has(model as GeminiModelOptionId)
+          ? (model as GeminiModelOptionId)
+          : DEFAULT_GEMINI_MODEL;
+
+      const routing = classifyQueryRoutingAndCostConfig(
+        normalizedMessage,
+        validRequestedModel
+      );
+
+      // Rule 3: Check 6-hour server response cache before hitting external search or Gemini API
+      const sysHash = systemInstruction ? systemInstruction.slice(0, 160) : 'default';
+      const serverCacheKey = `${routing.targetModel}::${sysHash}::${normalizedMessage.toLowerCase()}`;
+      const cachedResponse = SERVER_RESPONSE_CACHE.get(serverCacheKey);
       const candidateKeys = getCandidateApiKeys();
+
+      if (
+        cachedResponse &&
+        Date.now() - cachedResponse.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
+      ) {
+        res.json({
+          text: cachedResponse.text,
+          modelUsed: cachedResponse.modelUsed,
+          apiConnected: true,
+          cached: true,
+          keyState: 'connected' as GeminiKeyStatusState,
+          maskedKey: maskApiKey(candidateKeys[0]),
+          sources: cachedResponse.sources,
+        });
+        return;
+      }
+
+      // Rule 3: Only enable external web search when the query actually requires fresh external info
+      const preFetchedSources = await getCachedExternalSources(normalizedMessage);
+
       if (candidateKeys.length === 0) {
-        const [newsSources, wikiSources] = await Promise.all([
-          fetchLiveGoogleNewsVietnam(normalizedMessage),
-          fetchVietnameseWikipediaSearch(normalizedMessage),
-        ]);
         res.status(200).json({
           text: '',
           fallbackRequired: true,
           apiConnected: false,
           keyState: 'not_configured' as GeminiKeyStatusState,
-          sources: [...newsSources, ...wikiSources].slice(0, 6),
+          sources: preFetchedSources,
         });
         return;
       }
-
-      const requestedModel =
-        model && ALLOWED_MODELS.has(model) ? model : 'gemini-4-hydrogen';
 
       const formattedHistory = Array.isArray(history)
         ? history
@@ -274,27 +349,22 @@ async function startServer() {
                 typeof item.text === 'string' &&
                 item.text.trim().length > 0
             )
-            .slice(-16)
+            .slice(-8)
             .map((item) => ({
               role: item.role,
               parts: [{ text: item.text.normalize('NFC') }],
             }))
         : [];
 
-      const candidateModels = Array.from(
-        new Set([requestedModel, 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'])
+      const candidateModels: GeminiModelOptionId[] = Array.from(
+        new Set<GeminiModelOptionId>([
+          routing.targetModel,
+          'gemini-3.1-flash-lite',
+          'gemini-4-hydrogen',
+        ])
       );
 
       const isInternalOnly = isPureInternalWarehouseQuery(normalizedMessage);
-
-      // Fetch live Google News Vietnam & Vietnamese Wikipedia in parallel (~1s) for external queries
-      const [newsSources, wikiSources] = isInternalOnly
-        ? [[], []]
-        : await Promise.all([
-            fetchLiveGoogleNewsVietnam(normalizedMessage),
-            fetchVietnameseWikipediaSearch(normalizedMessage),
-          ]);
-      const preFetchedSources = [...newsSources, ...wikiSources].slice(0, 5);
 
       const liveContextBlock =
         preFetchedSources.length > 0
@@ -314,9 +384,10 @@ async function startServer() {
           ? systemInstruction.trim()
           : `Bạn là Trợ lý A.I — VTNN Tâm An, chuyên gia phân tích thị trường vật tư nông nghiệp, giá phân bón, giá lúa gạo, kỹ thuật cây trồng và quản lý kho.`;
 
+      // Rule 4: Keep system prompt prefix cache-friendly and omit external market benchmark block for pure internal warehouse queries
       const effectiveSystemInstruction = [
         baseSys,
-        baseSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP')
+        isInternalOnly || baseSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP')
           ? ''
           : AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
         liveContextBlock,
@@ -332,8 +403,13 @@ async function startServer() {
 
         for (const candidateModel of candidateModels) {
           try {
+            // Rule 2: ThinkingLevel.MINIMAL for Gemini 3.1 Flash-Lite, LOW/MEDIUM for Gemini 4 models
             const thinkingLevel =
-              candidateModel === 'gemini-4-neon' || candidateModel === 'gemini-4-carbon'
+              candidateModel === 'gemini-3.1-flash-lite'
+                ? ThinkingLevel.MINIMAL
+                : candidateModel === 'gemini-4-neon' ||
+                  candidateModel === 'gemini-4-carbon' ||
+                  routing.thinkingLevel === 'MEDIUM'
                 ? ThinkingLevel.MEDIUM
                 : ThinkingLevel.LOW;
 
@@ -343,6 +419,7 @@ async function startServer() {
               config: {
                 systemInstruction: effectiveSystemInstruction,
                 thinkingConfig: { thinkingLevel },
+                maxOutputTokens: routing.maxOutputTokens,
               },
             });
 
@@ -355,6 +432,17 @@ async function startServer() {
 
             const responseText = response.text?.trim();
             if (responseText) {
+              if (SERVER_RESPONSE_CACHE.size > 150) {
+                const oldestKey = SERVER_RESPONSE_CACHE.keys().next().value;
+                if (oldestKey) SERVER_RESPONSE_CACHE.delete(oldestKey);
+              }
+              SERVER_RESPONSE_CACHE.set(serverCacheKey, {
+                text: responseText,
+                modelUsed: candidateModel,
+                sources: preFetchedSources,
+                cachedAt: Date.now(),
+              });
+
               res.json({
                 text: responseText,
                 modelUsed: candidateModel,
