@@ -26,7 +26,6 @@ import {
 } from 'firebase/firestore';
 import {
   deleteObject,
-  getBytes,
   getDownloadURL,
   getStorage,
   ref,
@@ -61,6 +60,8 @@ export const storage = getStorage(
   app,
   firebaseConfig.storageBucket ? `gs://${firebaseConfig.storageBucket}` : undefined
 );
+storage.maxOperationRetryTime = 6000;
+storage.maxUploadRetryTime = 10000;
 
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
@@ -1088,25 +1089,22 @@ export async function fetchUserFirestoreData(
 const COMMUNITY_MARKET_PRICES_LOCAL_KEY = 'vtnn_taman_community_prices_v1';
 
 async function readJsonFromFirebaseStoragePath<T>(storagePath: string): Promise<T | null> {
+  const bucket = firebaseConfig.storageBucket;
+  if (!bucket) return null;
   try {
-    const fileRef = ref(storage, storagePath);
-    try {
-      const bytes = await getBytes(fileRef, 100 * 1024);
-      const text = new TextDecoder('utf-8').decode(bytes);
-      return JSON.parse(text) as T;
-    } catch (bytesErr) {
-      const code = (bytesErr as { code?: string })?.code || '';
-      if (code === 'storage/object-not-found' || code === 'storage/unauthorized') {
-        return null;
-      }
-      const downloadUrl = await getDownloadURL(fileRef);
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 4000);
-      const res = await fetch(downloadUrl, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!res.ok) return null;
-      return (await res.json()) as T;
-    }
+    const url = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(
+      bucket
+    )}/o/${encodeURIComponent(storagePath)}?alt=media`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    return (await res.json()) as T;
   } catch {
     return null;
   }
