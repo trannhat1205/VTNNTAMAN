@@ -14,6 +14,67 @@ const STATIC_ROOT = fs.existsSync(path.join(BASE_DIR, 'index.html'))
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = '0.0.0.0';
 
+const DAILY_AI_QUESTION_LIMIT = 30;
+const DAILY_AI_TOKEN_LIMIT = 90000;
+const ACCOUNT_QUOTAS = new Map();
+
+function getTodayVietnamDateStr() {
+  const vnTime = new Date(Date.now() + 7 * 60 * 60 * 1000);
+  return vnTime.toISOString().slice(0, 10);
+}
+
+function getOrResetQuota(accountId) {
+  const safeId = String(accountId || 'guest').trim() || 'guest';
+  const todayVn = getTodayVietnamDateStr();
+  const existing = ACCOUNT_QUOTAS.get(safeId);
+  if (!existing || existing.date !== todayVn) {
+    const fresh = {
+      accountId: safeId,
+      date: todayVn,
+      questionsUsed: 0,
+      questionLimit: DAILY_AI_QUESTION_LIMIT,
+      tokensUsed: 0,
+      tokenLimit: DAILY_AI_TOKEN_LIMIT,
+      freeModelQuestions: 0,
+      deepModelQuestions: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    ACCOUNT_QUOTAS.set(safeId, fresh);
+    return fresh;
+  }
+  return existing;
+}
+
+function isExternalQuerySimple(rawQuery) {
+  const ascii = String(rawQuery || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'd')
+    .toLowerCase();
+  const internalHints = [
+    'kho', 'ton kho', 'het hang', 'sap het', 'doanh thu', 'loi nhuan',
+    'cong no', 'khach hang', 'phieu thu', 'phieu chi', 'dong tien', 'nha cung cap',
+  ];
+  const externalHints = [
+    'gia phan', 'gia lua', 'gia gao', 'om18', 'st25', 'sau rieng',
+    'thi truong', 'thoi tiet', 'ky thuat', 'san pham gi', 'thuoc gi',
+    'cong ty', 'bvtv', 'bao ve thuc vat', 'hoat chat',
+  ];
+  if (externalHints.some((k) => ascii.includes(k))) return true;
+  if (internalHints.some((k) => ascii.includes(k))) return false;
+  return true;
+}
+
+function resolveApiKey() {
+  return (
+    process.env.GEMINI_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    process.env.API_KEY ||
+    ''
+  ).trim();
+}
+
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
@@ -118,7 +179,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (pathname === '/api/gemini/status' && req.method === 'GET') {
-      const apiKey = (process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
+      const apiKey = resolveApiKey();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(
         JSON.stringify({
@@ -137,38 +198,104 @@ const server = http.createServer(async (req, res) => {
         try {
           const parsed = JSON.parse(rawBody || '{}');
           const message = String(parsed.message || '').normalize('NFC').trim();
-          const apiKey = (process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
+          const accountId = String(parsed.accountId || 'guest').trim() || 'guest';
+          const quota = getOrResetQuota(accountId);
+          if (quota.questionsUsed >= quota.questionLimit || quota.tokensUsed >= quota.tokenLimit) {
+            res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(
+              JSON.stringify({
+                error: `Tài khoản đã sử dụng hết hạn mức ${quota.questionLimit}/${quota.questionLimit} câu hỏi Trợ lý A.I trong ngày ${quota.date}. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai (giờ Việt Nam).`,
+                quotaExceeded: true,
+                quota,
+              })
+            );
+            return;
+          }
+
+          const apiKey = resolveApiKey();
           if (apiKey && message) {
-            const { GoogleGenAI, ThinkingLevel } = await import('@google/genai');
-            const ai = new GoogleGenAI({
-              apiKey,
-              httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-            });
-            const targetModel = parsed.model || 'gemini-3.1-flash-lite';
-            const thinkingLevel =
-              targetModel === 'gemini-3.1-flash-lite'
-                ? ThinkingLevel.MINIMAL
-                : ThinkingLevel.LOW;
-            const chat = ai.chats.create({
-              model: targetModel,
-              config: {
-                ...(parsed.systemInstruction ? { systemInstruction: parsed.systemInstruction } : {}),
-                thinkingConfig: { thinkingLevel },
-                maxOutputTokens: 1000,
-              },
-            });
-            const reply = await chat.sendMessage({ message });
-            if (reply.text && reply.text.trim()) {
-              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-              res.end(
-                JSON.stringify({
-                  text: reply.text.trim(),
-                  modelUsed: targetModel,
-                  apiConnected: true,
-                  keyState: 'connected',
-                })
+            const requested = String(parsed.model || 'auto');
+            const isExternal =
+              parsed.queryScope === 'external' ||
+              (parsed.queryScope !== 'internal' && isExternalQuerySimple(message));
+            const fallbackModels =
+              requested === 'auto'
+                ? isExternal
+                  ? ['gemini-4-hydrogen', 'gemini-3.1-flash-lite']
+                  : ['gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+                : requested === 'gemma-4-26b-a4b-it'
+                ? ['gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+                : requested === 'gemini-3.1-flash-lite'
+                ? ['gemini-3.1-flash-lite', 'gemma-4-26b-a4b-it', 'gemini-4-hydrogen']
+                : ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'];
+
+            const historyContents = Array.isArray(parsed.history)
+              ? parsed.history
+                  .filter((h) => h && (h.role === 'user' || h.role === 'model') && typeof h.text === 'string' && h.text.trim())
+                  .slice(-8)
+                  .map((h) => ({ role: h.role, parts: [{ text: h.text.normalize('NFC') }] }))
+              : [];
+
+            for (const candidateModel of fallbackModels) {
+              const useSearch = isExternal && candidateModel !== 'gemma-4-26b-a4b-it';
+              const body = {
+                ...(parsed.systemInstruction
+                  ? { systemInstruction: { parts: [{ text: String(parsed.systemInstruction) }] } }
+                  : {}),
+                contents: [...historyContents, { role: 'user', parts: [{ text: message }] }],
+                generationConfig: {
+                  maxOutputTokens: candidateModel === 'gemini-4-hydrogen' ? 2048 : 1200,
+                  thinkingConfig: {
+                    thinkingLevel: candidateModel === 'gemini-4-hydrogen' ? 'LOW' : 'MINIMAL',
+                  },
+                },
+                ...(useSearch ? { tools: [{ google_search: {} }] } : {}),
+              };
+              const apiRes = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${encodeURIComponent(apiKey)}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(body),
+                }
               );
-              return;
+              if (!apiRes.ok) continue;
+              const json = await apiRes.json();
+              const parts = json?.candidates?.[0]?.content?.parts || [];
+              const text = parts
+                .filter((p) => p && p.thought !== true && typeof p.text === 'string')
+                .map((p) => p.text)
+                .join('')
+                .trim();
+              if (text) {
+                const chunks = json?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+                const sources = chunks
+                  .map((c) => c?.web)
+                  .filter((w) => w && w.uri)
+                  .slice(0, 6)
+                  .map((w) => ({ title: w.title || w.uri, uri: w.uri, sourceName: w.title }));
+                const totalTokens = Number(json?.usageMetadata?.totalTokenCount) || Math.ceil((message.length + text.length) / 3);
+                quota.questionsUsed += 1;
+                quota.tokensUsed += totalTokens;
+                if (candidateModel === 'gemini-4-hydrogen') quota.deepModelQuestions += 1;
+                else quota.freeModelQuestions += 1;
+                quota.updatedAt = new Date().toISOString();
+
+                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(
+                  JSON.stringify({
+                    text,
+                    modelUsed: candidateModel,
+                    queryScope: isExternal ? 'external' : 'internal',
+                    apiConnected: true,
+                    keyState: 'connected',
+                    sources,
+                    usage: { totalTokens },
+                    quota,
+                  })
+                );
+                return;
+              }
             }
           }
         } catch {

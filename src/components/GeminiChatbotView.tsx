@@ -23,15 +23,24 @@ import {
   SupplierProfile,
 } from '../types';
 import {
+  AccountDailyAiQuota,
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildWarehouseReportSnapshot,
+  checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
   DEFAULT_GEMINI_MODEL,
+  estimateVietnameseTokens,
+  extractGroundingSourcesFromMetadata,
+  extractVisibleTextFromGeminiParts,
   GEMINI_MODEL_OPTIONS,
   GEMINI_QUERY_CACHE_TTL_MS,
+  GeminiConcreteModelId,
   GeminiModelOptionId,
   generateSmartReportAnswer,
+  getGeminiModelOptionMeta,
+  normalizeAccountDailyAiQuotaForToday,
+  recordAccountDailyAiUsage,
   shouldEnableExternalWebSearch,
 } from '../utils/geminiReportAssistant';
 import { formatVND } from '../utils/businessLogic';
@@ -52,6 +61,8 @@ export interface GeminiChatMessage {
   modelId?: GeminiModelOptionId;
   sources?: GeminiGroundingSource[];
   apiConnected?: boolean;
+  usedWebSearch?: boolean;
+  tokensUsed?: number;
 }
 
 export interface GeminiChatSession {
@@ -73,10 +84,20 @@ interface GeminiChatbotViewProps {
   paymentVouchers: CashPaymentVoucher[];
 }
 
-const REMOTE_GEMINI_API_FALLBACKS = [
-  'https://ais-pre-d6gejt24bdkwlhvgmjms2b-804647049989.asia-southeast1.run.app/api/gemini/chat',
-  'https://ais-dev-d6gejt24bdkwlhvgmjms2b-804647049989.asia-southeast1.run.app/api/gemini/chat',
-];
+const CLIENT_AI_CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v2';
+
+function loadAccountDailyQuotaFromStorage(
+  quotaStorageKey: string,
+  accountId: string
+): AccountDailyAiQuota {
+  try {
+    const raw = localStorage.getItem(quotaStorageKey);
+    const parsed = raw ? (JSON.parse(raw) as Partial<AccountDailyAiQuota>) : null;
+    return normalizeAccountDailyAiQuotaForToday(parsed, accountId);
+  } catch {
+    return normalizeAccountDailyAiQuotaForToday(null, accountId);
+  }
+}
 
 async function fetchBrowserWikipediaFallback(query: string): Promise<GeminiGroundingSource[]> {
   try {
@@ -281,10 +302,18 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   receiptVouchers,
   paymentVouchers,
 }) => {
+  const accountQuotaKey = useMemo(() => {
+    return (currentStaff?.uid || currentStaff?.email || 'guest').trim() || 'guest';
+  }, [currentStaff?.uid, currentStaff?.email]);
+
   const storageKey = useMemo(() => {
     const uid = currentStaff?.uid || 'guest';
     return `vtnn_taman_gemini_sessions_v1_${uid}`;
   }, [currentStaff?.uid]);
+
+  const quotaStorageKey = useMemo(() => {
+    return `vtnn_taman_ai_daily_quota_v1_${accountQuotaKey}`;
+  }, [accountQuotaKey]);
 
   const [sessions, setSessions] = useState<GeminiChatSession[]>(() => {
     try {
@@ -309,6 +338,9 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     ];
   });
 
+  const [dailyQuota, setDailyQuota] = useState<AccountDailyAiQuota>(() =>
+    loadAccountDailyQuotaFromStorage(quotaStorageKey, accountQuotaKey)
+  );
   const [activeSessionId, setActiveSessionId] = useState<string>(() => sessions[0]?.id || '');
   const [selectedModel, setSelectedModel] = useState<GeminiModelOptionId>(DEFAULT_GEMINI_MODEL);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
@@ -318,6 +350,30 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
 
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Reload sessions & quota when user account switches
+  useEffect(() => {
+    setDailyQuota(loadAccountDailyQuotaFromStorage(quotaStorageKey, accountQuotaKey));
+  }, [quotaStorageKey, accountQuotaKey]);
+
+  // Automatically refresh quota when a new Vietnam day begins (00:00 UTC+7)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setDailyQuota((prev) =>
+        normalizeAccountDailyAiQuotaForToday(prev, accountQuotaKey)
+      );
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [accountQuotaKey]);
+
+  // Persist daily quota to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(quotaStorageKey, JSON.stringify(dailyQuota));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, [dailyQuota, quotaStorageKey]);
 
   // Reload sessions when user account switches
   useEffect(() => {
@@ -380,9 +436,19 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     ]
   );
 
-  const systemInstruction = useMemo(
-    () => buildGeminiSystemInstruction(reportSnapshot),
+  const internalSystemInstruction = useMemo(
+    () => buildGeminiSystemInstruction(reportSnapshot, 'internal'),
     [reportSnapshot]
+  );
+
+  const externalSystemInstruction = useMemo(
+    () => buildGeminiSystemInstruction(reportSnapshot, 'external'),
+    [reportSnapshot]
+  );
+
+  const quotaCheck = useMemo(
+    () => checkAccountDailyAiQuota(dailyQuota),
+    [dailyQuota]
   );
 
   const activeSession = useMemo(
@@ -449,6 +515,12 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     const promptText = (customText ?? inputPrompt).normalize('NFC').trim();
     if (!promptText || isGenerating || !activeSession) return;
 
+    const latestQuotaCheck = checkAccountDailyAiQuota(dailyQuota);
+    if (!latestQuotaCheck.allowed) {
+      setDailyQuota(latestQuotaCheck.normalizedQuota);
+      return;
+    }
+
     const userMessage: GeminiChatMessage = {
       id: `msg_u_${Date.now()}`,
       role: 'user',
@@ -491,26 +563,43 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     }
     setIsGenerating(true);
 
-    const routing = classifyQueryRoutingAndCostConfig(promptText, selectedModel);
-    const cacheKey = buildGeminiQueryCacheKey(promptText, reportSnapshot, routing.targetModel);
-    const CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v1';
+    const routing = classifyQueryRoutingAndCostConfig(
+      promptText,
+      selectedModel,
+      reportSnapshot
+    );
+    const activeSystemInstruction =
+      routing.queryScope === 'internal'
+        ? internalSystemInstruction
+        : externalSystemInstruction;
+    const cacheKey = buildGeminiQueryCacheKey(
+      promptText,
+      reportSnapshot,
+      routing.targetModel
+    );
 
     let replyText = '';
-    let usedModelId: GeminiModelOptionId = routing.targetModel;
+    let usedModelId: GeminiConcreteModelId = routing.targetModel;
     let replySources: GeminiGroundingSource[] = [];
     let apiConnectedFlag = false;
+    let usedWebSearchFlag = false;
+    let tokensUsedCount = 0;
+    let isCachedHit = false;
+    let quotaBlockedByServer = false;
+    let serverReturnedQuota: AccountDailyAiQuota | null = null;
 
     // Rule 3: Check 6-hour client response cache for repeated popular/warehouse queries
     try {
-      const rawCache = localStorage.getItem(CACHE_STORAGE_KEY);
+      const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
       if (rawCache) {
         const parsedCache = JSON.parse(rawCache) as Record<
           string,
           {
             text: string;
-            modelUsed: GeminiModelOptionId;
+            modelUsed: GeminiConcreteModelId;
             sources?: GeminiGroundingSource[];
             apiConnected?: boolean;
+            usedWebSearch?: boolean;
             cachedAt: number;
           }
         >;
@@ -524,6 +613,8 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
           usedModelId = cachedEntry.modelUsed || routing.targetModel;
           replySources = Array.isArray(cachedEntry.sources) ? cachedEntry.sources : [];
           apiConnectedFlag = Boolean(cachedEntry.apiConnected);
+          usedWebSearchFlag = Boolean(cachedEntry.usedWebSearch || replySources.length > 0);
+          isCachedHit = true;
         }
       }
     } catch {
@@ -531,89 +622,244 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     }
 
     if (!replyText) {
-      const payloadBody = JSON.stringify({
-        message: promptText,
-        history: previousHistory,
-        model: routing.targetModel,
-        systemInstruction,
-      });
+      // Step A: Try same-origin backend (/api/gemini/chat)
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 24000);
+        const response = await fetch('/api/gemini/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            message: promptText,
+            history: previousHistory,
+            model: selectedModel,
+            accountId: accountQuotaKey,
+            queryScope: routing.queryScope,
+            systemInstruction: activeSystemInstruction,
+            internalSystemInstruction,
+            externalSystemInstruction,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
 
-      const isLocalOrCloudRun =
-        typeof window !== 'undefined' &&
-        (window.location.hostname === 'localhost' ||
-          window.location.hostname === '127.0.0.1' ||
-          window.location.hostname.endsWith('.run.app'));
-
-      const candidateEndpoints = isLocalOrCloudRun
-        ? ['/api/gemini/chat']
-        : ['/api/gemini/chat', ...REMOTE_GEMINI_API_FALLBACKS];
-
-      for (const endpoint of candidateEndpoints) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 22000);
-          const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payloadBody,
-            signal: controller.signal,
-          });
-          clearTimeout(timer);
-
-          const contentType = response.headers.get('content-type') || '';
-          if (response.ok && contentType.includes('application/json')) {
-            const data = (await response.json()) as {
-              text?: string;
-              modelUsed?: GeminiModelOptionId;
-              sources?: GeminiGroundingSource[];
-              apiConnected?: boolean;
-            };
-            if (typeof data.apiConnected === 'boolean') {
-              apiConnectedFlag = data.apiConnected;
+        const contentType = response.headers.get('content-type') || '';
+        if (response.status === 429 && contentType.includes('application/json')) {
+          const errData = (await response.json()) as {
+            error?: string;
+            quotaExceeded?: boolean;
+            quota?: AccountDailyAiQuota;
+          };
+          if (errData.quotaExceeded) {
+            quotaBlockedByServer = true;
+            if (errData.quota) {
+              serverReturnedQuota = normalizeAccountDailyAiQuotaForToday(
+                errData.quota,
+                accountQuotaKey
+              );
             }
-            if (Array.isArray(data.sources) && data.sources.length > 0) {
-              replySources = data.sources;
-            }
-            if (data.text && data.text.trim()) {
-              replyText = data.text.trim();
-              if (data.modelUsed) {
-                usedModelId = data.modelUsed;
-              }
-              break;
-            }
+            replyText =
+              errData.error ||
+              'Tài khoản đã hết hạn mức câu hỏi Trợ lý A.I trong ngày hôm nay. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai.';
           }
-        } catch {
-          // Try next candidate endpoint or client-side fallback
+        } else if (response.ok && contentType.includes('application/json')) {
+          const data = (await response.json()) as {
+            text?: string;
+            modelUsed?: GeminiConcreteModelId;
+            sources?: GeminiGroundingSource[];
+            apiConnected?: boolean;
+            usage?: { totalTokens?: number };
+            quota?: AccountDailyAiQuota;
+          };
+          if (typeof data.apiConnected === 'boolean') {
+            apiConnectedFlag = data.apiConnected;
+          }
+          if (Array.isArray(data.sources) && data.sources.length > 0) {
+            replySources = data.sources;
+            usedWebSearchFlag = true;
+          }
+          if (data.quota) {
+            serverReturnedQuota = normalizeAccountDailyAiQuotaForToday(
+              data.quota,
+              accountQuotaKey
+            );
+          }
+          if (data.text && data.text.trim()) {
+            replyText = data.text.trim();
+            if (data.modelUsed) {
+              usedModelId = data.modelUsed;
+            }
+            tokensUsedCount =
+              Number(data.usage?.totalTokens) ||
+              estimateVietnameseTokens(promptText + replyText);
+          }
+        }
+      } catch {
+        // Same-origin backend unavailable (e.g. static Hostinger hosting) -> try direct Gemini REST API
+      }
+
+      // Step B: Direct Gemini REST API fallback (for static Hostinger build)
+      if (!replyText && !quotaBlockedByServer) {
+        const viteEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
+        const clientApiKey = (viteEnv?.VITE_GEMINI_API_KEY || '').trim();
+
+        if (clientApiKey) {
+          const formattedContents = [
+            ...previousHistory.map((item) => ({
+              role: item.role,
+              parts: [{ text: item.text }],
+            })),
+            {
+              role: 'user',
+              parts: [{ text: promptText }],
+            },
+          ];
+
+          for (const candidateModel of routing.fallbackModels) {
+            const allowNativeSearch =
+              routing.enableExternalSearch && candidateModel !== 'gemma-4-26b-a4b-it';
+            const searchAttempts = allowNativeSearch ? [true, false] : [false];
+
+            for (const useGoogleSearch of searchAttempts) {
+              try {
+                const controller = new AbortController();
+                const timer = setTimeout(
+                  () => controller.abort(),
+                  useGoogleSearch ? 22000 : 16000
+                );
+
+                const thinkingLevel =
+                  candidateModel === 'gemini-4-hydrogen'
+                    ? routing.thinkingLevel === 'MEDIUM'
+                      ? 'MEDIUM'
+                      : 'LOW'
+                    : 'MINIMAL';
+                const maxOutputTokens =
+                  candidateModel === 'gemini-4-hydrogen'
+                    ? Math.max(2048, routing.maxOutputTokens)
+                    : Math.max(1200, routing.maxOutputTokens);
+
+                const directResponse = await fetch(
+                  `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${encodeURIComponent(
+                    clientApiKey
+                  )}`,
+                  {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      systemInstruction: {
+                        parts: [{ text: activeSystemInstruction }],
+                      },
+                      contents: formattedContents,
+                      generationConfig: {
+                        maxOutputTokens,
+                        thinkingConfig: { thinkingLevel },
+                      },
+                      ...(useGoogleSearch ? { tools: [{ google_search: {} }] } : {}),
+                    }),
+                    signal: controller.signal,
+                  }
+                );
+                clearTimeout(timer);
+
+                if (!directResponse.ok) {
+                  continue;
+                }
+
+                const json = (await directResponse.json()) as {
+                  candidates?: Array<{
+                    content?: { parts?: Array<{ text?: string; thought?: boolean }> };
+                    groundingMetadata?: unknown;
+                  }>;
+                  usageMetadata?: { totalTokenCount?: number };
+                };
+
+                const visibleText = extractVisibleTextFromGeminiParts(
+                  json.candidates?.[0]?.content?.parts
+                );
+
+                if (visibleText) {
+                  replyText = visibleText;
+                  usedModelId = candidateModel;
+                  apiConnectedFlag = true;
+                  const groundingLinks = extractGroundingSourcesFromMetadata(
+                    json.candidates?.[0]?.groundingMetadata
+                  );
+                  if (groundingLinks.length > 0) {
+                    replySources = groundingLinks;
+                    usedWebSearchFlag = true;
+                  }
+                  tokensUsedCount =
+                    Number(json.usageMetadata?.totalTokenCount) ||
+                    estimateVietnameseTokens(promptText + visibleText);
+                  break;
+                }
+              } catch {
+                // try next attempt / model
+              }
+            }
+            if (replyText) break;
+          }
         }
       }
 
-      if (!replyText) {
+      // Step C: Emergency offline report fallback when both backend & direct API fail
+      if (!replyText && !quotaBlockedByServer) {
         if (replySources.length === 0 && shouldEnableExternalWebSearch(promptText)) {
           replySources = await fetchBrowserWikipediaFallback(promptText);
         }
         replyText = generateSmartReportAnswer(promptText, reportSnapshot, replySources);
+        tokensUsedCount = 0;
       }
 
-      // Save result to 6-hour client response cache (prune old entries > 40)
-      try {
-        const rawCache = localStorage.getItem(CACHE_STORAGE_KEY);
-        const parsedCache = rawCache ? JSON.parse(rawCache) : {};
-        const now = Date.now();
-        const freshEntries = Object.entries(parsedCache).filter(([, val]) => {
-          const entry = val as { cachedAt?: number };
-          return entry && typeof entry.cachedAt === 'number' && now - entry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS;
-        });
-        const pruned = Object.fromEntries(freshEntries.slice(-40));
-        pruned[cacheKey] = {
-          text: replyText,
+      // Save successful non-blocked result to 6-hour client response cache
+      if (replyText && !quotaBlockedByServer) {
+        try {
+          const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
+          const parsedCache = rawCache ? JSON.parse(rawCache) : {};
+          const now = Date.now();
+          const freshEntries = Object.entries(parsedCache).filter(([, val]) => {
+            const entry = val as { cachedAt?: number };
+            return (
+              entry &&
+              typeof entry.cachedAt === 'number' &&
+              now - entry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
+            );
+          });
+          const pruned = Object.fromEntries(freshEntries.slice(-40));
+          pruned[cacheKey] = {
+            text: replyText,
+            modelUsed: usedModelId,
+            sources: replySources,
+            apiConnected: apiConnectedFlag,
+            usedWebSearch: usedWebSearchFlag,
+            cachedAt: now,
+          };
+          localStorage.setItem(CLIENT_AI_CACHE_STORAGE_KEY, JSON.stringify(pruned));
+        } catch {
+          // ignore storage quota errors
+        }
+      }
+    }
+
+    if (quotaBlockedByServer && serverReturnedQuota) {
+      setDailyQuota(serverReturnedQuota);
+    } else if (!quotaBlockedByServer) {
+      const localRecorded = recordAccountDailyAiUsage(
+        latestQuotaCheck.normalizedQuota,
+        {
+          tokensUsed: tokensUsedCount,
           modelUsed: usedModelId,
-          sources: replySources,
-          apiConnected: apiConnectedFlag,
-          cachedAt: now,
-        };
-        localStorage.setItem(CACHE_STORAGE_KEY, JSON.stringify(pruned));
-      } catch {
-        // ignore storage quota errors
+          cached: isCachedHit,
+        }
+      );
+      if (
+        serverReturnedQuota &&
+        serverReturnedQuota.questionsUsed >= localRecorded.questionsUsed
+      ) {
+        setDailyQuota(serverReturnedQuota);
+      } else {
+        setDailyQuota(localRecorded);
       }
     }
 
@@ -628,6 +874,8 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       modelId: usedModelId,
       sources: replySources.length > 0 ? replySources : undefined,
       apiConnected: apiConnectedFlag,
+      usedWebSearch: usedWebSearchFlag,
+      tokensUsed: tokensUsedCount,
     };
 
     setSessions((prev) =>
@@ -691,6 +939,51 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 {formatVND(reportSnapshot.totalCustomerDebt)}
               </span>
             </div>
+          </div>
+        </div>
+
+        {/* Daily Account AI Quota Card */}
+        <div className="mx-3 mt-2.5 p-3 rounded-2xl bg-white border border-slate-200/90 shadow-2xs">
+          <div className="flex items-center justify-between text-[11px] font-bold text-slate-700">
+            <span>Hạn mức A.I hôm nay</span>
+            <span
+              className={
+                quotaCheck.allowed ? 'text-emerald-700' : 'text-rose-600'
+              }
+            >
+              {quotaCheck.normalizedQuota.questionsUsed}/
+              {quotaCheck.normalizedQuota.questionLimit} câu
+            </span>
+          </div>
+          <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                !quotaCheck.allowed
+                  ? 'bg-rose-500'
+                  : quotaCheck.normalizedQuota.questionsUsed >=
+                    quotaCheck.normalizedQuota.questionLimit * 0.8
+                  ? 'bg-amber-500'
+                  : 'bg-emerald-500'
+              }`}
+              style={{
+                width: `${Math.min(
+                  100,
+                  Math.round(
+                    (quotaCheck.normalizedQuota.questionsUsed /
+                      quotaCheck.normalizedQuota.questionLimit) *
+                      100
+                  )
+                )}%`,
+              }}
+            />
+          </div>
+          <div className="mt-1.5 flex items-center justify-between text-[10px] text-slate-500">
+            <span>
+              Token:{' '}
+              {quotaCheck.normalizedQuota.tokensUsed.toLocaleString('vi-VN')} /{' '}
+              {quotaCheck.normalizedQuota.tokenLimit.toLocaleString('vi-VN')}
+            </span>
+            <span>Làm mới 00:00</span>
           </div>
         </div>
 
@@ -779,30 +1072,46 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                     {GEMINI_MODEL_OPTIONS.map((opt) => {
                       const active = opt.id === selectedModel;
                       return (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedModel(opt.id);
-                            setShowModelDropdown(false);
-                          }}
-                          className={`w-full text-left p-2.5 rounded-xl transition flex items-start justify-between gap-2 cursor-pointer ${
-                            active
-                              ? 'bg-emerald-50 border border-emerald-200 text-emerald-950'
-                              : 'hover:bg-slate-100 text-slate-700'
-                          }`}
-                        >
-                          <div>
-                            <div className="text-xs font-bold flex items-center gap-1.5">
-                              <span>{opt.label}</span>
-                              <span className="px-1.5 py-0.5 text-[10px] rounded-md bg-slate-100 text-slate-600 font-semibold">
-                                {opt.badge}
-                              </span>
+                        <React.Fragment key={opt.id}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedModel(opt.id);
+                              setShowModelDropdown(false);
+                            }}
+                            className={`w-full text-left p-2.5 rounded-xl transition flex items-start justify-between gap-2 cursor-pointer ${
+                              active
+                                ? 'bg-emerald-50 border border-emerald-200 text-emerald-950'
+                                : 'hover:bg-slate-100 text-slate-700'
+                            }`}
+                          >
+                            <div>
+                              <div className="text-xs font-bold flex items-center gap-1.5">
+                                <span>{opt.label}</span>
+                                <span
+                                  className={`px-1.5 py-0.5 text-[10px] rounded-md font-semibold ${
+                                    opt.tier === 'auto'
+                                      ? 'bg-indigo-100 text-indigo-700'
+                                      : opt.tier === 'free'
+                                      ? 'bg-emerald-100 text-emerald-700'
+                                      : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {opt.badge}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 mt-0.5">
+                                {opt.description}
+                              </p>
                             </div>
-                            <p className="text-[11px] text-slate-500 mt-0.5">{opt.description}</p>
-                          </div>
-                          {active && <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />}
-                        </button>
+                            {active && (
+                              <Check className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                            )}
+                          </button>
+                          {opt.id === 'auto' && (
+                            <div className="my-1 border-t border-slate-100" />
+                          )}
+                        </React.Fragment>
                       );
                     })}
                   </div>
@@ -811,14 +1120,28 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={handleCreateNewChat}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-bold text-slate-700 transition cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Làm mới</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <span
+              className={`hidden sm:inline-flex items-center px-2.5 py-1 rounded-xl text-[11px] font-bold border ${
+                quotaCheck.allowed
+                  ? 'bg-emerald-50/80 text-emerald-800 border-emerald-200'
+                  : 'bg-rose-50 text-rose-700 border-rose-200'
+              }`}
+              title={`Đã dùng ${quotaCheck.normalizedQuota.tokensUsed.toLocaleString('vi-VN')} / ${quotaCheck.normalizedQuota.tokenLimit.toLocaleString('vi-VN')} token hôm nay`}
+            >
+              Còn {quotaCheck.remainingQuestions}/
+              {quotaCheck.normalizedQuota.questionLimit} câu hôm nay
+            </span>
+
+            <button
+              type="button"
+              onClick={handleCreateNewChat}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-bold text-slate-700 transition cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Làm mới</span>
+            </button>
+          </div>
         </header>
 
         {/* Scrollable Message Thread or Clean Centered Gemini Greeting */}
@@ -884,9 +1207,21 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                             </div>
                           )}
                           <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-400">
-                            <span className="flex items-center gap-1.5">
-                              <Bot className="w-3.5 h-3.5 text-indigo-500" />
-                              <span>Trợ lý A.I · {msg.timestamp}</span>
+                            <span className="flex flex-wrap items-center gap-1.5">
+                              <Bot className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                              <span>
+                                Trợ lý A.I ·{' '}
+                                {getGeminiModelOptionMeta(msg.modelId).label} (
+                                {getGeminiModelOptionMeta(msg.modelId).badge}) ·{' '}
+                                {msg.timestamp}
+                              </span>
+                              {(msg.usedWebSearch ||
+                                (msg.sources && msg.sources.length > 0)) && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-semibold text-[10px]">
+                                  <Globe className="w-2.5 h-2.5" />
+                                  Tìm kiếm web
+                                </span>
+                              )}
                             </span>
                             <button
                               type="button"
@@ -937,45 +1272,55 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         {/* Bottom Clean Gemini Prompt Composer Bar */}
         <div className="px-4 sm:px-8 pb-5 pt-2 bg-white">
           <div className="max-w-3xl mx-auto">
+            {!quotaCheck.allowed && (
+              <div className="mb-2.5 px-3.5 py-2.5 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium">
+                {quotaCheck.message}
+              </div>
+            )}
+
             {/* Quick Suggestion Chips */}
             <div className="flex items-center gap-1.5 overflow-x-auto pb-2.5 no-scrollbar">
               <button
                 type="button"
+                disabled={!quotaCheck.allowed || isGenerating}
                 onClick={() =>
                   handleSendMessage(
                     'Báo cáo tổng hợp doanh thu, lợi nhuận và dòng tiền của kho hiện tại'
                   )
                 }
-                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
+                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
               >
                 📊 Báo cáo doanh thu & lợi nhuận
               </button>
               <button
                 type="button"
+                disabled={!quotaCheck.allowed || isGenerating}
                 onClick={() =>
                   handleSendMessage('Danh sách khách hàng đang nợ và nợ quá hạn cần thu hồi')
                 }
-                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
+                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
               >
                 💳 Khách hàng đang nợ
               </button>
               <button
                 type="button"
+                disabled={!quotaCheck.allowed || isGenerating}
                 onClick={() =>
                   handleSendMessage('Kiểm tra các mặt hàng vật tư tồn kho thấp hoặc đã hết hàng')
                 }
-                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
+                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
               >
                 📦 Vật tư sắp hết hàng
               </button>
               <button
                 type="button"
+                disabled={!quotaCheck.allowed || isGenerating}
                 onClick={() =>
                   handleSendMessage(
                     'Tư vấn kỹ thuật bón phân và phòng trị bệnh cho lúa và sầu riêng'
                   )
                 }
-                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
+                className="shrink-0 px-3 py-1.5 rounded-full bg-slate-100 hover:bg-emerald-50 hover:text-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed text-slate-600 text-xs font-semibold border border-slate-200/80 transition cursor-pointer"
               >
                 🌱 Kỹ thuật nông nghiệp
               </button>
@@ -992,6 +1337,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
               <textarea
                 rows={2}
                 value={inputPrompt}
+                disabled={!quotaCheck.allowed}
                 onChange={(e) => setInputPrompt(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -999,15 +1345,19 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                     handleSendMessage();
                   }
                 }}
-                placeholder={`Hỏi Trợ lý A.I (VD: Báo cáo doanh thu kho ${activeWarehouseLabel}, khách hàng đang nợ, giá lúa OM18...)`}
-                className="w-full resize-none bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none leading-relaxed"
+                placeholder={
+                  quotaCheck.allowed
+                    ? `Hỏi Trợ lý A.I (VD: Báo cáo doanh thu kho ${activeWarehouseLabel}, khách hàng đang nợ, giá lúa OM18...)`
+                    : 'Tài khoản đã hết hạn mức câu hỏi hôm nay — sẽ tự động làm mới vào 00:00 ngày mai'
+                }
+                className="w-full resize-none bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none leading-relaxed disabled:opacity-60"
               />
               <button
                 type="submit"
-                disabled={!inputPrompt.trim() || isGenerating}
+                disabled={!inputPrompt.trim() || isGenerating || !quotaCheck.allowed}
                 aria-label="Gửi câu hỏi"
                 className={`p-2.5 rounded-2xl shrink-0 transition cursor-pointer ${
-                  inputPrompt.trim() && !isGenerating
+                  inputPrompt.trim() && !isGenerating && quotaCheck.allowed
                     ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-600 text-white shadow-sm hover:opacity-95'
                     : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                 }`}

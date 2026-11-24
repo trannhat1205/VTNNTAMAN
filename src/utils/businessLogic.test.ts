@@ -65,10 +65,19 @@ import {
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildWarehouseReportSnapshot,
+  checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
+  classifyWarehouseQueryScope,
+  createFreshAccountDailyAiQuota,
+  DAILY_AI_QUESTION_LIMIT,
+  DAILY_AI_TOKEN_LIMIT,
   DEFAULT_GEMINI_MODEL,
+  extractGroundingSourcesFromMetadata,
+  extractVisibleTextFromGeminiParts,
   GEMINI_MODEL_OPTIONS,
   generateSmartReportAnswer,
+  normalizeAccountDailyAiQuotaForToday,
+  recordAccountDailyAiUsage,
   shouldEnableExternalWebSearch,
 } from './geminiReportAssistant';
 import {
@@ -1846,44 +1855,80 @@ test('Production hardening: sequential voucher codes, Vietnam dates, SHA-256 pas
   assert.equal(sanitized[0].password, '');
 });
 
-test('Gemini Report Assistant: builds accurate warehouse report snapshot, system instruction, cost-optimized model routing, and answers in-app and external queries', () => {
+test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-routes free internal vs deep external models, enforces 30/day account quota with VN midnight reset, and answers in-app and external queries', () => {
   assert.equal(GEMINI_MODEL_OPTIONS.length, 4);
-  assert.equal(DEFAULT_GEMINI_MODEL, 'gemini-3.1-flash-lite');
-  assert.equal(GEMINI_MODEL_OPTIONS[0].id, 'gemini-3.1-flash-lite');
-  assert.equal(GEMINI_MODEL_OPTIONS[0].badge, 'Cơ bản');
-  assert.equal(GEMINI_MODEL_OPTIONS[1].id, 'gemini-4-hydrogen');
+  assert.deepEqual(
+    GEMINI_MODEL_OPTIONS.map((m) => m.id),
+    ['auto', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+  );
+  assert.equal(
+    GEMINI_MODEL_OPTIONS.some((m) => (m.id as string) === 'gemini-4-neon' || (m.id as string) === 'gemini-4-carbon'),
+    false
+  );
+  assert.equal(DEFAULT_GEMINI_MODEL, 'auto');
+  assert.equal(GEMINI_MODEL_OPTIONS[0].badge, 'Mặc định');
+  assert.equal(GEMINI_MODEL_OPTIONS[1].id, 'gemma-4-26b-a4b-it');
+  assert.equal(GEMINI_MODEL_OPTIONS[1].badge, 'Miễn phí');
 
-  // Rule 1 & Rule 2: Simple warehouse / price queries default to gemini-3.1-flash-lite with MINIMAL thinking & 900 maxOutputTokens
+  // Auto-routing: Internal warehouse queries prioritize free Gemma 4 26B with MINIMAL thinking & no web search
   const simpleRouting = classifyQueryRoutingAndCostConfig('Tóm tắt báo cáo doanh thu kho');
-  assert.equal(simpleRouting.targetModel, 'gemini-3.1-flash-lite');
+  assert.equal(simpleRouting.queryScope, 'internal');
+  assert.equal(simpleRouting.targetModel, 'gemma-4-26b-a4b-it');
   assert.equal(simpleRouting.thinkingLevel, 'MINIMAL');
-  assert.equal(simpleRouting.maxOutputTokens, 900);
   assert.equal(simpleRouting.isComplexQuery, false);
   assert.equal(simpleRouting.enableExternalSearch, false);
 
-  // Complex reconciliation/forecasting escalates to gemini-4-hydrogen with 1400 maxOutputTokens
+  const debtRouting = classifyQueryRoutingAndCostConfig('Danh sách khách hàng đang nợ quá hạn');
+  assert.equal(debtRouting.queryScope, 'internal');
+  assert.equal(debtRouting.targetModel, 'gemma-4-26b-a4b-it');
+  assert.equal(debtRouting.enableExternalSearch, false);
+
+  // Auto-routing: External product/company questions escalate to Gemini 4 Hydrogen + Google Search
+  const senBayRouting = classifyQueryRoutingAndCostConfig(
+    'sản phẩm Sen Bay của công ty thuốc bảo vệ thực vật GAP là sản phẩm gì?'
+  );
+  assert.equal(senBayRouting.queryScope, 'external');
+  assert.equal(senBayRouting.targetModel, 'gemini-4-hydrogen');
+  assert.equal(senBayRouting.thinkingLevel, 'LOW');
+  assert.equal(senBayRouting.enableExternalSearch, true);
+  assert.ok(senBayRouting.maxOutputTokens >= 2048);
+
+  // Auto-routing: External market price queries escalate to Gemini 4 Hydrogen + Google Search
+  const ricePriceRouting = classifyQueryRoutingAndCostConfig('giá lúa om18 hôm nay bao nhiêu');
+  assert.equal(ricePriceRouting.queryScope, 'external');
+  assert.equal(ricePriceRouting.targetModel, 'gemini-4-hydrogen');
+  assert.equal(ricePriceRouting.enableExternalSearch, true);
+
+  // Auto-routing: General agronomy tips use Gemini 4 Hydrogen deep reasoning without unnecessary search grounding
+  const agroRouting = classifyQueryRoutingAndCostConfig('Kỹ thuật bón phân NPK cho lúa');
+  assert.equal(agroRouting.queryScope, 'external');
+  assert.equal(agroRouting.targetModel, 'gemini-4-hydrogen');
+  assert.equal(agroRouting.enableExternalSearch, false);
+
+  // Complex forecasting/reconciliation escalates to Gemini 4 Hydrogen
   const complexRouting = classifyQueryRoutingAndCostConfig(
     'Phân tích sâu và dự báo dòng tiền, đối soát công nợ chiến lược 6 tháng tới'
   );
   assert.equal(complexRouting.targetModel, 'gemini-4-hydrogen');
-  assert.equal(complexRouting.thinkingLevel, 'LOW');
-  assert.equal(complexRouting.maxOutputTokens, 1400);
   assert.equal(complexRouting.isComplexQuery, true);
 
-  // Explicit user selection of larger model is respected
-  const userSelectedNeon = classifyQueryRoutingAndCostConfig(
+  // Explicit manual model choice is respected
+  const userSelectedLite = classifyQueryRoutingAndCostConfig(
     'Kiểm tra tồn kho',
-    'gemini-4-neon'
+    'gemini-3.1-flash-lite'
   );
-  assert.equal(userSelectedNeon.targetModel, 'gemini-4-neon');
-  assert.equal(userSelectedNeon.thinkingLevel, 'LOW');
+  assert.equal(userSelectedLite.targetModel, 'gemini-3.1-flash-lite');
+  assert.equal(userSelectedLite.thinkingLevel, 'MINIMAL');
 
-  // Rule 3: External web search only enabled when query genuinely requires fresh external info
+  // Scope & Selective External Web Search checks
+  assert.equal(classifyWarehouseQueryScope('Tóm tắt báo cáo doanh thu kho hiện tại'), 'internal');
+  assert.equal(classifyWarehouseQueryScope('sản phẩm Sen Bay của công ty thuốc bảo vệ thực vật GAP là sản phẩm gì?'), 'external');
   assert.equal(shouldEnableExternalWebSearch('Tóm tắt báo cáo doanh thu kho hiện tại'), false);
   assert.equal(shouldEnableExternalWebSearch('Danh sách khách hàng đang nợ quá hạn'), false);
   assert.equal(shouldEnableExternalWebSearch('Kỹ thuật bón phân NPK cho lúa'), false);
   assert.equal(shouldEnableExternalWebSearch('giá phân bón hiện nay thế nào'), true);
   assert.equal(shouldEnableExternalWebSearch('giá lúa om18 hôm nay bao nhiêu'), true);
+  assert.equal(shouldEnableExternalWebSearch('sản phẩm Sen Bay của công ty thuốc bảo vệ thực vật GAP là sản phẩm gì?'), true);
 
   const scope = evaluateStaffAccessScope(PRODUCTION_PRIMARY_ADMIN);
   assert.equal(scope.allowedTabs.includes('gemini_chat'), true);
@@ -1899,6 +1944,79 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, system
     receiptVouchers: INITIAL_RECEIPT_VOUCHERS,
     paymentVouchers: INITIAL_PAYMENT_VOUCHERS,
   });
+
+  // System instructions: internal mode omits market benchmark block; external mode allows non-warehouse lookup
+  const internalSys = buildGeminiSystemInstruction(snapshot, 'internal');
+  assert.ok(internalSys.includes('SỐ LIỆU BÁO CÁO THỜI GIAN THỰC CỦA KHO'));
+  assert.equal(internalSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP'), false);
+
+  const externalSys = buildGeminiSystemInstruction(snapshot, 'external');
+  assert.ok(externalSys.includes('TUYỆT ĐỐI KHÔNG'));
+  assert.ok(externalSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP'));
+
+  // Helper checks: thought stripping & grounding source extraction
+  const cleanedText = extractVisibleTextFromGeminiParts([
+    { thought: true, text: 'Internal English thinking...' },
+    { thought: false, text: 'Kho còn 50 bao Urê Phú Mỹ.' },
+  ]);
+  assert.equal(cleanedText, 'Kho còn 50 bao Urê Phú Mỹ.');
+
+  const extractedSources = extractGroundingSourcesFromMetadata({
+    groundingChunks: [
+      { web: { uri: 'https://bvtvgap.com/sen-bay', title: 'BVTV GAP' } },
+      { web: { uri: 'https://bvtvgap.com/sen-bay', title: 'BVTV GAP Duplicate' } },
+    ],
+  });
+  assert.equal(extractedSources.length, 1);
+  assert.equal(extractedSources[0].uri, 'https://bvtvgap.com/sen-bay');
+
+  // Per-account daily quota & Vietnam midnight auto-refresh tests
+  assert.equal(DAILY_AI_QUESTION_LIMIT, 30);
+  assert.equal(DAILY_AI_TOKEN_LIMIT, 90000);
+  const beforeMidnightVn = new Date('2026-11-24T16:59:00.000Z'); // 23:59 VN (2026-11-24)
+  const afterMidnightVn = new Date('2026-11-24T17:01:00.000Z'); // 00:01 VN (2026-11-25)
+
+  let quotaAccA = createFreshAccountDailyAiQuota('acc_A', beforeMidnightVn);
+  const quotaAccB = createFreshAccountDailyAiQuota('acc_B', beforeMidnightVn);
+
+  for (let i = 0; i < 30; i++) {
+    quotaAccA = recordAccountDailyAiUsage(quotaAccA, {
+      tokensUsed: 500,
+      modelUsed: 'gemma-4-26b-a4b-it',
+      now: beforeMidnightVn,
+    });
+  }
+  const checkA = checkAccountDailyAiQuota(quotaAccA, beforeMidnightVn);
+  assert.equal(checkA.allowed, false);
+  assert.equal(checkA.reason, 'question_limit_reached');
+  assert.equal(checkA.remainingQuestions, 0);
+
+  // Account B remains completely unaffected
+  const checkB = checkAccountDailyAiQuota(quotaAccB, beforeMidnightVn);
+  assert.equal(checkB.allowed, true);
+  assert.equal(checkB.remainingQuestions, 30);
+
+  // Token limit guard
+  let quotaAccC = createFreshAccountDailyAiQuota('acc_C', beforeMidnightVn);
+  quotaAccC = recordAccountDailyAiUsage(quotaAccC, {
+    tokensUsed: 95000,
+    modelUsed: 'gemini-4-hydrogen',
+    now: beforeMidnightVn,
+  });
+  const checkC = checkAccountDailyAiQuota(quotaAccC, beforeMidnightVn);
+  assert.equal(checkC.allowed, false);
+  assert.equal(checkC.reason, 'token_limit_reached');
+
+  // Crossing Vietnam midnight resets quota automatically
+  const refreshedAccA = normalizeAccountDailyAiQuotaForToday(
+    quotaAccA,
+    'acc_A',
+    afterMidnightVn
+  );
+  assert.equal(refreshedAccA.date, '2026-11-25');
+  assert.equal(refreshedAccA.questionsUsed, 0);
+  assert.equal(refreshedAccA.tokensUsed, 0);
+  assert.equal(checkAccountDailyAiQuota(refreshedAccA, afterMidnightVn).allowed, true);
 
   // Rule 3: Cache key differentiates internal warehouse state vs external market queries
   const internalKey1 = buildGeminiQueryCacheKey('Tóm tắt báo cáo doanh thu', snapshot);

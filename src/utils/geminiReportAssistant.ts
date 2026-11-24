@@ -8,49 +8,69 @@ import {
   StaffMember,
   SupplierProfile,
 } from '../types';
-import { formatVND } from './businessLogic';
+import { formatVND, getTodayVietnamDateStr } from './businessLogic';
 
-export type GeminiModelOptionId =
+export const DAILY_AI_QUESTION_LIMIT = 30;
+export const DAILY_AI_TOKEN_LIMIT = 90000;
+
+export type GeminiConcreteModelId =
+  | 'gemma-4-26b-a4b-it'
   | 'gemini-3.1-flash-lite'
-  | 'gemini-4-hydrogen'
-  | 'gemini-4-neon'
-  | 'gemini-4-carbon';
+  | 'gemini-4-hydrogen';
 
-export const DEFAULT_GEMINI_MODEL: GeminiModelOptionId = 'gemini-3.1-flash-lite';
+export type GeminiModelOptionId = 'auto' | GeminiConcreteModelId;
+
+export const DEFAULT_GEMINI_MODEL: GeminiModelOptionId = 'auto';
 
 export interface GeminiModelOption {
   id: GeminiModelOptionId;
   label: string;
   badge: string;
+  tier: 'auto' | 'free' | 'lite' | 'deep';
   description: string;
 }
 
 export const GEMINI_MODEL_OPTIONS: GeminiModelOption[] = [
   {
+    id: 'auto',
+    label: 'Tự động',
+    badge: 'Mặc định',
+    tier: 'auto',
+    description:
+      'Thích ứng với nhu cầu của bạn · Ưu tiên miễn phí cho kho riêng, tự bật tư duy chuyên sâu khi tra cứu bên ngoài',
+  },
+  {
+    id: 'gemma-4-26b-a4b-it',
+    label: 'Gemma 4 26B',
+    badge: 'Miễn phí',
+    tier: 'free',
+    description:
+      'Mô hình miễn phí ưu tiên trả lời nhanh các câu hỏi nội bộ trong kho riêng của từng tài khoản',
+  },
+  {
     id: 'gemini-3.1-flash-lite',
     label: 'Gemini 3.1 Flash-Lite',
     badge: 'Cơ bản',
-    description: 'Tra cứu dữ liệu kho, tồn kho, công nợ, giá bán cơ bản & tốc độ cao',
+    tier: 'lite',
+    description:
+      'Tra cứu dữ liệu kho, tồn kho, công nợ, giá bán cơ bản & tốc độ cao (miễn phí có giới hạn)',
   },
   {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Tiêu chuẩn',
-    description: 'Phân tích báo cáo kho, công nợ, doanh thu & trả lời đa lĩnh vực',
-  },
-  {
-    id: 'gemini-4-neon',
-    label: 'Gemini 4 Neon',
-    badge: 'Tương tác sâu',
-    description: 'Xử lý các bài toán đối soát kế toán & bảng biểu phức tạp',
-  },
-  {
-    id: 'gemini-4-carbon',
-    label: 'Gemini 4 Carbon',
-    badge: 'Suy luận chuyên sâu',
-    description: 'Hoạch định chiến lược kinh doanh, kỹ thuật nông nghiệp & dự báo',
+    badge: 'Chuyên sâu',
+    tier: 'deep',
+    description:
+      'Tư duy chuyên sâu & tra cứu thông tin sản phẩm, thị trường, kỹ thuật nông nghiệp bên ngoài trang',
   },
 ];
+
+export function getGeminiModelOptionMeta(modelId?: string): GeminiModelOption {
+  return (
+    GEMINI_MODEL_OPTIONS.find((opt) => opt.id === modelId) ||
+    GEMINI_MODEL_OPTIONS[0]
+  );
+}
 
 export interface WarehouseReportSnapshot {
   warehouseLabel: string;
@@ -175,75 +195,213 @@ function hasAnyKeyword(
   return false;
 }
 
-export function isPureInternalWarehouseQuery(rawQuery: string): boolean {
+export type GeminiQueryScope = 'internal' | 'external';
+
+const EXTERNAL_INDICATOR_KEYWORDS = [
+  'giá phân',
+  'phân bón hiện nay',
+  'phân bón hôm nay',
+  'thị trường phân bón',
+  'giá lúa',
+  'giá gạo',
+  'lúa hôm nay',
+  'lúa hiện nay',
+  'om18',
+  'om 18',
+  'om5451',
+  'đài thơm',
+  'ir504',
+  'st24',
+  'st25',
+  'nàng hoa',
+  'giá thuốc',
+  'giá sầu riêng',
+  'sầu riêng hôm nay',
+  'giá mít',
+  'giá xoài',
+  'giá cà phê',
+  'giá tiêu',
+  'giá ớt',
+  'giá nông sản',
+  'thị trường',
+  'thời tiết',
+  'tin tức',
+  'quy định mới',
+  'nghị định mới',
+  'kỹ thuật',
+  'cách trồng',
+  'cách bón',
+  'phòng trừ',
+  'đạo ôn',
+  'rầy nâu',
+  'cháy bìa lá',
+  'vàng lá',
+  'thối rễ',
+  'xì mủ',
+  'thán thư',
+  'nhện đỏ',
+  'bọ trĩ',
+  'làm bông',
+  'đậu trái',
+  'là sản phẩm gì',
+  'là thuốc gì',
+  'là phân gì',
+  'là gì',
+  'của công ty',
+  'công ty thuốc',
+  'công ty bvtv',
+  'bảo vệ thực vật',
+  'hoạt chất',
+  'liều lượng',
+  'liều phun',
+  'cách pha',
+  'công dụng',
+  'hãng nào',
+  'nhà sản xuất',
+  'thuế hộ kinh doanh',
+  'hóa đơn điện tử',
+  'pháp lý',
+];
+
+const INTERNAL_GREETING_OR_HELP_KEYWORDS = [
+  'xin chào',
+  'chào bạn',
+  'hello',
+  'hi',
+  'bạn là ai',
+  'bạn làm được gì',
+  'hướng dẫn sử dụng',
+];
+
+const INTERNAL_WAREHOUSE_KEYWORDS = [
+  'kho',
+  'tồn kho',
+  'hết hàng',
+  'sắp hết',
+  'vật tư sắp hết',
+  'doanh thu',
+  'lợi nhuận',
+  'lãi gộp',
+  'giá vốn',
+  'báo cáo',
+  'tổng hợp',
+  'công nợ',
+  'khách hàng',
+  'khách nợ',
+  'nợ quá hạn',
+  'nhắc nợ',
+  'phải thu',
+  'phải trả',
+  'nhà cung cấp',
+  'ncc',
+  'phiếu thu',
+  'phiếu chi',
+  'dòng tiền',
+  'sổ quỹ',
+  'quỹ tiền',
+  'hóa đơn',
+  'đơn bán',
+  'nhập kho',
+  'nhập hàng',
+  'bán chạy',
+  'top mặt hàng',
+  'giá nhập',
+  'danh mục vật tư',
+  'thống kê kho',
+  'tình hình kho',
+  'tâm an',
+];
+
+export function classifyWarehouseQueryScope(
+  rawQuery: string,
+  snapshot?: WarehouseReportSnapshot
+): GeminiQueryScope {
   const q = normalizeVietnameseQuery(rawQuery);
-  const externalIndicators = [
-    'giá phân',
-    'giá lúa',
-    'giá gạo',
-    'om18',
-    'om 18',
-    'om5451',
-    'đài thơm',
-    'ir504',
-    'st24',
-    'st25',
-    'nàng hoa',
-    'giá sầu riêng',
-    'giá mít',
-    'giá xoài',
-    'giá cà phê',
-    'giá tiêu',
-    'giá ớt',
-    'giá nông sản',
-    'thị trường',
-    'thời tiết',
-    'kỹ thuật',
-    'cách trồng',
-    'cách bón',
-    'phòng trừ',
-    'đạo ôn',
-    'rầy nâu',
-    'cháy bìa lá',
-    'vàng lá',
-    'thối rễ',
-    'xì mủ',
-    'thán thư',
-    'nhện đỏ',
-    'bọ trĩ',
-    'làm bông',
-    'đậu trái',
-  ];
-  if (hasAnyKeyword(q, externalIndicators)) {
-    return false;
+  if (!q.ascii) {
+    return 'internal';
   }
-  const internalIndicators = [
-    'báo cáo tổng hợp',
-    'doanh thu',
-    'lợi nhuận',
-    'công nợ khách',
-    'khách hàng đang nợ',
-    'nợ quá hạn',
-    'tồn kho thấp',
-    'vật tư sắp hết',
-    'dòng tiền của kho',
-    'phiếu thu',
-    'phiếu chi',
-  ];
-  return hasAnyKeyword(q, internalIndicators);
+
+  // Short greetings or help requests run on free internal tier
+  if (
+    rawQuery.trim().length <= 45 &&
+    hasAnyKeyword(q, INTERNAL_GREETING_OR_HELP_KEYWORDS) &&
+    !hasAnyKeyword(q, EXTERNAL_INDICATOR_KEYWORDS)
+  ) {
+    return 'internal';
+  }
+
+  const hasExternalSignal = hasAnyKeyword(q, EXTERNAL_INDICATOR_KEYWORDS);
+  const hasInternalSignal = hasAnyKeyword(q, INTERNAL_WAREHOUSE_KEYWORDS);
+
+  // Check if the query specifically asks about a product/customer stored in this account's warehouse
+  let matchesSnapshotEntity = false;
+  if (snapshot) {
+    const mentionsCatalogProduct = snapshot.catalogProducts.some((p) => {
+      const pName = normalizeVietnameseQuery(p.name);
+      const pCode = normalizeVietnameseQuery(p.code);
+      return (
+        (pCode.ascii.length >= 3 && q.ascii.includes(pCode.ascii)) ||
+        (pName.ascii.length >= 4 && q.ascii.includes(pName.ascii))
+      );
+    });
+    const mentionsCustomer = snapshot.debtorCustomers.some((c) => {
+      const cName = normalizeVietnameseQuery(c.name);
+      return cName.ascii.length >= 4 && q.ascii.includes(cName.ascii);
+    });
+    matchesSnapshotEntity =
+      (mentionsCatalogProduct || mentionsCustomer) &&
+      hasAnyKeyword(q, ['tồn', 'còn', 'giá bán', 'giá nhập', 'nợ', 'kho', 'bao nhiêu']);
+  }
+
+  if (matchesSnapshotEntity && !hasExternalSignal) {
+    return 'internal';
+  }
+
+  if (hasExternalSignal) {
+    // Only keep internal if user is explicitly asking about internal warehouse report (e.g. "báo cáo tổng hợp doanh thu của kho")
+    if (
+      hasAnyKeyword(q, [
+        'báo cáo tổng hợp',
+        'doanh thu của kho',
+        'dòng tiền của kho',
+        'khách hàng đang nợ',
+        'tồn kho thấp',
+        'vật tư sắp hết',
+      ])
+    ) {
+      return 'internal';
+    }
+    return 'external';
+  }
+
+  if (hasInternalSignal) {
+    return 'internal';
+  }
+
+  // Open questions outside known warehouse keywords (e.g. "sản phẩm Sen Bay của công ty BVTV GAP là sản phẩm gì?")
+  // require external knowledge + deep reasoning
+  return 'external';
+}
+
+export function isPureInternalWarehouseQuery(rawQuery: string): boolean {
+  return classifyWarehouseQueryScope(rawQuery) === 'internal';
 }
 
 /**
  * Rule 3 (Selective External Web Search):
- * Only enable external web search when the query genuinely needs fresh external information
- * (e.g. today's market prices for rice/fertilizer/produce, weather, breaking news, new regulations).
+ * Enable external web search when the query is external AND requires up-to-date market info,
+ * news, weather, regulations, or specific product/company lookup (e.g. "Sen Bay của công ty BVTV GAP").
+ * Purely general agronomy tips without specific product/company or live price indicators skip web search
+ * while still using Gemini 4 Hydrogen deep reasoning to save search grounding quota.
  */
 export function shouldEnableExternalWebSearch(rawQuery: string): boolean {
-  if (isPureInternalWarehouseQuery(rawQuery)) {
+  const scope = classifyWarehouseQueryScope(rawQuery);
+  if (scope === 'internal') {
     return false;
   }
+
   const q = normalizeVietnameseQuery(rawQuery);
-  const freshExternalKeywords = [
+  const freshOrLookupKeywords = [
     'giá phân',
     'phân bón hiện nay',
     'phân bón hôm nay',
@@ -281,30 +439,79 @@ export function shouldEnableExternalWebSearch(rawQuery: string): boolean {
     'quy định mới',
     'nghị định mới',
     'mới nhất',
+    'là sản phẩm gì',
+    'là thuốc gì',
+    'là phân gì',
+    'của công ty',
+    'công ty thuốc',
+    'công ty bvtv',
+    'bảo vệ thực vật',
+    'hoạt chất',
+    'hãng nào',
+    'nhà sản xuất',
   ];
-  return hasAnyKeyword(q, freshExternalKeywords);
+
+  if (hasAnyKeyword(q, freshOrLookupKeywords)) {
+    return true;
+  }
+
+  // General agronomy/tax advice without specific brand/price lookup doesn't need web search
+  const generalAgronomyWithoutPrice = hasAnyKeyword(q, [
+    'kỹ thuật',
+    'cách trồng',
+    'cách bón',
+    'bón phân',
+    'chăm sóc',
+    'phòng trừ',
+    'phòng trị',
+    'đạo ôn',
+    'rầy nâu',
+    'cháy bìa lá',
+    'vàng lá',
+    'thối rễ',
+    'xì mủ',
+    'thán thư',
+    'nhện đỏ',
+    'bọ trĩ',
+    'làm bông',
+    'đậu trái',
+  ]);
+  if (generalAgronomyWithoutPrice) {
+    return false;
+  }
+
+  // Any other open external question gets live search grounding
+  return true;
 }
 
 /**
- * Rule 1 & Rule 2 (Difficulty-based Model Routing, Thinking Tokens & Output Length Control):
- * - Simple questions / warehouse lookup / inventory / debt / basic prices -> Gemini 3.1 Flash-Lite
- *   with MINIMAL thinking and compact maxOutputTokens (900).
- * - Complex reconciliation, forecasting, or deep analysis -> routes to larger model only when
- *   the user explicitly selects a larger model or when the query exceeds the complexity threshold.
+ * Rule 1 & Rule 2 (Auto-routing, Free-first Internal Warehouse vs Deep External Reasoning):
+ * - 'auto' (default):
+ *   - Internal warehouse questions -> 'gemma-4-26b-a4b-it' (Free) with MINIMAL thinking.
+ *   - Complex multi-period accounting/forecasting OR external product/market/agronomy questions
+ *     -> 'gemini-4-hydrogen' (Deep reasoning) with LOW/MEDIUM thinking + Google Search when needed.
+ * - Fallback chain ensures continuity if any single model is rate-limited.
  */
 export interface GeminiCostRoutingDecision {
-  targetModel: GeminiModelOptionId;
+  selectedOption: GeminiModelOptionId;
+  targetModel: GeminiConcreteModelId;
+  fallbackModels: GeminiConcreteModelId[];
+  queryScope: GeminiQueryScope;
   isComplexQuery: boolean;
   thinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM';
   maxOutputTokens: number;
   enableExternalSearch: boolean;
+  routingReason: string;
 }
 
 export function classifyQueryRoutingAndCostConfig(
   rawQuery: string,
-  userSelectedModel: GeminiModelOptionId = DEFAULT_GEMINI_MODEL
+  userSelectedModel: GeminiModelOptionId = DEFAULT_GEMINI_MODEL,
+  snapshot?: WarehouseReportSnapshot
 ): GeminiCostRoutingDecision {
   const q = normalizeVietnameseQuery(rawQuery);
+  const queryScope = classifyWarehouseQueryScope(rawQuery, snapshot);
+
   const complexKeywords = [
     'đối soát phức tạp',
     'phân tích chuyên sâu',
@@ -318,37 +525,108 @@ export function classifyQueryRoutingAndCostConfig(
     'tối ưu dòng tiền dài hạn',
   ];
   const isComplexQuery =
-    hasAnyKeyword(q, complexKeywords) || rawQuery.trim().length > 260;
+    hasAnyKeyword(q, complexKeywords) || rawQuery.trim().length > 280;
 
-  // If user kept the default model (gemini-3.1-flash-lite), only escalate to gemini-4-hydrogen
-  // when the query crosses the complex analysis/forecasting threshold.
-  // If user explicitly picked a larger model in the dropdown, respect their choice.
-  let targetModel: GeminiModelOptionId = userSelectedModel || DEFAULT_GEMINI_MODEL;
-  if (targetModel === 'gemini-3.1-flash-lite' && isComplexQuery) {
-    targetModel = 'gemini-4-hydrogen';
-  }
-
-  let thinkingLevel: 'MINIMAL' | 'LOW' | 'MEDIUM' = 'MINIMAL';
-  if (targetModel === 'gemini-3.1-flash-lite') {
-    thinkingLevel = 'MINIMAL';
-  } else if (
-    isComplexQuery &&
-    (targetModel === 'gemini-4-neon' || targetModel === 'gemini-4-carbon')
-  ) {
-    thinkingLevel = 'MEDIUM';
-  } else {
-    thinkingLevel = 'LOW';
-  }
-
-  const maxOutputTokens = isComplexQuery ? 1400 : 900;
   const enableExternalSearch = shouldEnableExternalWebSearch(rawQuery);
+  const selectedOption: GeminiModelOptionId = userSelectedModel || DEFAULT_GEMINI_MODEL;
+
+  if (selectedOption === 'auto') {
+    if (queryScope === 'internal' && !isComplexQuery) {
+      return {
+        selectedOption,
+        targetModel: 'gemma-4-26b-a4b-it',
+        fallbackModels: [
+          'gemma-4-26b-a4b-it',
+          'gemini-3.1-flash-lite',
+          'gemini-4-hydrogen',
+        ],
+        queryScope,
+        isComplexQuery,
+        thinkingLevel: 'MINIMAL',
+        maxOutputTokens: 1200,
+        enableExternalSearch: false,
+        routingReason: 'Ưu tiên mô hình miễn phí cho câu hỏi nội bộ kho riêng',
+      };
+    }
+
+    if (queryScope === 'internal' && isComplexQuery) {
+      return {
+        selectedOption,
+        targetModel: 'gemini-4-hydrogen',
+        fallbackModels: [
+          'gemini-4-hydrogen',
+          'gemini-3.1-flash-lite',
+          'gemma-4-26b-a4b-it',
+        ],
+        queryScope,
+        isComplexQuery,
+        thinkingLevel: 'LOW',
+        maxOutputTokens: 2048,
+        enableExternalSearch: false,
+        routingReason: 'Phân tích/dự báo chuyên sâu dữ liệu kho',
+      };
+    }
+
+    return {
+      selectedOption,
+      targetModel: 'gemini-4-hydrogen',
+      fallbackModels: ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
+      queryScope,
+      isComplexQuery,
+      thinkingLevel: isComplexQuery ? 'MEDIUM' : 'LOW',
+      maxOutputTokens: isComplexQuery ? 2800 : 2048,
+      enableExternalSearch,
+      routingReason:
+        'Câu hỏi thông tin bên ngoài trang — tự động bật tư duy chuyên sâu',
+    };
+  }
+
+  if (selectedOption === 'gemma-4-26b-a4b-it') {
+    return {
+      selectedOption,
+      targetModel: 'gemma-4-26b-a4b-it',
+      fallbackModels: [
+        'gemma-4-26b-a4b-it',
+        'gemini-3.1-flash-lite',
+        'gemini-4-hydrogen',
+      ],
+      queryScope,
+      isComplexQuery,
+      thinkingLevel: 'MINIMAL',
+      maxOutputTokens: 1200,
+      enableExternalSearch: false,
+      routingReason: 'Mô hình miễn phí (thủ công)',
+    };
+  }
+
+  if (selectedOption === 'gemini-3.1-flash-lite') {
+    return {
+      selectedOption,
+      targetModel: 'gemini-3.1-flash-lite',
+      fallbackModels: [
+        'gemini-3.1-flash-lite',
+        'gemma-4-26b-a4b-it',
+        'gemini-4-hydrogen',
+      ],
+      queryScope,
+      isComplexQuery,
+      thinkingLevel: 'MINIMAL',
+      maxOutputTokens: 1400,
+      enableExternalSearch,
+      routingReason: 'Gemini 3.1 Flash-Lite cơ bản (thủ công)',
+    };
+  }
 
   return {
-    targetModel,
+    selectedOption,
+    targetModel: 'gemini-4-hydrogen',
+    fallbackModels: ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'],
+    queryScope,
     isComplexQuery,
-    thinkingLevel,
-    maxOutputTokens,
+    thinkingLevel: isComplexQuery ? 'MEDIUM' : 'LOW',
+    maxOutputTokens: isComplexQuery ? 2800 : 2048,
     enableExternalSearch,
+    routingReason: 'Gemini 4 Hydrogen chuyên sâu (thủ công)',
   };
 }
 
@@ -658,7 +936,12 @@ export const AGRICULTURAL_MARKET_BENCHMARK_CONTEXT = `=== DỮ LIỆU THAM CHI�
    - Mít Thái: 18.000 – 32.000 đ/kg | Cà phê nhân xô: 110.000 – 125.000 đ/kg | Hồ tiêu đen: 140.000 – 158.000 đ/kg
 ==============================================================================`;
 
-export function buildGeminiSystemInstruction(snapshot: WarehouseReportSnapshot): string {
+export type GeminiSystemInstructionMode = 'internal' | 'external' | 'both';
+
+export function buildGeminiSystemInstruction(
+  snapshot: WarehouseReportSnapshot,
+  mode: GeminiSystemInstructionMode = 'both'
+): string {
   const debtorsSummary =
     snapshot.debtorCustomers.length === 0
       ? 'Không có khách hàng nào đang nợ.'
@@ -730,19 +1013,7 @@ export function buildGeminiSystemInstruction(snapshot: WarehouseReportSnapshot):
           )
           .join('\n');
 
-  return `Bạn là **Trợ lý A.I — VTNN Tâm An**, trợ lý trí tuệ nhân tạo tích hợp trực tiếp trong hệ thống Quản lý Bán hàng, Kho & Công nợ Vật tư Nông nghiệp Tâm An.
-
-NHIỆM VỤ KÉP CỦA BẠN (PHÂN BIỆT RÕ CÂU HỎI NỘI BỘ KHO VÀ CÂU HỎI THỊ TRƯỜNG / NÔNG NGHIỆP BÊN NGOÀI):
-1. **Khi người dùng hỏi thông tin thị trường, giá cả nông nghiệp bên ngoài hoặc kỹ thuật canh tác** (Ví dụ: "giá phân bón hiện nay thế nào", "giá lúa OM18 hôm nay", "giá sầu riêng", "kỹ thuật bón phân, trị bệnh đạo ôn, rầy nâu, vàng lá thối rễ", thời tiết, thuế hộ kinh doanh, hoặc kiến thức xã hội):
-   - Trả lời **TRỰC TIẾP, CHÍNH XÁC VÀ CHI TIẾT** vào đúng chủ đề người dùng hỏi bằng cách sử dụng dữ liệu thị trường nông nghiệp tham chiếu bên dưới (cung cấp bảng giá cụ thể từng chủng loại/thương hiệu tại ĐBSCL & Việt Nam, xu hướng thị trường và lời khuyên thực tế).
-   - **TUYỆT ĐỐI KHÔNG** nói rằng bạn không có số liệu hoặc không thể tra cứu giá thị trường, và **TUYỆT ĐỐI KHÔNG** trả lời bằng Báo cáo Tổng hợp Doanh thu 0đ của kho khi người dùng đang hỏi giá thị trường hoặc kiến thức bên ngoài!
-2. **Khi người dùng hỏi về Báo cáo & Số liệu Nội bộ của Kho (Trong ứng dụng)** (Ví dụ: hỏi doanh thu kho, lợi nhuận kho, danh sách khách hàng đang nợ, nợ nhà cung cấp, kiểm tra tồn kho nội bộ, dòng tiền thu-chi):
-   - Bạn được kết nối trực tiếp với số liệu thời gian thực của kho **${snapshot.warehouseLabel}** (Người dùng: **${snapshot.staffDisplayName}**, Ngày dữ liệu: **${snapshot.generatedAt}**).
-   - Hãy trả lời chính xác tuyệt đối theo số liệu thực tế của kho bên dưới.
-
-${AGRICULTURAL_MARKET_BENCHMARK_CONTEXT}
-
-=== SỐ LIỆU BÁO CÁO THỜI GIAN THỰC CỦA KHO: ${snapshot.warehouseLabel} ===
+  const internalWarehouseBlock = `=== SỐ LIỆU BÁO CÁO THỜI GIAN THỰC CỦA KHO: ${snapshot.warehouseLabel} ===
 1. TỔNG QUAN DOANH THU & LỢI NHUẬN:
    - Tổng số hóa đơn bán hàng: ${snapshot.salesCount} hóa đơn
    - Tổng doanh thu bán hàng: ${formatVND(snapshot.totalSalesRevenue)}
@@ -784,11 +1055,287 @@ ${topProductsSummary}
    - Tổng dòng tiền thu vào (Bán thu ngay + Phiếu thu): ${formatVND(snapshot.totalCashIn)}
    - Tổng dòng tiền chi ra (Nhập trả ngay + Phiếu chi): ${formatVND(snapshot.totalCashOut)}
    - Cân đối dòng tiền thuần (Thu - Chi): ${formatVND(snapshot.netCashFlow)}
-===================================================================
+===================================================================`;
+
+  if (mode === 'internal') {
+    return `Bạn là **Trợ lý A.I — VTNN Tâm An**, trợ lý nội bộ kết nối trực tiếp với kho riêng **${snapshot.warehouseLabel}** (Tài khoản: **${snapshot.staffDisplayName}**, Ngày dữ liệu: **${snapshot.generatedAt}**).
+
+NHIỆM VỤ CỦA BẠN:
+- Chỉ trả lời chính xác tuyệt đối theo số liệu thực tế của kho **${snapshot.warehouseLabel}** bên dưới (tồn kho, doanh thu, lợi nhuận, công nợ khách hàng, nợ nhà cung cấp, dòng tiền thu-chi).
+- Không tự suy diễn số liệu ngoài kho khi đang trả lời báo cáo nội bộ; nếu mục nào bằng 0 thì ghi nhận đúng là 0 đ.
+- Trả lời thẳng vào câu hỏi bằng tiếng Việt rõ ràng, súc tích, dùng Markdown (in đậm số tiền và danh sách gạch đầu dòng).
+
+${internalWarehouseBlock}
+
+QUY TẮC BẢO MẬT:
+- Tuyệt đối chỉ sử dụng dữ liệu của kho riêng **${snapshot.warehouseLabel}**, đảm bảo tính độc lập dữ liệu của từng tài khoản.`;
+  }
+
+  if (mode === 'external') {
+    const briefCatalogNames =
+      snapshot.catalogProducts.length === 0
+        ? 'Kho hiện chưa có danh mục sản phẩm.'
+        : snapshot.catalogProducts
+            .slice(0, 25)
+            .map((p) => `${p.name} (tồn ${p.stock} ${p.unit}, bán ${formatVND(p.sellPrice)})`)
+            .join('; ');
+
+    return `Bạn là **Trợ lý A.I — VTNN Tâm An**, chuyên gia tư vấn nông nghiệp, thuốc bảo vệ thực vật, phân bón và thị trường vật tư nông nghiệp Việt Nam (Ngày hiện tại: **${snapshot.generatedAt}**).
+
+NHIỆM VỤ KHI NGƯỜI DÙNG HỎI THÔNG TIN BÊN NGOÀI TRANG:
+- Dùng kiến thức chuyên sâu và kết quả tìm kiếm Google Search (nếu có) để trả lời **TRỰC TIẾP, CHÍNH XÁC VÀ ĐẦY ĐỦ** về sản phẩm BVTV, hoạt chất, công ty sản xuất/phân phối, giá phân bón/lúa gạo/nông sản thị trường, kỹ thuật canh tác, sâu bệnh hoặc quy định hộ kinh doanh.
+- **TUYỆT ĐỐI KHÔNG** từ chối trả lời chỉ vì sản phẩm đó không có trong kho nội bộ, và **KHÔNG** đổ ra báo cáo doanh thu/công nợ 0đ của kho khi người dùng không hỏi số liệu kho.
+- Nếu sản phẩm hoặc nhóm hàng tương đương hiện có bán trong kho **${snapshot.warehouseLabel}**, bạn có thể ghi chú ngắn gọn 1 dòng ở cuối để người dùng tham khảo.
+
+Danh mục tóm tắt hiện có tại kho ${snapshot.warehouseLabel} (chỉ để tham khảo thêm nếu liên quan): ${briefCatalogNames}
+
+${AGRICULTURAL_MARKET_BENCHMARK_CONTEXT}
+
+QUY TẮC TRÌNH BÀY:
+- Trả lời bằng tiếng Việt rõ ràng, chuyên nghiệp, có cấu trúc Markdown dễ đọc.`;
+  }
+
+  return `Bạn là **Trợ lý A.I — VTNN Tâm An**, trợ lý trí tuệ nhân tạo tích hợp trực tiếp trong hệ thống Quản lý Bán hàng, Kho & Công nợ Vật tư Nông nghiệp Tâm An.
+
+NHIỆM VỤ KÉP CỦA BẠN (PHÂN BIỆT RÕ CÂU HỎI NỘI BỘ KHO VÀ CÂU HỎI THỊ TRƯỜNG / NÔNG NGHIỆP BÊN NGOÀI):
+1. **Khi người dùng hỏi thông tin thị trường, giá cả nông nghiệp bên ngoài hoặc kỹ thuật canh tác** (Ví dụ: "giá phân bón hiện nay thế nào", "giá lúa OM18 hôm nay", "sản phẩm Sen Bay của công ty BVTV GAP là gì?", "kỹ thuật bón phân, trị bệnh đạo ôn, rầy nâu, vàng lá thối rễ", thời tiết, thuế hộ kinh doanh):
+   - Trả lời **TRỰC TIẾP, CHÍNH XÁC VÀ CHI TIẾT** vào đúng chủ đề người dùng hỏi.
+   - **TUYỆT ĐỐI KHÔNG** nói rằng bạn không có số liệu hoặc trả lời bằng Báo cáo Tổng hợp Doanh thu 0đ của kho khi người dùng đang hỏi sản phẩm/thị trường bên ngoài!
+2. **Khi người dùng hỏi về Báo cáo & Số liệu Nội bộ của Kho (Trong ứng dụng)** (Ví dụ: hỏi doanh thu kho, lợi nhuận kho, danh sách khách hàng đang nợ, nợ nhà cung cấp, kiểm tra tồn kho nội bộ, dòng tiền thu-chi):
+   - Bạn được kết nối trực tiếp với số liệu thời gian thực của kho **${snapshot.warehouseLabel}** (Người dùng: **${snapshot.staffDisplayName}**, Ngày dữ liệu: **${snapshot.generatedAt}**).
+   - Hãy trả lời chính xác tuyệt đối theo số liệu thực tế của kho bên dưới.
+
+${AGRICULTURAL_MARKET_BENCHMARK_CONTEXT}
+
+${internalWarehouseBlock}
 
 QUY TẮC TRÌNH BÀY:
 - Trả lời bằng tiếng Việt rõ ràng, chuyên nghiệp, sử dụng định dạng Markdown (in đậm số tiền quan trọng, dùng danh sách gạch đầu dòng để dễ đọc).
 - Tuyệt đối chỉ sử dụng dữ liệu của kho **${snapshot.warehouseLabel}** khi báo cáo nội bộ, đảm bảo tính bảo mật và độc lập dữ liệu của kho.`;
+}
+
+export interface AccountDailyAiQuota {
+  accountId: string;
+  date: string;
+  questionsUsed: number;
+  questionLimit: number;
+  tokensUsed: number;
+  tokenLimit: number;
+  freeModelQuestions: number;
+  deepModelQuestions: number;
+  updatedAt: string;
+}
+
+export function createFreshAccountDailyAiQuota(
+  accountId: string,
+  now: Date = new Date(),
+  questionLimit: number = DAILY_AI_QUESTION_LIMIT,
+  tokenLimit: number = DAILY_AI_TOKEN_LIMIT
+): AccountDailyAiQuota {
+  const safeAccountId = (accountId || 'guest').trim() || 'guest';
+  return {
+    accountId: safeAccountId,
+    date: getTodayVietnamDateStr(now),
+    questionsUsed: 0,
+    questionLimit: Math.max(1, Number(questionLimit) || DAILY_AI_QUESTION_LIMIT),
+    tokensUsed: 0,
+    tokenLimit: Math.max(1000, Number(tokenLimit) || DAILY_AI_TOKEN_LIMIT),
+    freeModelQuestions: 0,
+    deepModelQuestions: 0,
+    updatedAt: now.toISOString(),
+  };
+}
+
+export function normalizeAccountDailyAiQuotaForToday(
+  existing: Partial<AccountDailyAiQuota> | null | undefined,
+  accountId: string,
+  now: Date = new Date(),
+  questionLimit: number = DAILY_AI_QUESTION_LIMIT,
+  tokenLimit: number = DAILY_AI_TOKEN_LIMIT
+): AccountDailyAiQuota {
+  const safeAccountId = (accountId || 'guest').trim() || 'guest';
+  const todayVn = getTodayVietnamDateStr(now);
+  const effectiveQuestionLimit = Math.max(
+    1,
+    Number(questionLimit) || DAILY_AI_QUESTION_LIMIT
+  );
+  const effectiveTokenLimit = Math.max(
+    1000,
+    Number(tokenLimit) || DAILY_AI_TOKEN_LIMIT
+  );
+
+  if (
+    !existing ||
+    existing.accountId !== safeAccountId ||
+    existing.date !== todayVn
+  ) {
+    return createFreshAccountDailyAiQuota(
+      safeAccountId,
+      now,
+      effectiveQuestionLimit,
+      effectiveTokenLimit
+    );
+  }
+
+  return {
+    accountId: safeAccountId,
+    date: todayVn,
+    questionsUsed: Math.max(0, Number(existing.questionsUsed) || 0),
+    questionLimit: effectiveQuestionLimit,
+    tokensUsed: Math.max(0, Number(existing.tokensUsed) || 0),
+    tokenLimit: effectiveTokenLimit,
+    freeModelQuestions: Math.max(0, Number(existing.freeModelQuestions) || 0),
+    deepModelQuestions: Math.max(0, Number(existing.deepModelQuestions) || 0),
+    updatedAt: existing.updatedAt || now.toISOString(),
+  };
+}
+
+export function checkAccountDailyAiQuota(
+  quota: AccountDailyAiQuota,
+  now: Date = new Date()
+): {
+  allowed: boolean;
+  reason?: 'question_limit_reached' | 'token_limit_reached';
+  remainingQuestions: number;
+  remainingTokens: number;
+  message?: string;
+  normalizedQuota: AccountDailyAiQuota;
+} {
+  const normalizedQuota = normalizeAccountDailyAiQuotaForToday(
+    quota,
+    quota.accountId,
+    now,
+    quota.questionLimit,
+    quota.tokenLimit
+  );
+
+  const remainingQuestions = Math.max(
+    0,
+    normalizedQuota.questionLimit - normalizedQuota.questionsUsed
+  );
+  const remainingTokens = Math.max(
+    0,
+    normalizedQuota.tokenLimit - normalizedQuota.tokensUsed
+  );
+
+  if (normalizedQuota.questionsUsed >= normalizedQuota.questionLimit) {
+    return {
+      allowed: false,
+      reason: 'question_limit_reached',
+      remainingQuestions: 0,
+      remainingTokens,
+      message: `Tài khoản đã sử dụng hết hạn mức ${normalizedQuota.questionLimit}/${normalizedQuota.questionLimit} câu hỏi Trợ lý A.I trong ngày ${normalizedQuota.date}. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai (giờ Việt Nam).`,
+      normalizedQuota,
+    };
+  }
+
+  if (normalizedQuota.tokensUsed >= normalizedQuota.tokenLimit) {
+    return {
+      allowed: false,
+      reason: 'token_limit_reached',
+      remainingQuestions,
+      remainingTokens: 0,
+      message: `Tài khoản đã chạm trần chi phí ${normalizedQuota.tokenLimit.toLocaleString(
+        'vi-VN'
+      )} token trong ngày ${normalizedQuota.date}. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai (giờ Việt Nam).`,
+      normalizedQuota,
+    };
+  }
+
+  return {
+    allowed: true,
+    remainingQuestions,
+    remainingTokens,
+    normalizedQuota,
+  };
+}
+
+export function recordAccountDailyAiUsage(
+  quota: AccountDailyAiQuota,
+  usage: {
+    tokensUsed?: number;
+    modelUsed: GeminiConcreteModelId;
+    cached?: boolean;
+    now?: Date;
+  }
+): AccountDailyAiQuota {
+  const now = usage.now || new Date();
+  const base = normalizeAccountDailyAiQuotaForToday(
+    quota,
+    quota.accountId,
+    now,
+    quota.questionLimit,
+    quota.tokenLimit
+  );
+  const tokenDelta = usage.cached ? 0 : Math.max(0, Math.round(Number(usage.tokensUsed) || 0));
+  const isDeepModel = usage.modelUsed === 'gemini-4-hydrogen';
+
+  return {
+    ...base,
+    questionsUsed: base.questionsUsed + 1,
+    tokensUsed: base.tokensUsed + tokenDelta,
+    freeModelQuestions: base.freeModelQuestions + (isDeepModel ? 0 : 1),
+    deepModelQuestions: base.deepModelQuestions + (isDeepModel ? 1 : 0),
+    updatedAt: now.toISOString(),
+  };
+}
+
+export function estimateVietnameseTokens(text: string): number {
+  const len = (text || '').trim().length;
+  if (len === 0) return 0;
+  return Math.max(1, Math.ceil(len / 3));
+}
+
+export function extractVisibleTextFromGeminiParts(
+  parts?: Array<{ text?: string; thought?: boolean }>
+): string {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return '';
+  }
+  return parts
+    .filter((p) => p && p.thought !== true && typeof p.text === 'string')
+    .map((p) => p.text || '')
+    .join('')
+    .trim();
+}
+
+export function extractGroundingSourcesFromMetadata(
+  groundingMetadata?: unknown
+): Array<{ title: string; uri: string; sourceName?: string }> {
+  if (!groundingMetadata || typeof groundingMetadata !== 'object') {
+    return [];
+  }
+  const chunks = (
+    groundingMetadata as {
+      groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+    }
+  ).groundingChunks;
+
+  if (!Array.isArray(chunks)) {
+    return [];
+  }
+
+  const seenUris = new Set<string>();
+  const results: Array<{ title: string; uri: string; sourceName?: string }> = [];
+  for (const chunk of chunks) {
+    const uri = chunk?.web?.uri?.trim();
+    const title = chunk?.web?.title?.trim();
+    if (!uri || seenUris.has(uri)) continue;
+    seenUris.add(uri);
+    let sourceName = title;
+    try {
+      sourceName = new URL(uri).hostname.replace(/^www\./, '');
+    } catch {
+      // keep title as sourceName
+    }
+    results.push({
+      title: title || sourceName || 'Nguồn tra cứu Google',
+      uri,
+      sourceName,
+    });
+    if (results.length >= 6) break;
+  }
+  return results;
 }
 
 export function generateSmartReportAnswer(
@@ -1393,6 +1940,21 @@ ${liveHeadlinesSection}
 
 ---
 *Bạn có thể nhấn vào từng đường dẫn nguồn tin phía dưới để xem bài viết chi tiết, hoặc đặt câu hỏi cụ thể hơn về giá phân bón, giá lúa, kỹ thuật cây trồng và số liệu báo cáo kho **${snapshot.warehouseLabel}**.*`;
+  }
+
+  const isGreeting =
+    cleanDisplayQuery.length <= 40 &&
+    hasAnyKeyword(q, ['xin chào', 'chào bạn', 'hello', 'hi', 'hướng dẫn']);
+
+  if (!isGreeting && classifyWarehouseQueryScope(userQuery, snapshot) === 'external') {
+    return `### Hiện chưa kết nối được máy chủ Gemini A.I trực tuyến
+
+Tôi đã nhận câu hỏi: **"${cleanDisplayQuery}"**.
+
+Đây là câu hỏi tra cứu thông tin sản phẩm / thị trường bên ngoài ứng dụng nên cần kết nối **Gemini 4 Hydrogen + Tìm kiếm Google** trực tuyến để trả lời chính xác thay vì suy đoán mẫu cứng.
+
+- Vui lòng kiểm tra kết nối mạng hoặc bấm gửi lại sau vài giây.
+- Trong lúc chờ kết nối, bạn vẫn có thể hỏi trực tiếp các báo cáo nội bộ của kho **${snapshot.warehouseLabel}** (doanh thu, tồn kho, công nợ khách hàng, nợ nhà cung cấp, dòng tiền) hoặc giá phân bón, giá lúa OM18/ST25, kỹ thuật canh tác.`;
   }
 
   return `### Trợ lý A.I — Giải đáp cho yêu cầu: "${cleanDisplayQuery}"

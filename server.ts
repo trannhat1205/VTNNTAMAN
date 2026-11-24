@@ -4,12 +4,19 @@ import path from 'node:path';
 import express from 'express';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
+  AccountDailyAiQuota,
   AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
+  checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
   DEFAULT_GEMINI_MODEL,
+  estimateVietnameseTokens,
+  extractGroundingSourcesFromMetadata,
+  extractVisibleTextFromGeminiParts,
   GEMINI_QUERY_CACHE_TTL_MS,
+  GeminiConcreteModelId,
   GeminiModelOptionId,
-  isPureInternalWarehouseQuery,
+  normalizeAccountDailyAiQuotaForToday,
+  recordAccountDailyAiUsage,
   shouldEnableExternalWebSearch,
 } from './src/utils/geminiReportAssistant';
 
@@ -21,10 +28,10 @@ dotenv.config({ path: path.join(BASE_DIR, '.env.local') });
 dotenv.config({ path: path.join(BASE_DIR, '.env') });
 
 const ALLOWED_MODELS = new Set<GeminiModelOptionId>([
+  'auto',
+  'gemma-4-26b-a4b-it',
   'gemini-3.1-flash-lite',
   'gemini-4-hydrogen',
-  'gemini-4-neon',
-  'gemini-4-carbon',
 ]);
 
 // Rule 3: 6-hour in-memory caches for external web search results and popular chat responses
@@ -37,11 +44,25 @@ const SERVER_RESPONSE_CACHE = new Map<
   string,
   {
     text: string;
-    modelUsed: string;
+    modelUsed: GeminiConcreteModelId;
+    queryScope: 'internal' | 'external';
+    routingReason: string;
     sources: GroundingSourceLink[];
     cachedAt: number;
   }
 >();
+
+const SERVER_ACCOUNT_QUOTAS = new Map<string, AccountDailyAiQuota>();
+
+function getOrResetServerAccountQuota(accountId: string): AccountDailyAiQuota {
+  const safeId = (accountId || 'guest').trim() || 'guest';
+  const normalized = normalizeAccountDailyAiQuotaForToday(
+    SERVER_ACCOUNT_QUOTAS.get(safeId),
+    safeId
+  );
+  SERVER_ACCOUNT_QUOTAS.set(safeId, normalized);
+  return normalized;
+}
 
 interface ChatHistoryTurn {
   role: 'user' | 'model';
@@ -60,23 +81,27 @@ export type GeminiKeyStatusState = 'connected' | 'quota_depleted' | 'not_configu
 
 function getCandidateApiKeys(): string[] {
   const keys: string[] = [];
+  const pushKey = (val?: string) => {
+    const trimmed = typeof val === 'string' ? val.trim() : '';
+    if (trimmed && !keys.includes(trimmed)) {
+      keys.push(trimmed);
+    }
+  };
+
   try {
     const envLocalPath = path.join(BASE_DIR, '.env.local');
     if (fs.existsSync(envLocalPath)) {
       const parsed = dotenv.parse(fs.readFileSync(envLocalPath, 'utf8'));
-      if (parsed.GEMINI_API_KEY && parsed.GEMINI_API_KEY.trim()) {
-        keys.push(parsed.GEMINI_API_KEY.trim());
-      }
+      pushKey(parsed.GEMINI_API_KEY);
+      pushKey(parsed.VITE_GEMINI_API_KEY);
     }
   } catch {
     // ignore read errors
   }
 
-  for (const envVal of [process.env.GEMINI_API_KEY, process.env.API_KEY]) {
-    if (envVal && envVal.trim() && !keys.includes(envVal.trim())) {
-      keys.push(envVal.trim());
-    }
-  }
+  pushKey(process.env.GEMINI_API_KEY);
+  pushKey(process.env.VITE_GEMINI_API_KEY);
+  pushKey(process.env.API_KEY);
   return keys;
 }
 
@@ -280,11 +305,22 @@ async function startServer() {
 
   app.post('/api/gemini/chat', async (req: express.Request, res: express.Response) => {
     try {
-      const { message, history, model, systemInstruction } = req.body as {
+      const {
+        message,
+        history,
+        model,
+        systemInstruction,
+        internalSystemInstruction,
+        externalSystemInstruction,
+        accountId,
+      } = req.body as {
         message?: string;
         history?: ChatHistoryTurn[];
         model?: string;
         systemInstruction?: string;
+        internalSystemInstruction?: string;
+        externalSystemInstruction?: string;
+        accountId?: string;
       };
 
       const normalizedMessage = typeof message === 'string' ? message.normalize('NFC').trim() : '';
@@ -293,7 +329,21 @@ async function startServer() {
         return;
       }
 
-      // Rule 1 & Rule 2: Model Routing by difficulty + ThinkingLevel & maxOutputTokens control
+      const effectiveAccountId =
+        typeof accountId === 'string' && accountId.trim() ? accountId.trim() : 'guest';
+      const currentQuota = getOrResetServerAccountQuota(effectiveAccountId);
+      const quotaCheck = checkAccountDailyAiQuota(currentQuota);
+      if (!quotaCheck.allowed) {
+        res.status(429).json({
+          error: quotaCheck.message,
+          quotaExceeded: true,
+          reason: quotaCheck.reason,
+          quota: quotaCheck.normalizedQuota,
+        });
+        return;
+      }
+
+      // Rule 1 & Rule 2: Auto-routing (Free-first internal vs Deep external reasoning)
       const validRequestedModel: GeminiModelOptionId =
         model && ALLOWED_MODELS.has(model as GeminiModelOptionId)
           ? (model as GeminiModelOptionId)
@@ -304,8 +354,16 @@ async function startServer() {
         validRequestedModel
       );
 
-      // Rule 3: Check 6-hour server response cache before hitting external search or Gemini API
-      const sysHash = systemInstruction ? systemInstruction.slice(0, 160) : 'default';
+      const baseSys =
+        routing.queryScope === 'internal' && internalSystemInstruction?.trim()
+          ? internalSystemInstruction.trim()
+          : routing.queryScope === 'external' && externalSystemInstruction?.trim()
+          ? externalSystemInstruction.trim()
+          : systemInstruction && systemInstruction.trim()
+          ? systemInstruction.trim()
+          : `Bạn là Trợ lý A.I — VTNN Tâm An, chuyên gia phân tích thị trường vật tư nông nghiệp, giá phân bón, giá lúa gạo, kỹ thuật cây trồng và quản lý kho.`;
+
+      const sysHash = `${routing.queryScope}:${baseSys.slice(0, 160)}:${baseSys.length}`;
       const serverCacheKey = `${routing.targetModel}::${sysHash}::${normalizedMessage.toLowerCase()}`;
       const cachedResponse = SERVER_RESPONSE_CACHE.get(serverCacheKey);
       const candidateKeys = getCandidateApiKeys();
@@ -314,20 +372,28 @@ async function startServer() {
         cachedResponse &&
         Date.now() - cachedResponse.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
       ) {
+        const updatedQuota = recordAccountDailyAiUsage(quotaCheck.normalizedQuota, {
+          tokensUsed: 0,
+          modelUsed: cachedResponse.modelUsed,
+          cached: true,
+        });
+        SERVER_ACCOUNT_QUOTAS.set(effectiveAccountId, updatedQuota);
+
         res.json({
           text: cachedResponse.text,
           modelUsed: cachedResponse.modelUsed,
+          queryScope: cachedResponse.queryScope,
+          routingReason: cachedResponse.routingReason,
           apiConnected: true,
           cached: true,
           keyState: 'connected' as GeminiKeyStatusState,
           maskedKey: maskApiKey(candidateKeys[0]),
           sources: cachedResponse.sources,
+          usage: { totalTokens: 0 },
+          quota: updatedQuota,
         });
         return;
       }
-
-      // Rule 3: Only enable external web search when the query actually requires fresh external info
-      const preFetchedSources = await getCachedExternalSources(normalizedMessage);
 
       if (candidateKeys.length === 0) {
         res.status(200).json({
@@ -335,7 +401,7 @@ async function startServer() {
           fallbackRequired: true,
           apiConnected: false,
           keyState: 'not_configured' as GeminiKeyStatusState,
-          sources: preFetchedSources,
+          sources: [],
         });
         return;
       }
@@ -356,41 +422,12 @@ async function startServer() {
             }))
         : [];
 
-      const candidateModels: GeminiModelOptionId[] = Array.from(
-        new Set<GeminiModelOptionId>([
-          routing.targetModel,
-          'gemini-3.1-flash-lite',
-          'gemini-4-hydrogen',
-        ])
-      );
-
-      const isInternalOnly = isPureInternalWarehouseQuery(normalizedMessage);
-
-      const liveContextBlock =
-        preFetchedSources.length > 0
-          ? `\n\n=== TIN TỨC & DỮ LIỆU TRA CỨU TRỰC TUYẾN MỚI NHẤT CHO "${normalizedMessage}" ===\n` +
-            preFetchedSources
-              .map(
-                (s, i) =>
-                  `${i + 1}. ${s.title}${s.sourceName ? ` (${s.sourceName})` : ''}${
-                    s.snippet ? ` — ${s.snippet}` : ''
-                  }`
-              )
-              .join('\n')
-          : '';
-
-      const baseSys =
-        systemInstruction && systemInstruction.trim()
-          ? systemInstruction.trim()
-          : `Bạn là Trợ lý A.I — VTNN Tâm An, chuyên gia phân tích thị trường vật tư nông nghiệp, giá phân bón, giá lúa gạo, kỹ thuật cây trồng và quản lý kho.`;
-
-      // Rule 4: Keep system prompt prefix cache-friendly and omit external market benchmark block for pure internal warehouse queries
       const effectiveSystemInstruction = [
         baseSys,
-        isInternalOnly || baseSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP')
+        routing.queryScope === 'internal' ||
+        baseSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP')
           ? ''
           : AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
-        liveContextBlock,
       ]
         .filter(Boolean)
         .join('\n\n');
@@ -401,70 +438,125 @@ async function startServer() {
           httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
         });
 
-        for (const candidateModel of candidateModels) {
-          try {
-            // Rule 2: ThinkingLevel.MINIMAL for Gemini 3.1 Flash-Lite, LOW/MEDIUM for Gemini 4 models
-            const thinkingLevel =
-              candidateModel === 'gemini-3.1-flash-lite'
-                ? ThinkingLevel.MINIMAL
-                : candidateModel === 'gemini-4-neon' ||
-                  candidateModel === 'gemini-4-carbon' ||
-                  routing.thinkingLevel === 'MEDIUM'
-                ? ThinkingLevel.MEDIUM
-                : ThinkingLevel.LOW;
+        for (const candidateModel of routing.fallbackModels) {
+          const allowNativeSearch =
+            routing.enableExternalSearch && candidateModel !== 'gemma-4-26b-a4b-it';
+          const searchAttempts = allowNativeSearch ? [true, false] : [false];
 
-            const chat = ai.chats.create({
-              model: candidateModel,
-              history: formattedHistory,
-              config: {
-                systemInstruction: effectiveSystemInstruction,
-                thinkingConfig: { thinkingLevel },
-                maxOutputTokens: routing.maxOutputTokens,
-              },
-            });
+          for (const useGoogleSearch of searchAttempts) {
+            try {
+              const thinkingLevel =
+                candidateModel === 'gemini-4-hydrogen'
+                  ? routing.thinkingLevel === 'MEDIUM'
+                    ? ThinkingLevel.MEDIUM
+                    : ThinkingLevel.LOW
+                  : ThinkingLevel.MINIMAL;
 
-            const response = await withTimeout(
-              chat.sendMessage({
-                message: normalizedMessage,
-              }),
-              14000
-            );
+              const maxOutputTokens =
+                candidateModel === 'gemini-4-hydrogen'
+                  ? Math.max(2048, routing.maxOutputTokens)
+                  : Math.max(1200, routing.maxOutputTokens);
 
-            const responseText = response.text?.trim();
-            if (responseText) {
-              if (SERVER_RESPONSE_CACHE.size > 150) {
-                const oldestKey = SERVER_RESPONSE_CACHE.keys().next().value;
-                if (oldestKey) SERVER_RESPONSE_CACHE.delete(oldestKey);
+              const response = await withTimeout(
+                ai.models.generateContent({
+                  model: candidateModel,
+                  contents: [
+                    ...formattedHistory,
+                    {
+                      role: 'user',
+                      parts: [{ text: normalizedMessage }],
+                    },
+                  ],
+                  config: {
+                    systemInstruction: effectiveSystemInstruction,
+                    thinkingConfig: { thinkingLevel },
+                    maxOutputTokens,
+                    ...(useGoogleSearch ? { tools: [{ googleSearch: {} }] } : {}),
+                  },
+                }),
+                useGoogleSearch ? 22000 : 15000
+              );
+
+              const visiblePartsText = extractVisibleTextFromGeminiParts(
+                response.candidates?.[0]?.content?.parts as
+                  | Array<{ text?: string; thought?: boolean }>
+                  | undefined
+              );
+              const responseText = visiblePartsText || response.text?.trim() || '';
+
+              if (
+                responseText &&
+                !responseText.startsWith('google:search{') &&
+                !responseText.startsWith('call:google:search')
+              ) {
+                const groundingSources = extractGroundingSourcesFromMetadata(
+                  response.candidates?.[0]?.groundingMetadata
+                );
+                const combinedSources: GroundingSourceLink[] =
+                  groundingSources.length > 0
+                    ? groundingSources
+                    : routing.enableExternalSearch && !useGoogleSearch
+                    ? await getCachedExternalSources(normalizedMessage)
+                    : [];
+
+                const totalTokens =
+                  Number(response.usageMetadata?.totalTokenCount) ||
+                  estimateVietnameseTokens(normalizedMessage + responseText);
+
+                const updatedQuota = recordAccountDailyAiUsage(
+                  quotaCheck.normalizedQuota,
+                  {
+                    tokensUsed: totalTokens,
+                    modelUsed: candidateModel,
+                    cached: false,
+                  }
+                );
+                SERVER_ACCOUNT_QUOTAS.set(effectiveAccountId, updatedQuota);
+
+                if (SERVER_RESPONSE_CACHE.size > 150) {
+                  const oldestKey = SERVER_RESPONSE_CACHE.keys().next().value;
+                  if (oldestKey) SERVER_RESPONSE_CACHE.delete(oldestKey);
+                }
+                SERVER_RESPONSE_CACHE.set(serverCacheKey, {
+                  text: responseText,
+                  modelUsed: candidateModel,
+                  queryScope: routing.queryScope,
+                  routingReason: routing.routingReason,
+                  sources: combinedSources,
+                  cachedAt: Date.now(),
+                });
+
+                res.json({
+                  text: responseText,
+                  modelUsed: candidateModel,
+                  queryScope: routing.queryScope,
+                  routingReason: routing.routingReason,
+                  apiConnected: true,
+                  keyState: 'connected' as GeminiKeyStatusState,
+                  maskedKey: maskApiKey(apiKey),
+                  sources: combinedSources,
+                  usage: { totalTokens },
+                  quota: updatedQuota,
+                });
+                return;
               }
-              SERVER_RESPONSE_CACHE.set(serverCacheKey, {
-                text: responseText,
-                modelUsed: candidateModel,
-                sources: preFetchedSources,
-                cachedAt: Date.now(),
-              });
-
-              res.json({
-                text: responseText,
-                modelUsed: candidateModel,
-                apiConnected: true,
-                keyState: 'connected' as GeminiKeyStatusState,
-                maskedKey: maskApiKey(apiKey),
-                sources: preFetchedSources,
-              });
-              return;
+            } catch {
+              // try without search or next model/key
             }
-          } catch {
-            // try next model or candidate key
           }
         }
       }
+
+      const fallbackSources = routing.enableExternalSearch
+        ? await getCachedExternalSources(normalizedMessage)
+        : [];
 
       res.status(200).json({
         text: '',
         fallbackRequired: true,
         apiConnected: false,
         keyState: 'quota_depleted' as GeminiKeyStatusState,
-        sources: preFetchedSources,
+        sources: fallbackSources,
       });
     } catch {
       res.status(200).json({
