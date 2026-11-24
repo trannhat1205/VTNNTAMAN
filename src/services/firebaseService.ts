@@ -26,6 +26,7 @@ import {
 } from 'firebase/firestore';
 import {
   deleteObject,
+  getBytes,
   getDownloadURL,
   getStorage,
   ref,
@@ -43,6 +44,15 @@ import {
   UserRole,
 } from '../types';
 import { ADMIN_BACKUP_EMAIL, PRIMARY_ADMIN_UID } from '../data/seedData';
+import {
+  COMMUNITY_MARKET_PRICES_FILE,
+  CommunityMarketPriceBoard,
+  CommunityMarketPriceEntry,
+  isSharedAiCacheEntryValid,
+  SHARED_AI_CACHE_FOLDER,
+  SharedAiCacheEntry,
+  upsertCommunityMarketPriceBoard,
+} from '../utils/geminiReportAssistant';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -1069,4 +1079,170 @@ export async function fetchUserFirestoreData(
   }
 
   return { products, customers, sales, imports, backups, notificationPrefs };
+}
+
+// ============================================================================
+// SHARED AI KNOWLEDGE CACHE & COMMUNITY MARKET PRICES (/documents/ai_cache/)
+// ============================================================================
+
+const COMMUNITY_MARKET_PRICES_LOCAL_KEY = 'vtnn_taman_community_prices_v1';
+
+async function readJsonFromFirebaseStoragePath<T>(storagePath: string): Promise<T | null> {
+  try {
+    const fileRef = ref(storage, storagePath);
+    try {
+      const bytes = await getBytes(fileRef, 100 * 1024);
+      const text = new TextDecoder('utf-8').decode(bytes);
+      return JSON.parse(text) as T;
+    } catch (bytesErr) {
+      const code = (bytesErr as { code?: string })?.code || '';
+      if (code === 'storage/object-not-found' || code === 'storage/unauthorized') {
+        return null;
+      }
+      const downloadUrl = await getDownloadURL(fileRef);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 4000);
+      const res = await fetch(downloadUrl, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return null;
+      return (await res.json()) as T;
+    }
+  } catch {
+    return null;
+  }
+}
+
+export async function readSharedAiCacheFromFirebaseStorage(
+  fileName: string
+): Promise<SharedAiCacheEntry | null> {
+  if (!fileName || !/^[a-zA-Z0-9_-]+\.json$/.test(fileName)) {
+    return null;
+  }
+  const storagePath = `${SHARED_AI_CACHE_FOLDER}/${fileName}`;
+  const parsed = await readJsonFromFirebaseStoragePath<SharedAiCacheEntry>(storagePath);
+  if (!isSharedAiCacheEntryValid(parsed)) {
+    return null;
+  }
+  return parsed;
+}
+
+export async function writeSharedAiCacheToFirebaseStorage(
+  entry: SharedAiCacheEntry
+): Promise<boolean> {
+  if (!auth.currentUser) {
+    return false;
+  }
+  if (!entry?.cacheFileName || !/^[a-zA-Z0-9_-]+\.json$/.test(entry.cacheFileName)) {
+    return false;
+  }
+  const storagePath = `${SHARED_AI_CACHE_FOLDER}/${entry.cacheFileName}`;
+  try {
+    const payload = JSON.stringify(entry);
+    if (payload.length >= 95 * 1024) {
+      return false;
+    }
+    const fileRef = ref(storage, storagePath);
+    await uploadString(fileRef, payload, 'raw', {
+      contentType: 'application/json;charset=utf-8',
+      customMetadata: {
+        category: entry.category,
+        canonicalKey: entry.canonicalKey.slice(0, 180),
+        updatedAt: entry.updatedAt,
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readCommunityMarketPricesFromLocalStorage(): CommunityMarketPriceBoard | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(COMMUNITY_MARKET_PRICES_LOCAL_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CommunityMarketPriceBoard;
+    if (!parsed || !Array.isArray(parsed.entries)) return null;
+    const now = Date.now();
+    return {
+      version: parsed.version || 1,
+      updatedAt: parsed.updatedAt || new Date().toISOString(),
+      entries: parsed.entries.filter(
+        (e) => e && typeof e.expiresAt === 'number' && e.expiresAt > now
+      ),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCommunityMarketPricesToLocalStorage(board: CommunityMarketPriceBoard): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(COMMUNITY_MARKET_PRICES_LOCAL_KEY, JSON.stringify(board));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export async function readCommunityMarketPricesFromFirebaseStorage(): Promise<CommunityMarketPriceBoard | null> {
+  const storagePath = `${SHARED_AI_CACHE_FOLDER}/${COMMUNITY_MARKET_PRICES_FILE}`;
+  const cloudBoard =
+    await readJsonFromFirebaseStoragePath<CommunityMarketPriceBoard>(storagePath);
+  const now = Date.now();
+  if (cloudBoard && Array.isArray(cloudBoard.entries)) {
+    const filtered: CommunityMarketPriceBoard = {
+      version: cloudBoard.version || 1,
+      updatedAt: cloudBoard.updatedAt || new Date().toISOString(),
+      entries: cloudBoard.entries.filter(
+        (e) => e && typeof e.expiresAt === 'number' && e.expiresAt > now
+      ),
+    };
+    saveCommunityMarketPricesToLocalStorage(filtered);
+    return filtered;
+  }
+  return readCommunityMarketPricesFromLocalStorage();
+}
+
+export async function contributeCommunityMarketPriceToFirebaseStorage(input: {
+  topic: CommunityMarketPriceEntry['topic'];
+  itemName: string;
+  normalizedItem: string;
+  priceText: string;
+  region?: string;
+  rawNote: string;
+  contributorName: string;
+  contributorUid: string;
+}): Promise<{
+  ok: boolean;
+  board: CommunityMarketPriceBoard;
+  savedEntry: CommunityMarketPriceEntry;
+  syncedToCloud: boolean;
+}> {
+  const existing =
+    (await readCommunityMarketPricesFromFirebaseStorage()) ||
+    readCommunityMarketPricesFromLocalStorage();
+
+  const { board, savedEntry } = upsertCommunityMarketPriceBoard(existing, input);
+  saveCommunityMarketPricesToLocalStorage(board);
+
+  let syncedToCloud = false;
+  if (auth.currentUser) {
+    try {
+      const storagePath = `${SHARED_AI_CACHE_FOLDER}/${COMMUNITY_MARKET_PRICES_FILE}`;
+      const fileRef = ref(storage, storagePath);
+      await uploadString(fileRef, JSON.stringify(board), 'raw', {
+        contentType: 'application/json;charset=utf-8',
+        customMetadata: {
+          updatedAt: board.updatedAt,
+          entryCount: String(board.entries.length),
+        },
+      });
+      syncedToCloud = true;
+    } catch {
+      syncedToCloud = false;
+    }
+  }
+
+  return { ok: true, board, savedEntry, syncedToCloud };
 }

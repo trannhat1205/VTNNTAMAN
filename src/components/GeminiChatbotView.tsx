@@ -4,14 +4,17 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Database,
   ExternalLink,
   History,
   MessageSquarePlus,
   Send,
   Sparkles,
+  Tag,
   Trash2,
   Globe,
   RotateCcw,
+  X,
 } from 'lucide-react';
 import {
   CashPaymentVoucher,
@@ -28,24 +31,38 @@ import {
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildGoogleAiModeUrl,
+  buildSharedAiCacheFileName,
   buildUnverifiedExternalLookupNotice,
   buildWarehouseReportSnapshot,
   checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
+  CommunityMarketPriceBoard,
+  CommunityMarketPriceEntry,
   DEFAULT_GEMINI_MODEL,
   estimateVietnameseTokens,
   extractGroundingSourcesFromMetadata,
   extractVisibleTextFromGeminiParts,
+  formatCommunityMarketPriceAnswer,
   GEMINI_MODEL_OPTIONS,
   GEMINI_QUERY_CACHE_TTL_MS,
   GeminiConcreteModelId,
   GeminiModelOptionId,
   generateSmartReportAnswer,
   getGeminiModelOptionMeta,
+  matchCommunityMarketPricesForQuery,
   normalizeAccountDailyAiQuotaForToday,
+  normalizeMarketItemKey,
+  parseCommunityMarketPriceContribution,
   recordAccountDailyAiUsage,
+  SHARED_VOLATILE_CACHE_TTL_MS,
   shouldEnableExternalWebSearch,
 } from '../utils/geminiReportAssistant';
+import {
+  contributeCommunityMarketPriceToFirebaseStorage,
+  readCommunityMarketPricesFromFirebaseStorage,
+  readSharedAiCacheFromFirebaseStorage,
+  writeSharedAiCacheToFirebaseStorage,
+} from '../services/firebaseService';
 import { formatVND } from '../utils/businessLogic';
 
 export interface GeminiGroundingSource {
@@ -55,6 +72,13 @@ export interface GeminiGroundingSource {
   sourceName?: string;
   snippet?: string;
 }
+
+export type GeminiMessageCacheOrigin =
+  | 'shared_evergreen'
+  | 'shared_7d'
+  | 'community_price'
+  | 'local_cache'
+  | 'live_ai';
 
 export interface GeminiChatMessage {
   id: string;
@@ -68,6 +92,7 @@ export interface GeminiChatMessage {
   tokensUsed?: number;
   sourceQuery?: string;
   queryScope?: 'internal' | 'external';
+  cacheOrigin?: GeminiMessageCacheOrigin;
 }
 
 export interface GeminiChatSession {
@@ -89,7 +114,7 @@ interface GeminiChatbotViewProps {
   paymentVouchers: CashPaymentVoucher[];
 }
 
-const CLIENT_AI_CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v3';
+const CLIENT_AI_CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v4';
 
 function loadAccountDailyQuotaFromStorage(
   quotaStorageKey: string,
@@ -353,8 +378,19 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   const [inputPrompt, setInputPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [showMarketPriceModal, setShowMarketPriceModal] = useState(false);
+  const [marketTopic, setMarketTopic] =
+    useState<CommunityMarketPriceEntry['topic']>('rice');
+  const [marketItemName, setMarketItemName] = useState('');
+  const [marketPriceText, setMarketPriceText] = useState('');
+  const [marketRegion, setMarketRegion] = useState('');
+  const [isSavingMarketPrice, setIsSavingMarketPrice] = useState(false);
 
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const communityBoardCacheRef = useRef<{
+    board: CommunityMarketPriceBoard | null;
+    fetchedAt: number;
+  }>({ board: null, fetchedAt: 0 });
 
   // Reload sessions & quota when user account switches
   useEffect(() => {
@@ -516,15 +552,93 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     }
   };
 
+  const handleSubmitMarketPriceModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanItem = marketItemName.normalize('NFC').trim();
+    const cleanPrice = marketPriceText.normalize('NFC').trim();
+    const cleanRegion = marketRegion.normalize('NFC').trim();
+    const normalizedItem = normalizeMarketItemKey(cleanItem);
+    if (!cleanItem || !cleanPrice || !normalizedItem || isSavingMarketPrice || !activeSession) {
+      return;
+    }
+
+    setIsSavingMarketPrice(true);
+    const rawNote = `Cập nhật giá ${cleanItem} ${cleanPrice}${
+      cleanRegion ? ` tại ${cleanRegion}` : ''
+    }`;
+    const res = await contributeCommunityMarketPriceToFirebaseStorage({
+      topic: marketTopic,
+      itemName: cleanItem,
+      normalizedItem,
+      priceText: cleanPrice,
+      region: cleanRegion || undefined,
+      rawNote,
+      contributorName: currentStaff?.displayName || 'Thành viên VTNN Tâm An',
+      contributorUid: accountQuotaKey,
+    });
+    communityBoardCacheRef.current = {
+      board: res.board,
+      fetchedAt: Date.now(),
+    };
+
+    const userMessage: GeminiChatMessage = {
+      id: `msg_u_${Date.now()}`,
+      role: 'user',
+      text: rawNote,
+      timestamp: new Date().toLocaleTimeString('vi-VN', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    };
+
+    const confirmMessage: GeminiChatMessage = {
+      id: `msg_m_${Date.now() + 1}`,
+      role: 'model',
+      text: `### Đã lưu Giá Thị Trường Dùng Chung (Hiệu lực 7 ngày)\n\n- **Mặt hàng:** **${res.savedEntry.itemName}**\n- **Mức giá:** **${res.savedEntry.priceText}**${
+        res.savedEntry.region ? `\n- **Khu vực:** **${res.savedEntry.region}**` : ''
+      }\n- **Đồng bộ đám mây (Firebase Storage):** ${
+        res.syncedToCloud
+          ? '**Đã đồng bộ** — tất cả tài khoản khác hỏi lại sẽ nhận giá này ngay với **0 token**.'
+          : '**Đã lưu trên máy này** (cần đăng nhập Google Cloud để đồng bộ cho các tài khoản khác).'
+      }`,
+      timestamp: new Date().toLocaleTimeString('vi-VN', {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      modelId: 'gemma-4-26b-a4b-it',
+      tokensUsed: 0,
+      queryScope: 'external',
+      cacheOrigin: 'community_price',
+    };
+
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSession.id
+          ? {
+              ...s,
+              title:
+                s.messages.length === 0
+                  ? `Cập nhật giá ${cleanItem}`.slice(0, 44)
+                  : s.title,
+              updatedAt: new Date().toISOString(),
+              messages: [...s.messages, userMessage, confirmMessage],
+            }
+          : s
+      )
+    );
+
+    setMarketItemName('');
+    setMarketPriceText('');
+    setMarketRegion('');
+    setIsSavingMarketPrice(false);
+    setShowMarketPriceModal(false);
+  };
+
   const handleSendMessage = async (customText?: string) => {
     const promptText = (customText ?? inputPrompt).normalize('NFC').trim();
     if (!promptText || isGenerating || !activeSession) return;
 
     const latestQuotaCheck = checkAccountDailyAiQuota(dailyQuota);
-    if (!latestQuotaCheck.allowed) {
-      setDailyQuota(latestQuotaCheck.normalizedQuota);
-      return;
-    }
 
     const userMessage: GeminiChatMessage = {
       id: `msg_u_${Date.now()}`,
@@ -573,15 +687,14 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       selectedModel,
       reportSnapshot
     );
+    const sharedDescriptor = buildSharedAiCacheFileName(promptText);
     const activeSystemInstruction =
       routing.queryScope === 'internal'
         ? internalSystemInstruction
         : externalSystemInstruction;
-    const cacheKey = buildGeminiQueryCacheKey(
-      promptText,
-      reportSnapshot,
-      routing.targetModel
-    );
+    const localCacheKey = sharedDescriptor
+      ? `shared_${sharedDescriptor.fileName}`
+      : buildGeminiQueryCacheKey(promptText, reportSnapshot, routing.targetModel);
 
     let replyText = '';
     let usedModelId: GeminiConcreteModelId = routing.targetModel;
@@ -590,45 +703,156 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     let usedWebSearchFlag = false;
     let tokensUsedCount = 0;
     let isCachedHit = false;
+    let isFreeSharedHit = false;
+    let cacheOrigin: GeminiMessageCacheOrigin = 'live_ai';
     let quotaBlockedByServer = false;
     let unverifiedExternalBlocked = false;
     let serverReturnedQuota: AccountDailyAiQuota | null = null;
 
-    // Rule 3: Check 6-hour client response cache for repeated popular/warehouse queries
-    try {
-      const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
-      if (rawCache) {
-        const parsedCache = JSON.parse(rawCache) as Record<
-          string,
-          {
-            text: string;
-            modelUsed: GeminiConcreteModelId;
-            sources?: GeminiGroundingSource[];
-            apiConnected?: boolean;
-            usedWebSearch?: boolean;
-            cachedAt: number;
+    // Step 0: Check if user is directly contributing a live community market price in chat (0 token)
+    const contributedPrice = parseCommunityMarketPriceContribution(promptText);
+    if (contributedPrice) {
+      const saved = await contributeCommunityMarketPriceToFirebaseStorage({
+        ...contributedPrice,
+        contributorName: currentStaff?.displayName || 'Thành viên VTNN Tâm An',
+        contributorUid: accountQuotaKey,
+      });
+      communityBoardCacheRef.current = {
+        board: saved.board,
+        fetchedAt: Date.now(),
+      };
+      replyText = `### Đã ghi nhận Giá Thị Trường Dùng Chung (7 ngày)\n\n- **Mặt hàng:** **${saved.savedEntry.itemName}**\n- **Mức giá:** **${saved.savedEntry.priceText}**${
+        saved.savedEntry.region ? `\n- **Khu vực:** **${saved.savedEntry.region}**` : ''
+      }\n- **Trạng thái:** ${
+        saved.syncedToCloud
+          ? '**Đã lưu lên Firebase Storage dùng chung** — tất cả tài khoản khác khi hỏi giá này sẽ nhận kết quả ngay với **0 token**.'
+          : '**Đã lưu cục bộ trên máy này** (hiệu lực 7 ngày).'
+      }`;
+      usedModelId = 'gemma-4-26b-a4b-it';
+      isFreeSharedHit = true;
+      cacheOrigin = 'community_price';
+      tokensUsedCount = 0;
+    }
+
+    // Step 1: For volatile 7-day market queries, check Community Market Price Board first (0 token)
+    if (!replyText && sharedDescriptor?.category === 'volatile_7d') {
+      const now = Date.now();
+      let board = communityBoardCacheRef.current.board;
+      if (!board || now - communityBoardCacheRef.current.fetchedAt > 120000) {
+        board = await readCommunityMarketPricesFromFirebaseStorage();
+        communityBoardCacheRef.current = { board, fetchedAt: now };
+      }
+      const matches = matchCommunityMarketPricesForQuery(promptText, board, now);
+      if (matches.length > 0) {
+        replyText = formatCommunityMarketPriceAnswer(promptText, matches);
+        usedModelId = 'gemma-4-26b-a4b-it';
+        isFreeSharedHit = true;
+        cacheOrigin = 'community_price';
+        tokensUsedCount = 0;
+      }
+    }
+
+    // Step 2a: Check local client response cache (respecting evergreen / 7d / 6h TTL)
+    if (!replyText) {
+      try {
+        const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
+        if (rawCache) {
+          const parsedCache = JSON.parse(rawCache) as Record<
+            string,
+            {
+              text: string;
+              modelUsed: GeminiConcreteModelId;
+              sources?: GeminiGroundingSource[];
+              apiConnected?: boolean;
+              usedWebSearch?: boolean;
+              cachedAt: number;
+              expiresAt?: number | null;
+              cacheOrigin?: GeminiMessageCacheOrigin;
+            }
+          >;
+          const cachedEntry = parsedCache[localCacheKey];
+          const now = Date.now();
+          const isNotExpired = cachedEntry
+            ? cachedEntry.expiresAt === null
+              ? true
+              : typeof cachedEntry.expiresAt === 'number'
+              ? now < cachedEntry.expiresAt
+              : now - cachedEntry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
+            : false;
+          if (cachedEntry && cachedEntry.text && isNotExpired) {
+            replyText = cachedEntry.text;
+            usedModelId = cachedEntry.modelUsed || routing.targetModel;
+            replySources = Array.isArray(cachedEntry.sources) ? cachedEntry.sources : [];
+            apiConnectedFlag = Boolean(cachedEntry.apiConnected);
+            usedWebSearchFlag = Boolean(cachedEntry.usedWebSearch || replySources.length > 0);
+            isCachedHit = true;
+            isFreeSharedHit = Boolean(sharedDescriptor);
+            cacheOrigin =
+              cachedEntry.cacheOrigin ||
+              (sharedDescriptor?.category === 'evergreen'
+                ? 'shared_evergreen'
+                : sharedDescriptor?.category === 'volatile_7d'
+                ? 'shared_7d'
+                : 'local_cache');
           }
-        >;
-        const cachedEntry = parsedCache[cacheKey];
-        if (
-          cachedEntry &&
-          cachedEntry.text &&
-          Date.now() - cachedEntry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
-        ) {
-          replyText = cachedEntry.text;
-          usedModelId = cachedEntry.modelUsed || routing.targetModel;
-          replySources = Array.isArray(cachedEntry.sources) ? cachedEntry.sources : [];
-          apiConnectedFlag = Boolean(cachedEntry.apiConnected);
-          usedWebSearchFlag = Boolean(cachedEntry.usedWebSearch || replySources.length > 0);
-          isCachedHit = true;
+        }
+      } catch {
+        // ignore localStorage read errors
+      }
+    }
+
+    // Step 2b: Check Firebase Storage Shared Knowledge Cache (/documents/ai_cache/, 0 token)
+    if (!replyText && sharedDescriptor) {
+      const sharedHit = await readSharedAiCacheFromFirebaseStorage(
+        sharedDescriptor.fileName
+      );
+      if (sharedHit) {
+        replyText = sharedHit.text;
+        usedModelId = sharedHit.modelUsed || routing.targetModel;
+        replySources = Array.isArray(sharedHit.sources) ? sharedHit.sources : [];
+        apiConnectedFlag = true;
+        usedWebSearchFlag = replySources.length > 0;
+        isCachedHit = true;
+        isFreeSharedHit = true;
+        cacheOrigin =
+          sharedHit.category === 'evergreen' ? 'shared_evergreen' : 'shared_7d';
+        tokensUsedCount = 0;
+
+        // Warm localStorage cache for instant repeat access
+        try {
+          const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
+          const parsedCache = rawCache ? JSON.parse(rawCache) : {};
+          parsedCache[localCacheKey] = {
+            text: replyText,
+            modelUsed: usedModelId,
+            sources: replySources,
+            apiConnected: true,
+            usedWebSearch: usedWebSearchFlag,
+            cachedAt: Date.now(),
+            expiresAt: sharedHit.expiresAt,
+            cacheOrigin,
+          };
+          localStorage.setItem(
+            CLIENT_AI_CACHE_STORAGE_KEY,
+            JSON.stringify(parsedCache)
+          );
+        } catch {
+          // ignore storage quota errors
         }
       }
-    } catch {
-      // ignore localStorage read errors
+    }
+
+    // Step 3: Live Gemini API call (only when not served from Community or Shared Knowledge Cache)
+    if (!replyText && !latestQuotaCheck.allowed) {
+      quotaBlockedByServer = true;
+      setDailyQuota(latestQuotaCheck.normalizedQuota);
+      replyText =
+        latestQuotaCheck.message ||
+        'Tài khoản đã hết hạn mức câu hỏi Trợ lý A.I trong ngày hôm nay. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai.';
     }
 
     if (!replyText) {
-      // Step A: Try same-origin backend (/api/gemini/chat)
+      // Step 3A: Try same-origin backend (/api/gemini/chat)
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 24000);
@@ -674,6 +898,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
             modelUsed?: GeminiConcreteModelId;
             sources?: GeminiGroundingSource[];
             apiConnected?: boolean;
+            verifiedWebSearch?: boolean;
             usage?: { totalTokens?: number };
             quota?: AccountDailyAiQuota;
           };
@@ -695,16 +920,21 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
             if (data.modelUsed) {
               usedModelId = data.modelUsed;
             }
-            tokensUsedCount =
-              Number(data.usage?.totalTokens) ||
-              estimateVietnameseTokens(promptText + replyText);
+            if (data.verifiedWebSearch === false && routing.requireVerifiedSearch) {
+              unverifiedExternalBlocked = true;
+              tokensUsedCount = 0;
+            } else {
+              tokensUsedCount =
+                Number(data.usage?.totalTokens) ||
+                estimateVietnameseTokens(promptText + replyText);
+            }
           }
         }
       } catch {
         // Same-origin backend unavailable (e.g. static Hostinger hosting) -> try direct Gemini REST API
       }
 
-      // Step B: Direct Gemini REST API fallback (for static Hostinger build)
+      // Step 3B: Direct Gemini REST API fallback (for static Hostinger build)
       if (!replyText && !quotaBlockedByServer) {
         const viteEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
         const clientApiKey = (viteEnv?.VITE_GEMINI_API_KEY || '').trim();
@@ -825,7 +1055,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         }
       }
 
-      // Step C: Safe unverified lookup notice OR emergency offline report fallback
+      // Step 3C: Safe unverified lookup notice OR emergency offline report fallback
       if (!replyText && !quotaBlockedByServer) {
         if (routing.requireVerifiedSearch) {
           replyText = buildUnverifiedExternalLookupNotice(promptText);
@@ -840,7 +1070,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         }
       }
 
-      // Save verified non-blocked result to 6-hour client response cache
+      // Save verified non-blocked result to localStorage AND Firebase Storage Shared Cache
       const canCacheReply =
         Boolean(replyText) &&
         !quotaBlockedByServer &&
@@ -848,47 +1078,84 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         (!routing.requireVerifiedSearch || replySources.length > 0);
 
       if (canCacheReply) {
+        const now = Date.now();
+        const expiresAt =
+          sharedDescriptor?.category === 'evergreen'
+            ? null
+            : sharedDescriptor?.category === 'volatile_7d'
+            ? now + SHARED_VOLATILE_CACHE_TTL_MS
+            : now + GEMINI_QUERY_CACHE_TTL_MS;
+
         try {
           const rawCache = localStorage.getItem(CLIENT_AI_CACHE_STORAGE_KEY);
           const parsedCache = rawCache ? JSON.parse(rawCache) : {};
-          const now = Date.now();
           const freshEntries = Object.entries(parsedCache).filter(([, val]) => {
-            const entry = val as { cachedAt?: number };
-            return (
-              entry &&
-              typeof entry.cachedAt === 'number' &&
-              now - entry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS
-            );
+            const entry = val as { cachedAt?: number; expiresAt?: number | null };
+            if (!entry) return false;
+            if (entry.expiresAt === null) return true;
+            if (typeof entry.expiresAt === 'number') return now < entry.expiresAt;
+            return typeof entry.cachedAt === 'number' && now - entry.cachedAt < GEMINI_QUERY_CACHE_TTL_MS;
           });
-          const pruned = Object.fromEntries(freshEntries.slice(-40));
-          pruned[cacheKey] = {
+          const pruned = Object.fromEntries(freshEntries.slice(-80));
+          pruned[localCacheKey] = {
             text: replyText,
             modelUsed: usedModelId,
             sources: replySources,
             apiConnected: apiConnectedFlag,
             usedWebSearch: usedWebSearchFlag,
             cachedAt: now,
+            expiresAt,
+            cacheOrigin: sharedDescriptor
+              ? sharedDescriptor.category === 'evergreen'
+                ? 'shared_evergreen'
+                : 'shared_7d'
+              : 'local_cache',
           };
           localStorage.setItem(CLIENT_AI_CACHE_STORAGE_KEY, JSON.stringify(pruned));
         } catch {
           // ignore storage quota errors
+        }
+
+        // Persist to Firebase Storage (/documents/ai_cache/) for all accounts to reuse at 0 token
+        if (sharedDescriptor && apiConnectedFlag) {
+          const nowIso = new Date(now).toISOString();
+          void writeSharedAiCacheToFirebaseStorage({
+            version: 1,
+            cacheFileName: sharedDescriptor.fileName,
+            canonicalKey: sharedDescriptor.canonicalKey,
+            originalQuery: promptText,
+            category: sharedDescriptor.category,
+            text: replyText,
+            modelUsed: usedModelId,
+            sources: replySources.map((s) => ({
+              title: s.title,
+              uri: s.uri,
+              sourceName: s.sourceName,
+            })),
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            expiresAt,
+            contributorName: currentStaff?.displayName || 'Tài khoản VTNN Tâm An',
+          });
         }
       }
     }
 
     if (quotaBlockedByServer && serverReturnedQuota) {
       setDailyQuota(serverReturnedQuota);
-    } else if (!quotaBlockedByServer) {
+    } else if (!quotaBlockedByServer && !unverifiedExternalBlocked) {
       const localRecorded = recordAccountDailyAiUsage(
         latestQuotaCheck.normalizedQuota,
         {
           tokensUsed: tokensUsedCount,
           modelUsed: usedModelId,
           cached: isCachedHit,
+          freeSharedCache: isFreeSharedHit,
         }
       );
       if (
         serverReturnedQuota &&
+        !isFreeSharedHit &&
         serverReturnedQuota.questionsUsed >= localRecorded.questionsUsed
       ) {
         setDailyQuota(serverReturnedQuota);
@@ -912,6 +1179,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
       tokensUsed: tokensUsedCount,
       sourceQuery: promptText,
       queryScope: routing.queryScope,
+      cacheOrigin,
     };
 
     setSessions((prev) =>
@@ -1279,6 +1547,29 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                                   Tìm kiếm web
                                 </span>
                               )}
+                              {msg.cacheOrigin === 'shared_evergreen' && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold text-[10px]">
+                                  <Database className="w-2.5 h-2.5" />
+                                  Kho tri thức dùng chung · Vĩnh viễn · 0 token
+                                </span>
+                              )}
+                              {msg.cacheOrigin === 'shared_7d' && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-teal-50 text-teal-700 border border-teal-200 font-semibold text-[10px]">
+                                  <Database className="w-2.5 h-2.5" />
+                                  Kho tri thức dùng chung · 7 ngày · 0 token
+                                </span>
+                              )}
+                              {msg.cacheOrigin === 'community_price' && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 font-semibold text-[10px]">
+                                  <Tag className="w-2.5 h-2.5" />
+                                  Giá thị trường cộng đồng · 7 ngày · 0 token
+                                </span>
+                              )}
+                              {msg.cacheOrigin === 'local_cache' && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-semibold text-[10px]">
+                                  Bộ nhớ đệm nhanh · 0 token
+                                </span>
+                              )}
                             </span>
                             <button
                               type="button"
@@ -1381,6 +1672,14 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
               >
                 🌱 Kỹ thuật nông nghiệp
               </button>
+              <button
+                type="button"
+                disabled={isGenerating}
+                onClick={() => setShowMarketPriceModal(true)}
+                className="shrink-0 px-3 py-1.5 rounded-full bg-amber-50 hover:bg-amber-100 text-amber-800 text-xs font-bold border border-amber-200 transition cursor-pointer"
+              >
+                📝 Cập nhật giá thị trường
+              </button>
             </div>
 
             {/* Rounded Gemini Input Box */}
@@ -1394,7 +1693,6 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
               <textarea
                 rows={2}
                 value={inputPrompt}
-                disabled={!quotaCheck.allowed}
                 onChange={(e) => setInputPrompt(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -1404,17 +1702,17 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 }}
                 placeholder={
                   quotaCheck.allowed
-                    ? `Hỏi Trợ lý A.I (VD: Báo cáo doanh thu kho ${activeWarehouseLabel}, khách hàng đang nợ, giá lúa OM18...)`
-                    : 'Tài khoản đã hết hạn mức câu hỏi hôm nay — sẽ tự động làm mới vào 00:00 ngày mai'
+                    ? `Hỏi Trợ lý A.I (VD: Báo cáo doanh thu kho ${activeWarehouseLabel}, giá lúa OM18, hoặc nhập "Cập nhật giá lúa OM18 7.500 đ/kg" để chia sẻ...)`
+                    : 'Đã hết 30 lượt A.I mới hôm nay (vẫn tra cứu được Kho tri thức dùng chung 0 token)'
                 }
-                className="w-full resize-none bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none leading-relaxed disabled:opacity-60"
+                className="w-full resize-none bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none leading-relaxed"
               />
               <button
                 type="submit"
-                disabled={!inputPrompt.trim() || isGenerating || !quotaCheck.allowed}
+                disabled={!inputPrompt.trim() || isGenerating}
                 aria-label="Gửi câu hỏi"
                 className={`p-2.5 rounded-2xl shrink-0 transition cursor-pointer ${
-                  inputPrompt.trim() && !isGenerating && quotaCheck.allowed
+                  inputPrompt.trim() && !isGenerating
                     ? 'bg-gradient-to-r from-blue-600 via-indigo-600 to-emerald-600 text-white shadow-sm hover:opacity-95'
                     : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                 }`}
@@ -1425,6 +1723,118 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Modal: Contribute Community Market Price (Shared for 7 Days at 0 Token) */}
+      {showMarketPriceModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 backdrop-blur-xs p-4">
+          <div className="w-full max-w-md rounded-3xl bg-white border border-slate-200 shadow-2xl p-5">
+            <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2">
+                <span className="w-8 h-8 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                  <Tag className="w-4 h-4" />
+                </span>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Cập nhật Giá Thị Trường Dùng Chung
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Lưu 7 ngày trên Cloud để mọi tài khoản tra cứu nhanh (0 token)
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMarketPriceModal(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
+                aria-label="Đóng"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitMarketPriceModal} className="mt-4 space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Nhóm mặt hàng
+                </label>
+                <select
+                  value={marketTopic}
+                  onChange={(e) =>
+                    setMarketTopic(e.target.value as CommunityMarketPriceEntry['topic'])
+                  }
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-800 bg-slate-50 focus:bg-white focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="rice">Giá lúa gạo</option>
+                  <option value="fertilizer">Giá phân bón</option>
+                  <option value="pesticide">Giá thuốc BVTV</option>
+                  <option value="produce">Giá nông sản / trái cây</option>
+                  <option value="other">Thị trường khác</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Tên mặt hàng / giống lúa *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={marketItemName}
+                  onChange={(e) => setMarketItemName(e.target.value)}
+                  placeholder="VD: Lúa OM18 tươi hoặc Urê Phú Mỹ"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-800 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Mức giá thực tế *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={marketPriceText}
+                  onChange={(e) => setMarketPriceText(e.target.value)}
+                  placeholder="VD: 7.500 đ/kg hoặc 595.000 đ/bao 50kg"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-800 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Khu vực (tùy chọn)
+                </label>
+                <input
+                  type="text"
+                  value={marketRegion}
+                  onChange={(e) => setMarketRegion(e.target.value)}
+                  placeholder="VD: Đồng Tháp / Cao Lãnh"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs text-slate-800 focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowMarketPriceModal(false)}
+                  className="px-3.5 py-2 rounded-xl border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    !marketItemName.trim() || !marketPriceText.trim() || isSavingMarketPrice
+                  }
+                  className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white text-xs font-bold shadow-xs cursor-pointer"
+                >
+                  {isSavingMarketPrice ? 'Đang lưu...' : 'Lưu dùng chung (7 ngày)'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

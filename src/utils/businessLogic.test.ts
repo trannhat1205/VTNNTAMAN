@@ -65,10 +65,12 @@ import {
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildGoogleAiModeUrl,
+  buildSharedAiCacheFileName,
   buildUnverifiedExternalLookupNotice,
   buildWarehouseReportSnapshot,
   checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
+  classifySharedAiCacheCategory,
   classifyWarehouseQueryScope,
   createFreshAccountDailyAiQuota,
   DAILY_AI_QUESTION_LIMIT,
@@ -76,11 +78,17 @@ import {
   DEFAULT_GEMINI_MODEL,
   extractGroundingSourcesFromMetadata,
   extractVisibleTextFromGeminiParts,
+  formatCommunityMarketPriceAnswer,
   GEMINI_MODEL_OPTIONS,
   generateSmartReportAnswer,
+  isSharedAiCacheEntryValid,
+  matchCommunityMarketPricesForQuery,
   normalizeAccountDailyAiQuotaForToday,
+  parseCommunityMarketPriceContribution,
   recordAccountDailyAiUsage,
+  SHARED_VOLATILE_CACHE_TTL_MS,
   shouldEnableExternalWebSearch,
+  upsertCommunityMarketPriceBoard,
 } from './geminiReportAssistant';
 import {
   CustomerProfile,
@@ -1983,6 +1991,128 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
   const aiModeUrl = buildGoogleAiModeUrl('gap 3 của công ty đồng tháp sen hồng là gì');
   assert.ok(aiModeUrl.startsWith('https://www.google.com/search?udm=50&q='));
   assert.ok(buildUnverifiedExternalLookupNotice('gap 3').includes('Kiểm chứng trên Google Chế độ AI'));
+
+  // Shared Firebase Storage Knowledge Cache: Evergreen (BVTV/agronomy forever) vs Volatile (7 days) vs Internal (never)
+  assert.equal(classifySharedAiCacheCategory('Tóm tắt báo cáo doanh thu kho'), 'none');
+  assert.equal(classifySharedAiCacheCategory('Danh sách khách hàng đang nợ'), 'none');
+  assert.equal(classifySharedAiCacheCategory('gap 3 của công ty đồng tháp sen hồng là gì'), 'evergreen');
+  assert.equal(classifySharedAiCacheCategory('Kỹ thuật bón phân và trị đạo ôn trên lúa'), 'evergreen');
+  assert.equal(classifySharedAiCacheCategory('giá lúa om18 hôm nay bao nhiêu'), 'volatile_7d');
+  assert.equal(classifySharedAiCacheCategory('giá phân bón hiện nay thế nào'), 'volatile_7d');
+  assert.equal(classifySharedAiCacheCategory('thời tiết Đồng Tháp hôm nay'), 'volatile_7d');
+
+  // Canonical question normalization maps equivalent phrasings of GAP3 to the exact same permanent .json file
+  const gapFile1 = buildSharedAiCacheFileName('gap 3 của công ty đồng tháp sen hồng là gì');
+  const gapFile2 = buildSharedAiCacheFileName('GAP3 của công ty Đồng Tháp Sen Hồng là gì?');
+  const gapFile3 = buildSharedAiCacheFileName('Cho hỏi sản phẩm GAP 3 công ty Đồng Tháp Sen Hồng là sản phẩm gì ạ?');
+  assert.ok(gapFile1 && gapFile2 && gapFile3);
+  assert.equal(gapFile1.category, 'evergreen');
+  assert.equal(gapFile1.ttlMs, null);
+  assert.ok(gapFile1.fileName.startsWith('perm_'));
+  assert.equal(gapFile1.fileName, gapFile2.fileName);
+  assert.equal(gapFile1.fileName, gapFile3.fileName);
+  assert.match(gapFile1.fileName, /^[a-zA-Z0-9_-]+\.json$/);
+
+  const riceFile = buildSharedAiCacheFileName('giá lúa om18 hôm nay bao nhiêu');
+  assert.ok(riceFile);
+  assert.equal(riceFile.category, 'volatile_7d');
+  assert.equal(riceFile.ttlMs, SHARED_VOLATILE_CACHE_TTL_MS);
+  assert.ok(riceFile.fileName.startsWith('mkt_'));
+
+  // TTL validation: evergreen valid 10 years later; volatile_7d expires after 7 days
+  const t0 = new Date('2026-11-25T00:00:00Z').getTime();
+  const tenYearsLater = t0 + 10 * 365 * 24 * 60 * 60 * 1000;
+  const day6 = t0 + 6 * 24 * 60 * 60 * 1000;
+  const day8 = t0 + 8 * 24 * 60 * 60 * 1000;
+  assert.equal(
+    isSharedAiCacheEntryValid(
+      {
+        version: 1,
+        cacheFileName: gapFile1.fileName,
+        canonicalKey: gapFile1.canonicalKey,
+        originalQuery: 'gap 3',
+        category: 'evergreen',
+        text: 'GAP3 là thuốc trừ bệnh cho lúa',
+        modelUsed: 'gemini-3.1-flash-lite',
+        sources: [],
+        createdAt: new Date(t0).toISOString(),
+        updatedAt: new Date(t0).toISOString(),
+        expiresAt: null,
+      },
+      tenYearsLater
+    ),
+    true
+  );
+  const volatileEntry = {
+    version: 1,
+    cacheFileName: riceFile.fileName,
+    canonicalKey: riceFile.canonicalKey,
+    originalQuery: 'giá lúa om18 hôm nay',
+    category: 'volatile_7d' as const,
+    text: 'OM18: 7.500 đ/kg',
+    modelUsed: 'gemini-3.1-flash-lite' as const,
+    sources: [],
+    createdAt: new Date(t0).toISOString(),
+    updatedAt: new Date(t0).toISOString(),
+    expiresAt: t0 + SHARED_VOLATILE_CACHE_TTL_MS,
+  };
+  assert.equal(isSharedAiCacheEntryValid(volatileEntry, day6), true);
+  assert.equal(isSharedAiCacheEntryValid(volatileEntry, day8), false);
+
+  // Community market price contribution & lookup (7-day TTL, 0 tokens)
+  assert.equal(parseCommunityMarketPriceContribution('giá lúa om18 hôm nay bao nhiêu?'), null);
+  assert.equal(parseCommunityMarketPriceContribution('Bán lúa OM18 cho khách 7.500 đ/kg hóa đơn HD-01'), null);
+
+  const om18Contrib = parseCommunityMarketPriceContribution(
+    'Cập nhật giá lúa OM18 hôm nay 7.500 đ/kg tại Đồng Tháp'
+  );
+  assert.ok(om18Contrib);
+  assert.equal(om18Contrib.topic, 'rice');
+  assert.equal(om18Contrib.priceText, '7.500 đ/kg');
+  assert.equal(om18Contrib.region, 'Đồng Tháp');
+
+  const ureContrib = parseCommunityMarketPriceContribution(
+    'Giá phân Urê Phú Mỹ hiện tại 595.000 đ/bao 50kg'
+  );
+  assert.ok(ureContrib);
+  assert.equal(ureContrib.topic, 'fertilizer');
+  assert.equal(ureContrib.priceText, '595.000 đ/bao 50kg');
+
+  const up1 = upsertCommunityMarketPriceBoard(
+    null,
+    {
+      ...om18Contrib,
+      contributorName: 'Đại lý Ba Sao',
+      contributorUid: 'uid_basao',
+    },
+    t0
+  );
+  const up2 = upsertCommunityMarketPriceBoard(
+    up1.board,
+    {
+      ...ureContrib,
+      contributorName: 'Kho Mỹ Ngãi',
+      contributorUid: 'uid_myngai',
+    },
+    t0
+  );
+  const om18Matches = matchCommunityMarketPricesForQuery('giá lúa om18 hôm nay bao nhiêu?', up2.board, day6);
+  assert.equal(om18Matches.length, 1);
+  assert.equal(om18Matches[0].priceText, '7.500 đ/kg');
+  assert.ok(formatCommunityMarketPriceAnswer('giá lúa om18 hôm nay', om18Matches).includes('7.500 đ/kg'));
+  // Expired after 7 days
+  assert.equal(matchCommunityMarketPricesForQuery('giá lúa om18 hôm nay bao nhiêu?', up2.board, day8).length, 0);
+
+  // Free shared cache usage does not consume daily quota
+  const baseQ = createFreshAccountDailyAiQuota('acc_shared_test');
+  const afterSharedHit = recordAccountDailyAiUsage(baseQ, {
+    tokensUsed: 0,
+    modelUsed: 'gemini-3.1-flash-lite',
+    cached: true,
+    freeSharedCache: true,
+  });
+  assert.equal(afterSharedHit.questionsUsed, 0);
+  assert.equal(afterSharedHit.tokensUsed, 0);
 
   // Helper checks: thought stripping & grounding source extraction
   const cleanedText = extractVisibleTextFromGeminiParts([

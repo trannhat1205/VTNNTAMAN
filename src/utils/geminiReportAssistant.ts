@@ -12,6 +12,9 @@ import { formatVND, getTodayVietnamDateStr } from './businessLogic';
 
 export const DAILY_AI_QUESTION_LIMIT = 30;
 export const DAILY_AI_TOKEN_LIMIT = 90000;
+export const SHARED_VOLATILE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const SHARED_AI_CACHE_FOLDER = 'documents/ai_cache';
+export const COMMUNITY_MARKET_PRICES_FILE = 'community_market_prices.json';
 
 export type GeminiConcreteModelId =
   | 'gemma-4-26b-a4b-it'
@@ -1116,23 +1119,13 @@ QUY TẮC BẢO MẬT:
   }
 
   if (mode === 'external') {
-    const briefCatalogNames =
-      snapshot.catalogProducts.length === 0
-        ? 'Kho hiện chưa có danh mục.'
-        : snapshot.catalogProducts
-            .slice(0, 15)
-            .map((p) => `${p.name} (tồn ${p.stock} ${p.unit})`)
-            .join('; ');
-
     return `Bạn là **Trợ lý A.I — VTNN Tâm An** (Ngày: **${snapshot.generatedAt}**).
 
-QUY TẮC BẮT BUỘC KHI TRA CỨU SẢN PHẨM BVTV / PHÂN BÓN / THÔNG TIN BÊN NGOÀI:
+QUY TẮC BẮT BUỘC KHI TRA CỨU SẢN PHẨM BVTV / PHÂN BÓN / KỸ THUẬT / THÔNG TIN BÊN NGOÀI:
 - BẮT BUỘC dùng công cụ Google Search để kiểm chứng tên sản phẩm, công ty, phân loại chính xác (thuốc trừ bệnh hay trừ sâu/trừ cỏ), hoạt chất và hướng dẫn sử dụng thực tế trước khi trả lời.
 - TUYỆT ĐỐI KHÔNG tự đoán hoặc bịa nhóm hoạt chất (như Neonicotinoid, Pyrethroid, Avermectin...) nếu kết quả tìm kiếm không xác nhận. Nếu tìm kiếm không có thông tin chắc chắn, phải nói rõ là chưa tìm thấy nguồn chính thức và đề nghị xem nhãn chai hoặc bấm nút "Kiểm chứng trên Google Chế độ AI".
-- Không từ chối trả lời chỉ vì sản phẩm chưa có trong kho, và KHÔNG đổ ra báo cáo doanh thu/công nợ 0đ của kho.
-- Trả lời ngắn gọn, súc tích, chính xác bằng tiếng Việt (Markdown). Nếu kho **${snapshot.warehouseLabel}** có bán mặt hàng trùng tên thì ghi chú 1 dòng ở cuối.
-
-Danh mục tóm tắt tại kho ${snapshot.warehouseLabel}: ${briefCatalogNames}`;
+- Không đổ ra số liệu nội bộ riêng của từng cửa hàng/kho và không từ chối trả lời khi sản phẩm chưa có trong kho.
+- Trả lời ngắn gọn, súc tích, chính xác bằng tiếng Việt (Markdown).`;
   }
 
   return `Bạn là **Trợ lý A.I — VTNN Tâm An**, trợ lý trí tuệ nhân tạo tích hợp trực tiếp trong hệ thống Quản lý Bán hàng, Kho & Công nợ Vật tư Nông nghiệp Tâm An.
@@ -1167,6 +1160,478 @@ Hệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Goo
 
 - Để đảm bảo an toàn tuyệt đối (không tự suy đoán tên hoạt chất hoặc nhầm lẫn giữa thuốc trừ bệnh / thuốc trừ sâu), Trợ lý A.I tạm dừng việc tự trả lời khi chưa có nguồn xác thực.
 - Bạn hãy bấm nút **"Kiểm chứng trên Google Chế độ AI (0 token)"** ngay bên dưới để xem trực tiếp kết quả chính xác nhất từ Google, hoặc kiểm tra nhãn bao bì sản phẩm và thử hỏi lại sau vài giây.`;
+}
+
+export type SharedAiCacheCategory = 'none' | 'evergreen' | 'volatile_7d';
+
+export interface SharedAiCacheEntry {
+  version: number;
+  cacheFileName: string;
+  canonicalKey: string;
+  originalQuery: string;
+  category: Exclude<SharedAiCacheCategory, 'none'>;
+  text: string;
+  modelUsed: GeminiConcreteModelId;
+  sources: Array<{ title: string; uri: string; sourceName?: string }>;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: number | null;
+  contributorName?: string;
+}
+
+export interface CommunityMarketPriceEntry {
+  id: string;
+  topic: 'rice' | 'fertilizer' | 'pesticide' | 'produce' | 'other';
+  itemName: string;
+  normalizedItem: string;
+  priceText: string;
+  region?: string;
+  rawNote: string;
+  contributorName: string;
+  contributorUid: string;
+  updatedAt: string;
+  expiresAt: number;
+}
+
+export interface CommunityMarketPriceBoard {
+  version: number;
+  updatedAt: string;
+  entries: CommunityMarketPriceEntry[];
+}
+
+const VOLATILE_7D_CACHE_KEYWORDS = [
+  'giá phân',
+  'phân bón hiện nay',
+  'phân bón hôm nay',
+  'thị trường phân bón',
+  'giá đạm',
+  'giá urê',
+  'giá ure',
+  'giá dap',
+  'giá kali',
+  'giá npk',
+  'giá lúa',
+  'giá gạo',
+  'lúa hôm nay',
+  'lúa hiện nay',
+  'giá thuốc',
+  'giá sầu riêng',
+  'sầu riêng hôm nay',
+  'giá mít',
+  'giá xoài',
+  'giá cà phê',
+  'giá tiêu',
+  'giá ớt',
+  'giá nông sản',
+  'giá thị trường',
+  'thị trường hôm nay',
+  'thị trường hiện nay',
+  'hôm nay',
+  'hiện nay',
+  'mới nhất',
+  'thời tiết',
+  'dự báo thời tiết',
+  'tin tức',
+  'quy định mới',
+  'nghị định mới',
+  'bảng giá',
+  'bao nhiêu tiền',
+  'giá bao nhiêu',
+];
+
+export function classifySharedAiCacheCategory(
+  rawQuery: string
+): SharedAiCacheCategory {
+  if (classifyWarehouseQueryScope(rawQuery) === 'internal') {
+    return 'none';
+  }
+  const q = normalizeVietnameseQuery(rawQuery);
+  if (!q.ascii) {
+    return 'none';
+  }
+  if (hasAnyKeyword(q, VOLATILE_7D_CACHE_KEYWORDS)) {
+    return 'volatile_7d';
+  }
+  // Rice varieties combined with price/market intent also belong to 7-day cache
+  if (
+    hasAnyKeyword(q, ['om18', 'om 18', 'om5451', 'om 5451', 'đài thơm', 'ir504', 'st24', 'st25', 'nàng hoa']) &&
+    hasAnyKeyword(q, ['giá', 'thu mua', 'tươi', 'khô', 'thị trường'])
+  ) {
+    return 'volatile_7d';
+  }
+  return 'evergreen';
+}
+
+export function normalizeSharedQuestionCanonical(rawQuery: string): string {
+  let s = normalizeVietnameseQuery(rawQuery).ascii;
+  if (!s) return '';
+
+  // Join common product/variety code spacing variants
+  s = s
+    .replace(/\bgap\s+(\d+)\b/g, 'gap$1')
+    .replace(/\bom\s+(\d+)\b/g, 'om$1')
+    .replace(/\bst\s+(\d+)\b/g, 'st$1')
+    .replace(/\bir\s+(\d+)\b/g, 'ir$1')
+    .replace(/\bdai\s+thom\s+8\b/g, 'daithom8')
+    .replace(/\bthuoc\s+bao\s+ve\s+thuc\s+vat\b/g, 'bvtv')
+    .replace(/\bbao\s+ve\s+thuc\s+vat\b/g, 'bvtv')
+    .replace(/\bcong\s+ty\s+(?:tnhh|cp|co\s+phan|thuong\s+mai)\b/g, 'cong ty')
+    .replace(/\bcty\b/g, 'cong ty');
+
+  // Remove polite filler phrases & non-semantic question tails while preserving core intent words
+  const fillerPhrases = [
+    'cho em hoi',
+    'cho minh hoi',
+    'cho toi hoi',
+    'cho hoi',
+    'xin hoi',
+    'hay cho biet',
+    'cho biet',
+    'tu van giup',
+    'giup toi',
+    'giup minh',
+    'la san pham gi',
+    'la thuoc gi',
+    'la phan gi',
+    'la loai gi',
+    'la gi',
+    'nhu the nao',
+    'the nao',
+    'ra sao',
+    'bao nhieu',
+    'san pham',
+  ];
+  for (const phrase of fillerPhrases) {
+    const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    s = s.replace(new RegExp(`\\b${escaped}\\b`, 'g'), ' ');
+  }
+
+  const stopTokens = new Set(['cua', 'la', 'a', 'ạ', 'nhe', 'nha', 'voi', 'giup', 'dum', 'cai', 've']);
+  const tokens = s
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && !stopTokens.has(t));
+
+  return tokens.join(' ').trim() || normalizeVietnameseQuery(rawQuery).ascii;
+}
+
+function hashCanonicalKeyHex(input: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= c + i;
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  const part1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const part2 = (h2 >>> 0).toString(16).padStart(8, '0').slice(0, 4);
+  return `${part1}${part2}`;
+}
+
+export function buildSharedAiCacheFileName(rawQuery: string): {
+  category: Exclude<SharedAiCacheCategory, 'none'>;
+  canonicalKey: string;
+  fileName: string;
+  storagePath: string;
+  ttlMs: number | null;
+} | null {
+  const category = classifySharedAiCacheCategory(rawQuery);
+  if (category === 'none') {
+    return null;
+  }
+  const canonicalKey = normalizeSharedQuestionCanonical(rawQuery);
+  if (!canonicalKey) {
+    return null;
+  }
+  const slug = canonicalKey
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 32) || 'query';
+  const hash = hashCanonicalKeyHex(`${category}:${canonicalKey}`);
+  const prefix = category === 'evergreen' ? 'perm' : 'mkt';
+  const fileName = `${prefix}_${slug}_${hash}.json`;
+  return {
+    category,
+    canonicalKey,
+    fileName,
+    storagePath: `${SHARED_AI_CACHE_FOLDER}/${fileName}`,
+    ttlMs: category === 'evergreen' ? null : SHARED_VOLATILE_CACHE_TTL_MS,
+  };
+}
+
+export function isSharedAiCacheEntryValid(
+  entry: Partial<SharedAiCacheEntry> | null | undefined,
+  nowMs: number = Date.now()
+): entry is SharedAiCacheEntry {
+  if (!entry || typeof entry.text !== 'string' || !entry.text.trim()) {
+    return false;
+  }
+  if (entry.category === 'evergreen') {
+    return true;
+  }
+  if (entry.category === 'volatile_7d') {
+    return (
+      typeof entry.expiresAt === 'number' &&
+      Number.isFinite(entry.expiresAt) &&
+      nowMs < entry.expiresAt
+    );
+  }
+  return false;
+}
+
+export function normalizeMarketItemKey(rawItem: string): string {
+  return normalizeVietnameseQuery(rawItem).ascii
+    .replace(/\bgia\b/g, ' ')
+    .replace(/\bhom nay\b/g, ' ')
+    .replace(/\bhien nay\b/g, ' ')
+    .replace(/\bcap nhat\b/g, ' ')
+    .replace(/\bbao gia\b/g, ' ')
+    .replace(/\blua\s+om\s+(\d+)\b/g, 'lua om$1')
+    .replace(/\bom\s+(\d+)\b/g, 'om$1')
+    .replace(/\bst\s+(\d+)\b/g, 'st$1')
+    .replace(/\bir\s+(\d+)\b/g, 'ir$1')
+    .replace(/\bdai\s+thom\s+8\b/g, 'daithom8')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function parseCommunityMarketPriceContribution(
+  rawMessage: string
+): {
+  topic: CommunityMarketPriceEntry['topic'];
+  itemName: string;
+  normalizedItem: string;
+  priceText: string;
+  region?: string;
+  rawNote: string;
+} | null {
+  const clean = (rawMessage || '').normalize('NFC').trim();
+  if (!clean || clean.length < 10 || clean.length > 350) {
+    return null;
+  }
+
+  const q = normalizeVietnameseQuery(clean);
+  // Reject questions or internal warehouse transaction statements
+  if (
+    clean.includes('?') ||
+    hasAnyKeyword(q, [
+      'bao nhiêu',
+      'thế nào',
+      'nhiêu tiền',
+      'mấy tiền',
+      'là gì',
+      'cho hỏi',
+      'hóa đơn',
+      'nhập kho',
+      'bán cho',
+      'công nợ',
+      'phiếu thu',
+      'phiếu chi',
+      'tồn kho',
+      'doanh thu',
+    ])
+  ) {
+    return null;
+  }
+
+  const hasMarketSignal = hasAnyKeyword(q, [
+    'cập nhật giá',
+    'báo giá',
+    'ghi nhận giá',
+    'chia sẻ giá',
+    'giá lúa',
+    'giá gạo',
+    'giá phân',
+    'giá urê',
+    'giá ure',
+    'giá dap',
+    'giá kali',
+    'giá npk',
+    'giá thuốc',
+    'giá sầu riêng',
+    'giá mít',
+    'giá xoài',
+    'giá cà phê',
+    'giá tiêu',
+    'giá ớt',
+    'giá nông sản',
+    'giá thị trường',
+  ]);
+  if (!hasMarketSignal) {
+    return null;
+  }
+
+  const priceMatch = clean.match(
+    /(\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)\s*(k|nghìn|ngàn|triệu|đ|d|đồng|vnd)?(?:\s*\/\s*(?:kg|bao(?:\s*\d+\s*kg)?|chai|gói|lít|cặp|hộp|tấn))?/i
+  );
+  if (!priceMatch) {
+    return null;
+  }
+  const fullPriceRegex =
+    /(\d{1,3}(?:[.,]\d{3})+|\d+(?:[.,]\d+)?)\s*(?:k|nghìn|ngàn|triệu|đ|d|đồng|vnd)(?:\s*\/\s*(?:kg|bao(?:\s*\d+\s*kg)?|chai|gói|lít|cặp|hộp|tấn))?|\d{1,3}(?:[.,]\d{3})+\s*(?:\/\s*(?:kg|bao(?:\s*\d+\s*kg)?|chai|gói|lít|cặp|hộp|tấn))?/i;
+  const strictPriceMatch = clean.match(fullPriceRegex);
+  if (!strictPriceMatch) {
+    return null;
+  }
+
+  const priceText = strictPriceMatch[0].trim();
+  const priceIndex = clean.indexOf(priceText);
+
+  let topic: CommunityMarketPriceEntry['topic'] = 'other';
+  if (hasAnyKeyword(q, ['lúa', 'gạo', 'om18', 'om5451', 'đài thơm', 'ir504', 'st24', 'st25', 'nàng hoa'])) {
+    topic = 'rice';
+  } else if (hasAnyKeyword(q, ['phân', 'urê', 'ure', 'dap', 'kali', 'npk', 'lân', 'hữu cơ'])) {
+    topic = 'fertilizer';
+  } else if (hasAnyKeyword(q, ['thuốc', 'bvtv', 'trừ sâu', 'trừ bệnh', 'trừ cỏ'])) {
+    topic = 'pesticide';
+  } else if (hasAnyKeyword(q, ['sầu riêng', 'mít', 'xoài', 'cà phê', 'tiêu', 'ớt', 'nông sản'])) {
+    topic = 'produce';
+  }
+
+  let region: string | undefined;
+  const regionMatch = clean.match(/(?:tại|ở|khu vực)\s+([^,.;!\n]{2,50})/i);
+  if (regionMatch && regionMatch[1]) {
+    region = regionMatch[1].trim();
+  }
+
+  const prefixText = (priceIndex > 0 ? clean.slice(0, priceIndex) : clean)
+    .replace(/^(?:cập nhật|báo giá|ghi nhận|chia sẻ|thông báo)\s+/i, '')
+    .replace(/^giá\s+/i, '')
+    .replace(/\b(?:hôm nay|hiện nay|hiện tại|mới nhất|khoảng|tầm|từ|là|có giá|ở mức)\b/gi, ' ')
+    .replace(/[-:–,]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const itemName = prefixText.length >= 2 ? prefixText : clean.slice(0, 60);
+  const normalizedItem = normalizeMarketItemKey(itemName);
+  if (!normalizedItem) {
+    return null;
+  }
+
+  return {
+    topic,
+    itemName,
+    normalizedItem,
+    priceText,
+    region,
+    rawNote: clean,
+  };
+}
+
+export function upsertCommunityMarketPriceBoard(
+  board: Partial<CommunityMarketPriceBoard> | null | undefined,
+  entryInput: {
+    topic: CommunityMarketPriceEntry['topic'];
+    itemName: string;
+    normalizedItem: string;
+    priceText: string;
+    region?: string;
+    rawNote: string;
+    contributorName: string;
+    contributorUid: string;
+  },
+  nowMs: number = Date.now()
+): { board: CommunityMarketPriceBoard; savedEntry: CommunityMarketPriceEntry } {
+  const existingEntries = Array.isArray(board?.entries) ? board.entries : [];
+  const activeEntries = existingEntries.filter(
+    (item) =>
+      item &&
+      typeof item.expiresAt === 'number' &&
+      item.expiresAt > nowMs &&
+      item.normalizedItem !== entryInput.normalizedItem
+  );
+
+  const nowIso = new Date(nowMs).toISOString();
+  const savedEntry: CommunityMarketPriceEntry = {
+    id: `cmp_${hashCanonicalKeyHex(entryInput.normalizedItem)}`,
+    topic: entryInput.topic,
+    itemName: entryInput.itemName,
+    normalizedItem: entryInput.normalizedItem,
+    priceText: entryInput.priceText,
+    region: entryInput.region,
+    rawNote: entryInput.rawNote,
+    contributorName: entryInput.contributorName || 'Thành viên VTNN Tâm An',
+    contributorUid: entryInput.contributorUid || 'guest',
+    updatedAt: nowIso,
+    expiresAt: nowMs + SHARED_VOLATILE_CACHE_TTL_MS,
+  };
+
+  const nextBoard: CommunityMarketPriceBoard = {
+    version: 1,
+    updatedAt: nowIso,
+    entries: [savedEntry, ...activeEntries].slice(0, 150),
+  };
+
+  return { board: nextBoard, savedEntry };
+}
+
+export function matchCommunityMarketPricesForQuery(
+  rawQuery: string,
+  board: CommunityMarketPriceBoard | null | undefined,
+  nowMs: number = Date.now()
+): CommunityMarketPriceEntry[] {
+  if (!board || !Array.isArray(board.entries) || board.entries.length === 0) {
+    return [];
+  }
+  const activeEntries = board.entries.filter(
+    (e) => e && typeof e.expiresAt === 'number' && e.expiresAt > nowMs
+  );
+  if (activeEntries.length === 0) {
+    return [];
+  }
+
+  const qNorm = normalizeMarketItemKey(rawQuery);
+  const qRaw = normalizeVietnameseQuery(rawQuery);
+
+  // 1. Direct item match (e.g. query contains "om18" or "ure phu my" or "ri6")
+  const directMatches = activeEntries.filter((e) => {
+    const itemTokens = e.normalizedItem
+      .split(/\s+/)
+      .filter((t) => t.length >= 2 && !['phan', 'lua', 'thuoc', 'bon', 'tuoi', 'kho'].includes(t));
+    if (e.normalizedItem && qNorm.includes(e.normalizedItem)) {
+      return true;
+    }
+    return itemTokens.length > 0 && itemTokens.every((t) => qNorm.includes(t));
+  });
+  if (directMatches.length > 0) {
+    return directMatches.slice(0, 8);
+  }
+
+  // 2. Broad category match when user asks generally (e.g. "giá lúa hôm nay", "giá phân bón hiện nay")
+  if (hasAnyKeyword(qRaw, ['giá lúa', 'giá gạo', 'lúa hôm nay', 'lúa hiện nay'])) {
+    return activeEntries.filter((e) => e.topic === 'rice').slice(0, 8);
+  }
+  if (hasAnyKeyword(qRaw, ['giá phân', 'phân bón hôm nay', 'phân bón hiện nay', 'thị trường phân'])) {
+    return activeEntries.filter((e) => e.topic === 'fertilizer').slice(0, 8);
+  }
+  if (hasAnyKeyword(qRaw, ['giá sầu riêng', 'giá mít', 'giá xoài', 'giá nông sản'])) {
+    return activeEntries.filter((e) => e.topic === 'produce').slice(0, 8);
+  }
+
+  return [];
+}
+
+export function formatCommunityMarketPriceAnswer(
+  rawQuery: string,
+  matches: CommunityMarketPriceEntry[]
+): string {
+  const cleanQuery = (rawQuery || '').normalize('NFC').trim();
+  const lines = matches.map((m, idx) => {
+    const dateLabel = m.updatedAt.slice(0, 10);
+    const regionLabel = m.region ? ` · Khu vực: **${m.region}**` : '';
+    return `${idx + 1}. **${m.itemName}**: **${m.priceText}**${regionLabel} *(Cập nhật ${dateLabel} bởi ${m.contributorName})*`;
+  });
+
+  return `### Cập nhật Giá Thị Trường Thực Tế từ Cộng đồng Đại lý (${matches.length} mặt hàng)
+
+Kết quả đối chiếu nhanh cho câu hỏi: *"${cleanQuery}"*
+
+${lines.join('\n')}
+
+---
+*Nguồn: Bảng giá thị trường dùng chung do các tài khoản trong hệ thống VTNN Tâm An cập nhật trực tiếp (hiệu lực **7 ngày** · Tiêu thụ **0 token**). Bạn có thể bấm nút **"Kiểm chứng trên Google Chế độ AI (0 token)"** bên dưới nếu muốn đối chiếu thêm giá toàn quốc.*`;
 }
 
 export interface AccountDailyAiQuota {
@@ -1311,6 +1776,7 @@ export function recordAccountDailyAiUsage(
     tokensUsed?: number;
     modelUsed: GeminiConcreteModelId;
     cached?: boolean;
+    freeSharedCache?: boolean;
     now?: Date;
   }
 ): AccountDailyAiQuota {
@@ -1322,6 +1788,9 @@ export function recordAccountDailyAiUsage(
     quota.questionLimit,
     quota.tokenLimit
   );
+  if (usage.freeSharedCache) {
+    return base;
+  }
   const tokenDelta = usage.cached ? 0 : Math.max(0, Math.round(Number(usage.tokensUsed) || 0));
   const isDeepModel = usage.modelUsed === 'gemini-4-hydrogen';
 
