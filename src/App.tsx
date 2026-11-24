@@ -19,6 +19,7 @@ import {
   Printer,
   ShieldCheck,
   ShoppingCart,
+  Sparkles,
   Truck,
   Users,
   Wallet,
@@ -158,6 +159,9 @@ const PaymentVoucherLogView = lazy(() =>
 const StaffAccountManager = lazy(() =>
   import('./components/StaffAccountManager').then((m) => ({ default: m.StaffAccountManager }))
 );
+const GeminiChatbotView = lazy(() =>
+  import('./components/GeminiChatbotView').then((m) => ({ default: m.GeminiChatbotView }))
+);
 
 type ActiveTab =
   | 'dashboard'
@@ -171,6 +175,7 @@ type ActiveTab =
   | 'vouchers'
   | 'staff_accounts'
   | 'reports'
+  | 'gemini_chat'
   | 'backup_history';
 
 export default function App() {
@@ -553,8 +558,13 @@ export default function App() {
   };
 
   useEffect(() => {
+    const fallbackTimer = window.setTimeout(() => {
+      setIsAuthChecking(false);
+    }, 1200);
+
     const unsubscribe = initAuth(
       async (user) => {
+        window.clearTimeout(fallbackTimer);
         syncUserSessionFromFirebase(user);
         setIsAuthChecking(false);
         try {
@@ -592,12 +602,16 @@ export default function App() {
         }
       },
       () => {
+        window.clearTimeout(fallbackTimer);
         setIsGoogleAuthenticated(false);
         setCloudSyncStatus('local');
         setIsAuthChecking(false);
       }
     );
-    return () => unsubscribe();
+    return () => {
+      window.clearTimeout(fallbackTimer);
+      unsubscribe();
+    };
   }, []);
 
   const showToast = (msg: string) => {
@@ -3542,6 +3556,11 @@ export default function App() {
       icon: <FileSpreadsheet className="w-4 h-4" />,
     },
     {
+      id: 'gemini_chat',
+      label: 'Trợ lý A.I',
+      icon: <Sparkles className="w-4 h-4" />,
+    },
+    {
       id: 'backup_history',
       label: 'Sao lưu & Lịch sử',
       icon: <History className="w-4 h-4" />,
@@ -3769,36 +3788,31 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0 max-w-full">
         {/* Top Bar Contract: Always pinned at top when scrolling vertically down */}
         <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200 sticky top-0 z-40 shadow-2xs w-full max-w-full">
-          <div className="px-2 sm:px-6 py-2 sm:py-3 flex items-center justify-between gap-1.5 sm:gap-3">
-            <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0">
+          <div className="px-2.5 sm:px-3.5 lg:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-2 sm:gap-2.5">
+            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1 overflow-hidden">
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen((prev) => !prev)}
                 aria-label="Mở menu điều hướng"
-                className="lg:hidden p-1.5 sm:p-2 text-slate-600 hover:text-slate-900 rounded-lg border border-slate-200 shrink-0"
+                className="lg:hidden p-1.5 text-slate-600 hover:text-slate-900 rounded-lg border border-slate-200 shrink-0"
               >
                 {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
               </button>
 
-              <div className="flex items-center gap-1.5 text-xs sm:text-sm min-w-0">
-                <span className="font-bold text-emerald-800 whitespace-nowrap truncate">
+              <div className="flex items-center gap-1.5 text-xs sm:text-sm min-w-0 overflow-hidden">
+                <span className="font-bold text-emerald-800 whitespace-nowrap shrink-0">
                   VTNN Tâm An
                 </span>
-                {!isAdminAccount && (
-                  <span className="hidden sm:inline-flex px-2 py-0.5 text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-md whitespace-nowrap shrink-0">
-                    Quản lý 1 kho: {currentStaff.assignedWarehouse}
-                  </span>
-                )}
-                <span className="hidden md:inline text-slate-300 shrink-0" aria-hidden="true">
+                <span className="hidden lg:inline text-slate-300 shrink-0" aria-hidden="true">
                   /
                 </span>
-                <span className="hidden md:inline font-semibold text-slate-900 whitespace-nowrap truncate max-w-[220px] xl:max-w-none">
+                <span className="hidden lg:inline font-semibold text-slate-900 whitespace-nowrap truncate">
                   {activeNavLabel}
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               {/* Desktop Multi-Warehouse Selector for Primary Manager & Deputy General Manager */}
               <div className="hidden md:block">
                 <MultiWarehouseFilterPopover
@@ -3844,11 +3858,11 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleLogoutApp}
-                className="px-2 py-1.5 sm:px-3 sm:py-2 text-[11px] sm:text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
+                className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
               >
                 <LogOut className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden md:inline">Thoát đăng nhập</span>
-                <span className="md:hidden">Thoát</span>
+                <span className="hidden lg:inline">Thoát đăng nhập</span>
+                <span className="lg:hidden">Thoát</span>
               </button>
 
               {/* Push Notification Center Trigger */}
@@ -3856,7 +3870,7 @@ export default function App() {
                 type="button"
                 onClick={() => setIsNotifDrawerOpen(true)}
                 aria-label={`Thông báo đẩy (${unreadNotifCount} chưa đọc)`}
-                className="px-2 py-1.5 sm:px-3 sm:py-2 text-[11px] sm:text-xs font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
+                className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
               >
                 <Bell className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
                 <span className="hidden sm:inline">Thông báo</span>
@@ -3874,7 +3888,7 @@ export default function App() {
                     setMobileMenuOpen(false);
                     scrollToTopOfPage();
                   }}
-                  className="px-2.5 py-1.5 sm:px-3.5 sm:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 lg:px-3.5 lg:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
                   <span className="sm:hidden">+ Đơn bán</span>
                   <span className="hidden sm:inline">+ Tạo đơn bán</span>
@@ -4653,6 +4667,20 @@ export default function App() {
                 setActiveTab(tab);
               }}
               onNotifyToast={showToast}
+            />
+          )}
+
+          {isSessionLoggedIn && activeTab === 'gemini_chat' && (
+            <GeminiChatbotView
+              currentStaff={currentStaff}
+              activeWarehouseLabel={detailedWarehouseLabel}
+              products={visibleProducts}
+              customers={visibleCustomers}
+              suppliers={visibleSuppliers}
+              sales={visibleSales}
+              imports={visibleImports}
+              receiptVouchers={visibleReceiptVouchers}
+              paymentVouchers={visiblePaymentVouchers}
             />
           )}
           </Suspense>

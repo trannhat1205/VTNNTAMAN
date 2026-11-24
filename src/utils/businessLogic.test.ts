@@ -62,6 +62,12 @@ import {
   sanitizeStaffListForStorage,
 } from '../services/localPersistence';
 import {
+  buildGeminiSystemInstruction,
+  buildWarehouseReportSnapshot,
+  GEMINI_MODEL_OPTIONS,
+  generateSmartReportAnswer,
+} from './geminiReportAssistant';
+import {
   CustomerProfile,
   ImportTransaction,
   NotificationPrefs,
@@ -71,7 +77,13 @@ import {
 } from '../types';
 import {
   INITIAL_CUSTOMERS,
+  INITIAL_IMPORTS,
+  INITIAL_PAYMENT_VOUCHERS,
+  INITIAL_PRODUCTS,
+  INITIAL_RECEIPT_VOUCHERS,
+  INITIAL_SALES,
   INITIAL_SAVED_VOUCHERS,
+  PRODUCTION_PRIMARY_ADMIN,
   INITIAL_SUPPLIERS,
 } from '../data/seedData';
 
@@ -608,6 +620,7 @@ test('canAccountCreateStaff only allows trannhat1205@gmail.com or phone 03931202
     'debts',
     'vouchers',
     'staff_accounts',
+    'gemini_chat',
   ]);
 });
 
@@ -1688,9 +1701,10 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
   assert.equal(adminScope.isPrimaryOwner, true);
   assert.equal(adminScope.canAccessBackupHistory, true);
   assert.equal(adminScope.allowedTabs.includes('backup_history'), true);
-  assert.equal(adminScope.allowedTabs.length, 12);
+  assert.equal(adminScope.allowedTabs.includes('gemini_chat'), true);
+  assert.equal(adminScope.allowedTabs.length, 13);
 
-  // 4. Independent single-warehouse user account has 11 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
+  // 4. Independent single-warehouse user account has 12 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
   const newGmailUser: StaffMember = {
     uid: 'user_uid_vtnntaman',
     username: 'vtnntaman',
@@ -1711,8 +1725,9 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
   const userScope = evaluateStaffAccessScope(newGmailUser);
   assert.equal(userScope.isPrimaryOwner, false);
   assert.equal(userScope.canAccessBackupHistory, false);
-  assert.equal(userScope.allowedTabs.length, 11);
+  assert.equal(userScope.allowedTabs.length, 12);
   assert.equal(userScope.allowedTabs.includes('reports'), true);
+  assert.equal(userScope.allowedTabs.includes('gemini_chat'), true);
   assert.equal(userScope.allowedTabs.includes('backup_history'), false);
   assert.equal(userScope.allowedReportCategories.includes('financial_profit'), true);
   assert.equal(userScope.allowedReportCategories.length, 8);
@@ -1827,7 +1842,48 @@ test('Production hardening: sequential voucher codes, Vietnam dates, SHA-256 pas
   assert.equal(sanitized[0].password, '');
 });
 
+test('Gemini Report Assistant: builds accurate warehouse report snapshot, system instruction, and answers in-app and external queries', () => {
+  assert.equal(GEMINI_MODEL_OPTIONS.length, 4);
+  assert.equal(GEMINI_MODEL_OPTIONS[0].id, 'gemini-4-hydrogen');
+  assert.equal(GEMINI_MODEL_OPTIONS[1].id, 'gemini-3.1-flash-lite');
 
+  const scope = evaluateStaffAccessScope(PRODUCTION_PRIMARY_ADMIN);
+  assert.equal(scope.allowedTabs.includes('gemini_chat'), true);
 
+  const snapshot = buildWarehouseReportSnapshot({
+    warehouseLabel: 'Tâm An Mỹ Ngãi',
+    currentStaff: PRODUCTION_PRIMARY_ADMIN,
+    products: INITIAL_PRODUCTS,
+    customers: INITIAL_CUSTOMERS,
+    suppliers: INITIAL_SUPPLIERS,
+    sales: INITIAL_SALES,
+    imports: INITIAL_IMPORTS,
+    receiptVouchers: INITIAL_RECEIPT_VOUCHERS,
+    paymentVouchers: INITIAL_PAYMENT_VOUCHERS,
+  });
 
+  assert.equal(snapshot.warehouseLabel, 'Tâm An Mỹ Ngãi');
+  assert.equal(snapshot.productsCount, INITIAL_PRODUCTS.length);
+  assert.equal(snapshot.customersCount, INITIAL_CUSTOMERS.length);
+  assert.equal(snapshot.salesCount, INITIAL_SALES.length);
+  assert.ok(snapshot.totalSalesRevenue > 0);
+  assert.ok(snapshot.totalCustomerDebt > 0);
+  assert.ok(snapshot.debtorCustomers.length > 0);
+
+  const sysInstruction = buildGeminiSystemInstruction(snapshot);
+  assert.ok(sysInstruction.includes('Tâm An Mỹ Ngãi'));
+  assert.ok(sysInstruction.includes('SỐ LIỆU BÁO CÁO THỜI GIAN THỰC CỦA KHO'));
+
+  const overviewAns = generateSmartReportAnswer('Tóm tắt báo cáo doanh thu', snapshot);
+  assert.ok(overviewAns.includes('Báo cáo Tổng hợp Hoạt động Kinh doanh'));
+
+  const debtAns = generateSmartReportAnswer('Danh sách khách hàng đang nợ', snapshot);
+  assert.ok(debtAns.includes('Báo cáo Công nợ Phải thu Khách hàng'));
+
+  const om18Ans = generateSmartReportAnswer('giá lúa om18 hiện nay bao nhiêu', snapshot);
+  assert.ok(om18Ans.includes('Cập nhật Giá Lúa OM18'));
+
+  const agroAns = generateSmartReportAnswer('Kỹ thuật bón phân cho lúa và sầu riêng', snapshot);
+  assert.ok(agroAns.includes('Tư vấn Kỹ thuật Nông nghiệp'));
+});
 

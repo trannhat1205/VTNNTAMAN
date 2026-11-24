@@ -1285,6 +1285,7 @@ export function evaluateStaffAccessScope(
   if (canAccessVouchers) allowedTabs.push('vouchers');
   allowedTabs.push('staff_accounts');
   if (canAccessReports) allowedTabs.push('reports');
+  allowedTabs.push('gemini_chat');
   if (canAccessBackupHistory) allowedTabs.push('backup_history');
 
   return {

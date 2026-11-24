@@ -45,9 +45,16 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
 
   if (!canFilterMultiWarehouses) {
     return (
-      <span className="text-emerald-800 font-semibold whitespace-nowrap shrink-0 flex items-center gap-1">
-        <Warehouse className="w-3.5 h-3.5 shrink-0" />
-        <span>{lockedWarehouseLabel}</span>
+      <span
+        title={lockedWarehouseLabel}
+        className={`inline-flex items-center gap-1.5 font-semibold text-emerald-800 bg-emerald-50/90 border border-emerald-200 rounded-lg whitespace-nowrap shrink-0 ${
+          compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1.5 text-xs'
+        }`}
+      >
+        <Warehouse className="w-3.5 h-3.5 shrink-0 text-emerald-700" />
+        <span className="truncate max-w-[210px] lg:max-w-[240px] xl:max-w-[280px]">
+          {lockedWarehouseLabel}
+        </span>
       </span>
     );
   }
