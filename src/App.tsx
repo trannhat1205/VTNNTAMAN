@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownCircle,
   ArrowUpCircle,
@@ -16,6 +16,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageCircle,
   Printer,
   ShieldCheck,
   ShoppingCart,
@@ -105,13 +106,19 @@ import {
   isCurrentUserAdmin,
   logoutUser,
   resendVerificationEmail,
+  seedExistingStaffToChatDirectoryIfAdmin,
+  subscribeToAiTokenGrant,
+  subscribeToUserChatRooms,
   syncCustomerToFirestore,
   syncImportToFirestore,
   syncNotificationPrefsToFirestore,
   syncProductToFirestore,
   syncSaleToFirestore,
   uploadBackupToGoogleDrive,
+  upsertChatUserDirectoryProfile,
 } from './services/firebaseService';
+import { AiTokenGrantRecord } from './utils/geminiReportAssistant';
+import { buildDirectChatRoomId } from './utils/internalChatLogic';
 import {
   loadWorkspaceFromStorage,
   mergeRecordsById,
@@ -162,6 +169,9 @@ const StaffAccountManager = lazy(() =>
 const GeminiChatbotView = lazy(() =>
   import('./components/GeminiChatbotView').then((m) => ({ default: m.GeminiChatbotView }))
 );
+const InternalChatView = lazy(() =>
+  import('./components/InternalChatView').then((m) => ({ default: m.InternalChatView }))
+);
 
 type ActiveTab =
   | 'dashboard'
@@ -176,6 +186,7 @@ type ActiveTab =
   | 'staff_accounts'
   | 'reports'
   | 'gemini_chat'
+  | 'internal_chat'
   | 'backup_history';
 
 export default function App() {
@@ -217,6 +228,10 @@ export default function App() {
     initialWorkspace.staffList[0]?.uid || PRIMARY_ADMIN_UID
   );
   const [saleFormResetKey, setSaleFormResetKey] = useState<number>(0);
+  const [activeAiTokenGrant, setActiveAiTokenGrant] = useState<AiTokenGrantRecord | null>(null);
+  const [chatTargetRoomId, setChatTargetRoomId] = useState<string | null>(null);
+  const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
+  const lastGrantBonusRef = useRef<number | null>(null);
 
   // Auth & Role State
   const [role, setRole] = useState<UserRole>('staff');
@@ -620,6 +635,80 @@ export default function App() {
       setToastBanner((prev) => (prev === msg ? null : prev));
     }, 4500);
   };
+
+  // Realtime subscription to Admin AI Token Grants & Zalo-like Internal Chat directory
+  useEffect(() => {
+    if (!isSessionLoggedIn) {
+      setActiveAiTokenGrant(null);
+      lastGrantBonusRef.current = null;
+      return;
+    }
+
+    const isPrimary = canAccountCreateStaff(currentStaff);
+    const activeUid =
+      (isPrimary ? PRIMARY_ADMIN_UID : auth.currentUser?.uid || currentStaff.uid) ||
+      currentStaff.uid;
+    const activeEmail = currentStaff.email || currentUserEmail || '';
+    const grantLookupKey = activeUid || activeEmail || 'guest';
+
+    const unsubGrant = subscribeToAiTokenGrant(grantLookupKey, (grant) => {
+      setActiveAiTokenGrant(grant);
+      const nextBonus = grant?.bonusTokens || 0;
+      if (lastGrantBonusRef.current !== null && nextBonus > lastGrantBonusRef.current && grant) {
+        const diff = nextBonus - lastGrantBonusRef.current;
+        showToast(
+          `Admin vừa cấp thêm +${diff.toLocaleString('vi-VN')} token Trợ lý A.I cho tài khoản của bạn!`
+        );
+      }
+      lastGrantBonusRef.current = nextBonus;
+    });
+
+    let unsubRooms = () => {};
+    if (isGoogleAuthenticated && auth.currentUser) {
+      void upsertChatUserDirectoryProfile({
+        uid: activeUid,
+        displayName: currentStaff.displayName,
+        warehouseName: currentStaff.assignedWarehouse || 'VTNN Tâm An',
+        isPrimaryAdmin: isPrimary,
+        roleLabel: getPositionRoleLabel(currentStaff.positionRole),
+      });
+      if (isPrimary) {
+        void seedExistingStaffToChatDirectoryIfAdmin();
+      }
+
+      unsubRooms = subscribeToUserChatRooms(activeUid, isPrimary, (roomsList) => {
+        if (activeTab === 'internal_chat') return;
+        try {
+          const rawRead = localStorage.getItem(`vtnn_taman_chat_last_read_v1_${activeUid}`);
+          const lastReadMap = rawRead ? (JSON.parse(rawRead) as Record<string, number>) : {};
+          const unread = roomsList.filter(
+            (r) =>
+              r.lastSenderUid &&
+              r.lastSenderUid !== activeUid &&
+              r.lastMessageAtMs > (lastReadMap[r.roomId] || 0)
+          ).length;
+          setUnreadChatCount(unread);
+        } catch {
+          // ignore
+        }
+      });
+    }
+
+    return () => {
+      unsubGrant();
+      unsubRooms();
+    };
+  }, [
+    isSessionLoggedIn,
+    isGoogleAuthenticated,
+    currentStaff.uid,
+    currentStaff.displayName,
+    currentStaff.assignedWarehouse,
+    currentStaff.positionRole,
+    currentStaff.email,
+    currentUserEmail,
+    activeTab,
+  ]);
 
   // Generate live notifications based on user preferences using real Vietnam date
   const todayVietnamDate = getTodayVietnamDateStr();
@@ -3561,6 +3650,11 @@ export default function App() {
       icon: <Sparkles className="w-4 h-4" />,
     },
     {
+      id: 'internal_chat',
+      label: 'Chat nội bộ',
+      icon: <MessageCircle className="w-4 h-4" />,
+    },
+    {
       id: 'backup_history',
       label: 'Sao lưu & Lịch sử',
       icon: <History className="w-4 h-4" />,
@@ -3735,6 +3829,15 @@ export default function App() {
                       }`}
                     >
                       {auditLogs.length}
+                    </span>
+                  )}
+                  {item.id === 'internal_chat' && unreadChatCount > 0 && (
+                    <span
+                      className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                        isActive ? 'bg-white text-emerald-800' : 'bg-rose-600 text-white'
+                      }`}
+                    >
+                      {unreadChatCount}
                     </span>
                   )}
                 </button>
@@ -3935,7 +4038,12 @@ export default function App() {
                   }`}
                 >
                   {item.icon}
-                  <span>{item.label}</span>
+                  <span className="flex-1 text-left">{item.label}</span>
+                  {item.id === 'internal_chat' && unreadChatCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-bold">
+                      {unreadChatCount}
+                    </span>
+                  )}
                 </button>
               ))}
               {isSessionLoggedIn && (
@@ -4681,6 +4789,29 @@ export default function App() {
               imports={visibleImports}
               receiptVouchers={visibleReceiptVouchers}
               paymentVouchers={visiblePaymentVouchers}
+              adminTokenGrant={activeAiTokenGrant}
+              onOpenAdminTokenRequestChat={() => {
+                const callerUid = auth.currentUser?.uid || currentStaff.uid;
+                const adminDmId = buildDirectChatRoomId(callerUid, PRIMARY_ADMIN_UID);
+                setChatTargetRoomId(adminDmId || null);
+                setActiveTab('internal_chat');
+                scrollToTopOfPage();
+              }}
+            />
+          )}
+
+          {isSessionLoggedIn && activeTab === 'internal_chat' && (
+            <InternalChatView
+              currentStaff={currentStaff}
+              staffList={staffList}
+              initialSelectedRoomId={chatTargetRoomId}
+              onConsumeInitialRoomId={() => setChatTargetRoomId(null)}
+              onUnreadCountChange={setUnreadChatCount}
+              onOpenGeminiChat={() => {
+                setActiveTab('gemini_chat');
+                scrollToTopOfPage();
+              }}
+              onNotifyToast={showToast}
             />
           )}
           </Suspense>

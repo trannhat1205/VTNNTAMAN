@@ -11,7 +11,7 @@ import {
 import { formatVND, getTodayVietnamDateStr } from './businessLogic';
 
 export const DAILY_AI_QUESTION_LIMIT = 30;
-export const DAILY_AI_TOKEN_LIMIT = 90000;
+export const DAILY_AI_TOKEN_LIMIT = 10000;
 export const SHARED_VOLATILE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 export const SHARED_AI_CACHE_FOLDER = 'documents/ai_cache';
 export const COMMUNITY_MARKET_PRICES_FILE = 'community_market_prices.json';
@@ -1159,7 +1159,7 @@ export function buildUnverifiedExternalLookupNotice(query: string): string {
 Hệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Google Search cho câu hỏi: **"${cleanQuery}"**.
 
 - Để đảm bảo an toàn tuyệt đối (không tự suy đoán tên hoạt chất hoặc nhầm lẫn giữa thuốc trừ bệnh / thuốc trừ sâu), Trợ lý A.I tạm dừng việc tự trả lời khi chưa có nguồn xác thực.
-- Bạn hãy bấm nút **"Kiểm chứng trên Google Chế độ AI (0 token)"** ngay bên dưới để xem trực tiếp kết quả chính xác nhất từ Google, hoặc kiểm tra nhãn bao bì sản phẩm và thử hỏi lại sau vài giây.`;
+- Bạn hãy bấm nút **"Kiểm chứng"** ngay bên dưới để xem trực tiếp kết quả chính xác nhất từ Google, hoặc kiểm tra nhãn bao bì sản phẩm và thử hỏi lại sau vài giây.`;
 }
 
 export type SharedAiCacheCategory = 'none' | 'evergreen' | 'volatile_7d';
@@ -1631,7 +1631,18 @@ Kết quả đối chiếu nhanh cho câu hỏi: *"${cleanQuery}"*
 ${lines.join('\n')}
 
 ---
-*Nguồn: Bảng giá thị trường dùng chung do các tài khoản trong hệ thống VTNN Tâm An cập nhật trực tiếp (hiệu lực **7 ngày** · Tiêu thụ **0 token**). Bạn có thể bấm nút **"Kiểm chứng trên Google Chế độ AI (0 token)"** bên dưới nếu muốn đối chiếu thêm giá toàn quốc.*`;
+*Nguồn: Bảng giá thị trường dùng chung do các tài khoản trong hệ thống VTNN Tâm An cập nhật trực tiếp (hiệu lực **7 ngày** · Tiêu thụ **0 token**). Bạn có thể bấm nút **"Kiểm chứng"** bên dưới nếu muốn đối chiếu thêm giá toàn quốc.*`;
+}
+
+export interface AiTokenGrantRecord {
+  accountId: string;
+  date: string;
+  bonusTokens: number;
+  lastGrantedAmount: number;
+  grantedByUid: string;
+  grantedByName: string;
+  note?: string;
+  updatedAt: string;
 }
 
 export interface AccountDailyAiQuota {
@@ -1641,6 +1652,7 @@ export interface AccountDailyAiQuota {
   questionLimit: number;
   tokensUsed: number;
   tokenLimit: number;
+  bonusTokens?: number;
   freeModelQuestions: number;
   deepModelQuestions: number;
   updatedAt: string;
@@ -1650,16 +1662,20 @@ export function createFreshAccountDailyAiQuota(
   accountId: string,
   now: Date = new Date(),
   questionLimit: number = DAILY_AI_QUESTION_LIMIT,
-  tokenLimit: number = DAILY_AI_TOKEN_LIMIT
+  tokenLimit: number = DAILY_AI_TOKEN_LIMIT,
+  bonusTokens: number = 0
 ): AccountDailyAiQuota {
   const safeAccountId = (accountId || 'guest').trim() || 'guest';
+  const safeBonus = Math.max(0, Math.round(Number(bonusTokens) || 0));
+  const baseLimit = Math.max(1000, Number(tokenLimit) || DAILY_AI_TOKEN_LIMIT);
   return {
     accountId: safeAccountId,
     date: getTodayVietnamDateStr(now),
     questionsUsed: 0,
     questionLimit: Math.max(1, Number(questionLimit) || DAILY_AI_QUESTION_LIMIT),
     tokensUsed: 0,
-    tokenLimit: Math.max(1000, Number(tokenLimit) || DAILY_AI_TOKEN_LIMIT),
+    tokenLimit: baseLimit + safeBonus,
+    bonusTokens: safeBonus,
     freeModelQuestions: 0,
     deepModelQuestions: 0,
     updatedAt: now.toISOString(),
@@ -1679,7 +1695,7 @@ export function normalizeAccountDailyAiQuotaForToday(
     1,
     Number(questionLimit) || DAILY_AI_QUESTION_LIMIT
   );
-  const effectiveTokenLimit = Math.max(
+  const effectiveBaseTokenLimit = Math.max(
     1000,
     Number(tokenLimit) || DAILY_AI_TOKEN_LIMIT
   );
@@ -1693,20 +1709,52 @@ export function normalizeAccountDailyAiQuotaForToday(
       safeAccountId,
       now,
       effectiveQuestionLimit,
-      effectiveTokenLimit
+      effectiveBaseTokenLimit,
+      0
     );
   }
 
+  const safeBonus = Math.max(0, Math.round(Number(existing.bonusTokens) || 0));
   return {
     accountId: safeAccountId,
     date: todayVn,
     questionsUsed: Math.max(0, Number(existing.questionsUsed) || 0),
     questionLimit: effectiveQuestionLimit,
     tokensUsed: Math.max(0, Number(existing.tokensUsed) || 0),
-    tokenLimit: effectiveTokenLimit,
+    tokenLimit: effectiveBaseTokenLimit + safeBonus,
+    bonusTokens: safeBonus,
     freeModelQuestions: Math.max(0, Number(existing.freeModelQuestions) || 0),
     deepModelQuestions: Math.max(0, Number(existing.deepModelQuestions) || 0),
     updatedAt: existing.updatedAt || now.toISOString(),
+  };
+}
+
+export function applyAdminTokenGrantToQuota(
+  quota: AccountDailyAiQuota,
+  grant: Pick<AiTokenGrantRecord, 'date' | 'bonusTokens'> | null | undefined,
+  now: Date = new Date()
+): AccountDailyAiQuota {
+  const todayVn = getTodayVietnamDateStr(now);
+  const normalizedBase = normalizeAccountDailyAiQuotaForToday(
+    { ...quota, bonusTokens: 0 },
+    quota.accountId,
+    now,
+    quota.questionLimit,
+    DAILY_AI_TOKEN_LIMIT
+  );
+
+  const validBonus =
+    grant &&
+    grant.date === todayVn &&
+    typeof grant.bonusTokens === 'number' &&
+    grant.bonusTokens > 0
+      ? Math.round(grant.bonusTokens)
+      : 0;
+
+  return {
+    ...normalizedBase,
+    bonusTokens: validBonus,
+    tokenLimit: DAILY_AI_TOKEN_LIMIT + validBonus,
   };
 }
 
@@ -1721,12 +1769,17 @@ export function checkAccountDailyAiQuota(
   message?: string;
   normalizedQuota: AccountDailyAiQuota;
 } {
+  const safeBaseLimit = Math.max(
+    1000,
+    (Number(quota.tokenLimit) || DAILY_AI_TOKEN_LIMIT) -
+      Math.max(0, Math.round(Number(quota.bonusTokens) || 0))
+  );
   const normalizedQuota = normalizeAccountDailyAiQuotaForToday(
     quota,
     quota.accountId,
     now,
     quota.questionLimit,
-    quota.tokenLimit
+    safeBaseLimit
   );
 
   const remainingQuestions = Math.max(
@@ -1738,26 +1791,15 @@ export function checkAccountDailyAiQuota(
     normalizedQuota.tokenLimit - normalizedQuota.tokensUsed
   );
 
-  if (normalizedQuota.questionsUsed >= normalizedQuota.questionLimit) {
-    return {
-      allowed: false,
-      reason: 'question_limit_reached',
-      remainingQuestions: 0,
-      remainingTokens,
-      message: `Tài khoản đã sử dụng hết hạn mức ${normalizedQuota.questionLimit}/${normalizedQuota.questionLimit} câu hỏi Trợ lý A.I trong ngày ${normalizedQuota.date}. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai (giờ Việt Nam).`,
-      normalizedQuota,
-    };
-  }
-
   if (normalizedQuota.tokensUsed >= normalizedQuota.tokenLimit) {
     return {
       allowed: false,
       reason: 'token_limit_reached',
       remainingQuestions,
       remainingTokens: 0,
-      message: `Tài khoản đã chạm trần chi phí ${normalizedQuota.tokenLimit.toLocaleString(
+      message: `Tài khoản đã sử dụng hết hạn mức ${normalizedQuota.tokenLimit.toLocaleString(
         'vi-VN'
-      )} token trong ngày ${normalizedQuota.date}. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai (giờ Việt Nam).`,
+      )} token Trợ lý A.I trong ngày ${normalizedQuota.date}. Hãy nhắn tin cho Admin quản trị chính trong mục Chat nội bộ để xin cấp thêm token, hoặc chờ tự động làm mới vào 00:00 ngày mai.`,
       normalizedQuota,
     };
   }
@@ -1781,12 +1823,17 @@ export function recordAccountDailyAiUsage(
   }
 ): AccountDailyAiQuota {
   const now = usage.now || new Date();
+  const safeBaseLimit = Math.max(
+    1000,
+    (Number(quota.tokenLimit) || DAILY_AI_TOKEN_LIMIT) -
+      Math.max(0, Math.round(Number(quota.bonusTokens) || 0))
+  );
   const base = normalizeAccountDailyAiQuotaForToday(
     quota,
     quota.accountId,
     now,
     quota.questionLimit,
-    quota.tokenLimit
+    safeBaseLimit
   );
   if (usage.freeSharedCache) {
     return base;

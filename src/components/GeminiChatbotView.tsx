@@ -1,12 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bot,
   Check,
   ChevronDown,
   Copy,
-  Database,
   ExternalLink,
   History,
+  MessageCircle,
   MessageSquarePlus,
   Send,
   Sparkles,
@@ -28,6 +27,8 @@ import {
 } from '../types';
 import {
   AccountDailyAiQuota,
+  AiTokenGrantRecord,
+  applyAdminTokenGrantToQuota,
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildGoogleAiModeUrl,
@@ -48,7 +49,6 @@ import {
   GeminiConcreteModelId,
   GeminiModelOptionId,
   generateSmartReportAnswer,
-  getGeminiModelOptionMeta,
   matchCommunityMarketPricesForQuery,
   normalizeAccountDailyAiQuotaForToday,
   normalizeMarketItemKey,
@@ -63,7 +63,7 @@ import {
   readSharedAiCacheFromFirebaseStorage,
   writeSharedAiCacheToFirebaseStorage,
 } from '../services/firebaseService';
-import { formatVND } from '../utils/businessLogic';
+import { canAccountCreateStaff, formatVND } from '../utils/businessLogic';
 
 export interface GeminiGroundingSource {
   title: string;
@@ -112,6 +112,8 @@ interface GeminiChatbotViewProps {
   imports: ImportTransaction[];
   receiptVouchers: CashReceiptVoucher[];
   paymentVouchers: CashPaymentVoucher[];
+  adminTokenGrant?: AiTokenGrantRecord | null;
+  onOpenAdminTokenRequestChat?: () => void;
 }
 
 const CLIENT_AI_CACHE_STORAGE_KEY = 'vtnn_taman_ai_response_cache_v4';
@@ -331,6 +333,8 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   imports,
   receiptVouchers,
   paymentVouchers,
+  adminTokenGrant,
+  onOpenAdminTokenRequestChat,
 }) => {
   const accountQuotaKey = useMemo(() => {
     return (currentStaff?.uid || currentStaff?.email || 'guest').trim() || 'guest';
@@ -487,9 +491,19 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     [reportSnapshot]
   );
 
+  const isPrimaryAdmin = useMemo(
+    () => canAccountCreateStaff(currentStaff),
+    [currentStaff]
+  );
+
+  const effectiveDailyQuota = useMemo(
+    () => applyAdminTokenGrantToQuota(dailyQuota, adminTokenGrant),
+    [dailyQuota, adminTokenGrant]
+  );
+
   const quotaCheck = useMemo(
-    () => checkAccountDailyAiQuota(dailyQuota),
-    [dailyQuota]
+    () => checkAccountDailyAiQuota(effectiveDailyQuota),
+    [effectiveDailyQuota]
   );
 
   const activeSession = useMemo(
@@ -638,7 +652,9 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     const promptText = (customText ?? inputPrompt).normalize('NFC').trim();
     if (!promptText || isGenerating || !activeSession) return;
 
-    const latestQuotaCheck = checkAccountDailyAiQuota(dailyQuota);
+    const latestQuotaCheck = checkAccountDailyAiQuota(
+      applyAdminTokenGrantToQuota(dailyQuota, adminTokenGrant)
+    );
 
     const userMessage: GeminiChatMessage = {
       id: `msg_u_${Date.now()}`,
@@ -864,6 +880,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
             history: previousHistory,
             model: selectedModel,
             accountId: accountQuotaKey,
+            bonusTokens: latestQuotaCheck.normalizedQuota.bonusTokens || 0,
             queryScope: routing.queryScope,
             systemInstruction: activeSystemInstruction,
             internalSystemInstruction,
@@ -1248,24 +1265,21 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
 
         {/* Daily Account AI Quota Card */}
         <div className="mx-3 mt-2.5 p-3 rounded-2xl bg-white border border-slate-200/90 shadow-2xs">
-          <div className="flex items-center justify-between text-[11px] font-bold text-slate-700">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-slate-700">
             <span>Hạn mức A.I hôm nay</span>
-            <span
-              className={
-                quotaCheck.allowed ? 'text-emerald-700' : 'text-rose-600'
-              }
-            >
-              {quotaCheck.normalizedQuota.questionsUsed}/
-              {quotaCheck.normalizedQuota.questionLimit} câu
-            </span>
+            {(quotaCheck.normalizedQuota.bonusTokens || 0) > 0 && (
+              <span className="px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                +{(quotaCheck.normalizedQuota.bonusTokens || 0).toLocaleString('vi-VN')} Admin
+              </span>
+            )}
           </div>
           <div className="mt-1.5 h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
             <div
               className={`h-full rounded-full transition-all ${
                 !quotaCheck.allowed
                   ? 'bg-rose-500'
-                  : quotaCheck.normalizedQuota.questionsUsed >=
-                    quotaCheck.normalizedQuota.questionLimit * 0.8
+                  : quotaCheck.normalizedQuota.tokensUsed >=
+                    quotaCheck.normalizedQuota.tokenLimit * 0.8
                   ? 'bg-amber-500'
                   : 'bg-emerald-500'
               }`}
@@ -1273,8 +1287,8 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 width: `${Math.min(
                   100,
                   Math.round(
-                    (quotaCheck.normalizedQuota.questionsUsed /
-                      quotaCheck.normalizedQuota.questionLimit) *
+                    (quotaCheck.normalizedQuota.tokensUsed /
+                      Math.max(1, quotaCheck.normalizedQuota.tokenLimit)) *
                       100
                   )
                 )}%`,
@@ -1289,6 +1303,16 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
             </span>
             <span>Làm mới 00:00</span>
           </div>
+          {!isPrimaryAdmin && onOpenAdminTokenRequestChat && (
+            <button
+              type="button"
+              onClick={onOpenAdminTokenRequestChat}
+              className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200/80 text-[11px] font-bold transition cursor-pointer"
+            >
+              <MessageCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>Xin Admin cấp thêm Token</span>
+            </button>
+          )}
         </div>
 
         {/* History List */}
@@ -1425,18 +1449,6 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            <span
-              className={`hidden sm:inline-flex items-center px-2.5 py-1 rounded-xl text-[11px] font-bold border ${
-                quotaCheck.allowed
-                  ? 'bg-emerald-50/80 text-emerald-800 border-emerald-200'
-                  : 'bg-rose-50 text-rose-700 border-rose-200'
-              }`}
-              title={`Đã dùng ${quotaCheck.normalizedQuota.tokensUsed.toLocaleString('vi-VN')} / ${quotaCheck.normalizedQuota.tokenLimit.toLocaleString('vi-VN')} token hôm nay`}
-            >
-              Còn {quotaCheck.remainingQuestions}/
-              {quotaCheck.normalizedQuota.questionLimit} câu hôm nay
-            </span>
-
             <button
               type="button"
               onClick={handleCreateNewChat}
@@ -1510,67 +1522,23 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                               </div>
                             </div>
                           )}
-                          {(msg.queryScope === 'external' ||
-                            msg.usedWebSearch ||
-                            (msg.sources && msg.sources.length > 0)) &&
-                            msg.sourceQuery && (
-                              <div className="mt-3 pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
-                                <a
-                                  href={buildGoogleAiModeUrl(msg.sourceQuery)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 hover:from-blue-100 hover:to-indigo-100 border border-indigo-200/80 text-[11px] font-bold text-indigo-800 transition"
-                                >
-                                  <ExternalLink className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                                  <span>Kiểm chứng trên Google Chế độ AI (0 token)</span>
-                                </a>
-                                {typeof msg.tokensUsed === 'number' && msg.tokensUsed > 0 && (
-                                  <span className="text-[10px] text-slate-400 font-medium">
-                                    Tiêu thụ: {msg.tokensUsed.toLocaleString('vi-VN')} token
-                                  </span>
-                                )}
-                              </div>
-                            )}
                           <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2 text-[11px] text-slate-400">
-                            <span className="flex flex-wrap items-center gap-1.5">
-                              <Bot className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                              <span>
-                                Trợ lý A.I ·{' '}
-                                {getGeminiModelOptionMeta(msg.modelId).label} (
-                                {getGeminiModelOptionMeta(msg.modelId).badge}) ·{' '}
-                                {msg.timestamp}
-                              </span>
-                              {(msg.usedWebSearch ||
-                                (msg.sources && msg.sources.length > 0)) && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-semibold text-[10px]">
-                                  <Globe className="w-2.5 h-2.5" />
-                                  Tìm kiếm web
-                                </span>
-                              )}
-                              {msg.cacheOrigin === 'shared_evergreen' && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold text-[10px]">
-                                  <Database className="w-2.5 h-2.5" />
-                                  Kho tri thức dùng chung · Vĩnh viễn · 0 token
-                                </span>
-                              )}
-                              {msg.cacheOrigin === 'shared_7d' && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-teal-50 text-teal-700 border border-teal-200 font-semibold text-[10px]">
-                                  <Database className="w-2.5 h-2.5" />
-                                  Kho tri thức dùng chung · 7 ngày · 0 token
-                                </span>
-                              )}
-                              {msg.cacheOrigin === 'community_price' && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-50 text-amber-800 border border-amber-200 font-semibold text-[10px]">
-                                  <Tag className="w-2.5 h-2.5" />
-                                  Giá thị trường cộng đồng · 7 ngày · 0 token
-                                </span>
-                              )}
-                              {msg.cacheOrigin === 'local_cache' && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 font-semibold text-[10px]">
-                                  Bộ nhớ đệm nhanh · 0 token
-                                </span>
-                              )}
-                            </span>
+                            <div>
+                              {(msg.queryScope === 'external' ||
+                                msg.usedWebSearch ||
+                                (msg.sources && msg.sources.length > 0)) &&
+                                msg.sourceQuery && (
+                                  <a
+                                    href={buildGoogleAiModeUrl(msg.sourceQuery)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-blue-50 to-indigo-50 hover:from-blue-100 hover:to-indigo-100 border border-indigo-200/80 text-[11px] font-bold text-indigo-800 transition"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                                    <span>Kiểm chứng</span>
+                                  </a>
+                                )}
+                            </div>
                             <button
                               type="button"
                               onClick={() => handleCopyMessage(msg)}
@@ -1621,8 +1589,18 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         <div className="px-4 sm:px-8 pb-5 pt-2 bg-white">
           <div className="max-w-3xl mx-auto">
             {!quotaCheck.allowed && (
-              <div className="mb-2.5 px-3.5 py-2.5 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium">
-                {quotaCheck.message}
+              <div className="mb-2.5 px-3.5 py-2.5 rounded-2xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium flex flex-wrap items-center justify-between gap-2">
+                <span>{quotaCheck.message}</span>
+                {!isPrimaryAdmin && onOpenAdminTokenRequestChat && (
+                  <button
+                    type="button"
+                    onClick={onOpenAdminTokenRequestChat}
+                    className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-bold shadow-xs transition cursor-pointer"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>Nhắn Admin xin cấp Token</span>
+                  </button>
+                )}
               </div>
             )}
 
@@ -1703,7 +1681,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 placeholder={
                   quotaCheck.allowed
                     ? `Hỏi Trợ lý A.I (VD: Báo cáo doanh thu kho ${activeWarehouseLabel}, giá lúa OM18, hoặc nhập "Cập nhật giá lúa OM18 7.500 đ/kg" để chia sẻ...)`
-                    : 'Đã hết 30 lượt A.I mới hôm nay (vẫn tra cứu được Kho tri thức dùng chung 0 token)'
+                    : 'Đã hết hạn mức token A.I hôm nay (vẫn tra cứu được Kho tri thức dùng chung 0 token)'
                 }
                 className="w-full resize-none bg-transparent text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none leading-relaxed"
               />

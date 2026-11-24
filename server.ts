@@ -6,6 +6,7 @@ import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
   AccountDailyAiQuota,
   AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
+  applyAdminTokenGrantToQuota,
   buildUnverifiedExternalLookupNotice,
   checkAccountDailyAiQuota,
   classifyQueryRoutingAndCostConfig,
@@ -314,6 +315,7 @@ async function startServer() {
         internalSystemInstruction,
         externalSystemInstruction,
         accountId,
+        bonusTokens,
       } = req.body as {
         message?: string;
         history?: ChatHistoryTurn[];
@@ -322,6 +324,7 @@ async function startServer() {
         internalSystemInstruction?: string;
         externalSystemInstruction?: string;
         accountId?: string;
+        bonusTokens?: number;
       };
 
       const normalizedMessage = typeof message === 'string' ? message.normalize('NFC').trim() : '';
@@ -332,7 +335,15 @@ async function startServer() {
 
       const effectiveAccountId =
         typeof accountId === 'string' && accountId.trim() ? accountId.trim() : 'guest';
-      const currentQuota = getOrResetServerAccountQuota(effectiveAccountId);
+      const baseQuota = getOrResetServerAccountQuota(effectiveAccountId);
+      const safeBonusTokens = Math.max(0, Math.round(Number(bonusTokens) || 0));
+      const currentQuota =
+        safeBonusTokens > 0
+          ? applyAdminTokenGrantToQuota(baseQuota, {
+              date: baseQuota.date,
+              bonusTokens: safeBonusTokens,
+            })
+          : baseQuota;
       const quotaCheck = checkAccountDailyAiQuota(currentQuota);
       if (!quotaCheck.allowed) {
         res.status(429).json({

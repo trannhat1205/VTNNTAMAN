@@ -18,6 +18,9 @@ import {
   getDoc,
   getDocs,
   getFirestore,
+  limit,
+  onSnapshot,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -43,7 +46,9 @@ import {
   UserRole,
 } from '../types';
 import { ADMIN_BACKUP_EMAIL, PRIMARY_ADMIN_UID } from '../data/seedData';
+import { getTodayVietnamDateStr } from '../utils/businessLogic';
 import {
+  AiTokenGrantRecord,
   COMMUNITY_MARKET_PRICES_FILE,
   CommunityMarketPriceBoard,
   CommunityMarketPriceEntry,
@@ -52,6 +57,17 @@ import {
   SharedAiCacheEntry,
   upsertCommunityMarketPriceBoard,
 } from '../utils/geminiReportAssistant';
+import {
+  ChatUserDirectoryEntry,
+  INTERNAL_CHAT_GENERAL_ROOM_ID,
+  INTERNAL_CHAT_MAX_FILE_BYTES,
+  InternalChatAttachment,
+  InternalChatMessage,
+  InternalChatMessageType,
+  InternalChatRoom,
+  classifyChatAttachmentKind,
+  sanitizeChatStorageFileName,
+} from '../utils/internalChatLogic';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -1243,4 +1259,619 @@ export async function contributeCommunityMarketPriceToFirebaseStorage(input: {
   }
 
   return { ok: true, board, savedEntry, syncedToCloud };
+}
+
+// ============================================================================
+// PRIMARY ADMIN AI TOKEN GRANTS (Firestore: /ai_token_grants/{accountId})
+// ============================================================================
+
+const LOCAL_TOKEN_GRANTS_STORAGE_KEY = 'vtnn_taman_ai_token_grants_v1';
+
+function readLocalTokenGrantsMap(): Record<string, AiTokenGrantRecord> {
+  try {
+    if (typeof localStorage === 'undefined') return {};
+    const raw = localStorage.getItem(LOCAL_TOKEN_GRANTS_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, AiTokenGrantRecord>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalTokenGrant(record: AiTokenGrantRecord): void {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    const map = readLocalTokenGrantsMap();
+    map[record.accountId] = record;
+    localStorage.setItem(LOCAL_TOKEN_GRANTS_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function subscribeToAiTokenGrant(
+  accountId: string,
+  onChange: (grant: AiTokenGrantRecord | null) => void
+): () => void {
+  const safeId = sanitizeFirestoreId(accountId);
+  if (!safeId) {
+    onChange(null);
+    return () => {};
+  }
+
+  const localCached = readLocalTokenGrantsMap()[safeId];
+  const todayVn = getTodayVietnamDateStr();
+  if (localCached && localCached.date === todayVn) {
+    onChange(localCached);
+  } else {
+    onChange(null);
+  }
+
+  if (!auth.currentUser) {
+    return () => {};
+  }
+
+  const grantRef = doc(db, 'ai_token_grants', safeId);
+  return onSnapshot(
+    grantRef,
+    (snap) => {
+      if (!snap.exists()) {
+        onChange(null);
+        return;
+      }
+      const d = snap.data();
+      const rec: AiTokenGrantRecord = {
+        accountId: String(d.accountId || safeId),
+        date: String(d.date || ''),
+        bonusTokens: Math.max(0, Number(d.bonusTokens) || 0),
+        lastGrantedAmount: Math.max(0, Number(d.lastGrantedAmount) || 0),
+        grantedByUid: String(d.grantedByUid || PRIMARY_ADMIN_UID),
+        grantedByName: String(d.grantedByName || 'Admin Quản trị'),
+        note: String(d.note || ''),
+        updatedAt: normalizeTimestamp(d.updatedAt),
+      };
+      saveLocalTokenGrant(rec);
+      onChange(rec.date === getTodayVietnamDateStr() ? rec : null);
+    },
+    (err) => {
+      console.warn('subscribeToAiTokenGrant warning:', err.message);
+    }
+  );
+}
+
+export function subscribeToAllAiTokenGrantsForAdmin(
+  onChange: (grantsByAccount: Record<string, AiTokenGrantRecord>) => void
+): () => void {
+  const user = auth.currentUser;
+  if (!user || !isCurrentUserAdmin(user)) {
+    onChange({});
+    return () => {};
+  }
+
+  const todayVn = getTodayVietnamDateStr();
+  return onSnapshot(
+    collection(db, 'ai_token_grants'),
+    (snap) => {
+      const map: Record<string, AiTokenGrantRecord> = {};
+      for (const docSnap of snap.docs) {
+        const d = docSnap.data();
+        const rec: AiTokenGrantRecord = {
+          accountId: String(d.accountId || docSnap.id),
+          date: String(d.date || ''),
+          bonusTokens: Math.max(0, Number(d.bonusTokens) || 0),
+          lastGrantedAmount: Math.max(0, Number(d.lastGrantedAmount) || 0),
+          grantedByUid: String(d.grantedByUid || PRIMARY_ADMIN_UID),
+          grantedByName: String(d.grantedByName || 'Admin Quản trị'),
+          note: String(d.note || ''),
+          updatedAt: normalizeTimestamp(d.updatedAt),
+        };
+        if (rec.date === todayVn && rec.bonusTokens > 0) {
+          map[rec.accountId] = rec;
+        }
+      }
+      onChange(map);
+    },
+    (err) => {
+      console.warn('subscribeToAllAiTokenGrantsForAdmin warning:', err.message);
+    }
+  );
+}
+
+export async function grantAiTokensToAccount(params: {
+  targetAccountId: string;
+  amount: number;
+  grantedByName: string;
+  note?: string;
+}): Promise<{
+  ok: boolean;
+  record?: AiTokenGrantRecord;
+  syncedToCloud: boolean;
+  error?: string;
+}> {
+  const user = auth.currentUser;
+  if (!user || !isCurrentUserAdmin(user)) {
+    return {
+      ok: false,
+      syncedToCloud: false,
+      error: 'Chỉ tài khoản Admin quản trị chính mới có quyền cấp thêm token.',
+    };
+  }
+
+  const safeTargetId = sanitizeFirestoreId(params.targetAccountId);
+  const safeAmount = Math.max(1000, Math.min(2000000, Math.round(Number(params.amount) || 0)));
+  if (!isValidFirestoreId(safeTargetId) || safeAmount <= 0) {
+    return {
+      ok: false,
+      syncedToCloud: false,
+      error: 'Thông tin tài khoản nhận hoặc số token cấp không hợp lệ.',
+    };
+  }
+
+  const todayVn = getTodayVietnamDateStr();
+  const grantRef = doc(db, 'ai_token_grants', safeTargetId);
+  let previousTodayBonus = 0;
+
+  try {
+    const existingSnap = await getDoc(grantRef);
+    if (existingSnap.exists()) {
+      const existingData = existingSnap.data();
+      if (existingData.date === todayVn) {
+        previousTodayBonus = Math.max(0, Number(existingData.bonusTokens) || 0);
+      }
+    }
+  } catch {
+    const localPrev = readLocalTokenGrantsMap()[safeTargetId];
+    if (localPrev && localPrev.date === todayVn) {
+      previousTodayBonus = Math.max(0, Number(localPrev.bonusTokens) || 0);
+    }
+  }
+
+  const nextBonus = Math.min(5000000, previousTodayBonus + safeAmount);
+  const safeAdminName = (params.grantedByName || 'Admin Trần Đình Nhất').slice(0, 120) || 'Admin';
+  const safeNote = (params.note || `Admin cấp thêm +${safeAmount.toLocaleString('vi-VN')} token`).slice(0, 300);
+
+  const localRecord: AiTokenGrantRecord = {
+    accountId: safeTargetId,
+    date: todayVn,
+    bonusTokens: nextBonus,
+    lastGrantedAmount: safeAmount,
+    grantedByUid: user.uid,
+    grantedByName: safeAdminName,
+    note: safeNote,
+    updatedAt: new Date().toISOString(),
+  };
+
+  try {
+    await setDoc(grantRef, {
+      accountId: safeTargetId,
+      date: todayVn,
+      bonusTokens: nextBonus,
+      lastGrantedAmount: safeAmount,
+      grantedByUid: user.uid,
+      grantedByName: safeAdminName,
+      note: safeNote,
+      updatedAt: serverTimestamp(),
+    });
+    saveLocalTokenGrant(localRecord);
+    return { ok: true, record: localRecord, syncedToCloud: true };
+  } catch (err) {
+    saveLocalTokenGrant(localRecord);
+    return {
+      ok: false,
+      record: localRecord,
+      syncedToCloud: false,
+      error: err instanceof Error ? err.message : 'Không thể ghi dữ liệu cấp token lên Cloud.',
+    };
+  }
+}
+
+// ============================================================================
+// ZALO-LIKE INTERNAL CHAT (Firestore Realtime + Firebase Storage Media)
+// ============================================================================
+
+export async function upsertChatUserDirectoryProfile(profile: {
+  uid: string;
+  displayName: string;
+  warehouseName: string;
+  isPrimaryAdmin: boolean;
+  roleLabel: string;
+}): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user) return false;
+  const safeUid = sanitizeFirestoreId(profile.uid || user.uid);
+  if (!isValidFirestoreId(safeUid)) return false;
+
+  const isCallerAdmin = isCurrentUserAdmin(user);
+  if (safeUid !== user.uid && !isCallerAdmin) {
+    return false;
+  }
+
+  try {
+    await setDoc(doc(db, 'chat_users', safeUid), {
+      uid: safeUid,
+      displayName: (profile.displayName || 'Thành viên Tâm An').slice(0, 120) || 'Thành viên',
+      warehouseName: (profile.warehouseName || 'VTNN Tâm An').slice(0, 150),
+      isPrimaryAdmin: isCallerAdmin ? Boolean(profile.isPrimaryAdmin) : false,
+      roleLabel: (profile.roleLabel || 'Tài khoản kho').slice(0, 120),
+      lastSeenAt: serverTimestamp(),
+    });
+    return true;
+  } catch (err) {
+    console.warn('upsertChatUserDirectoryProfile warning:', err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+export async function seedExistingStaffToChatDirectoryIfAdmin(): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !isCurrentUserAdmin(user)) return;
+
+  try {
+    const [staffSnap, chatUsersSnap] = await Promise.all([
+      getDocs(collection(db, 'staff')),
+      getDocs(collection(db, 'chat_users')),
+    ]);
+    const existingChatUids = new Set(chatUsersSnap.docs.map((d) => d.id));
+
+    for (const sDoc of staffSnap.docs) {
+      const uid = sDoc.id;
+      if (existingChatUids.has(uid) || !isValidFirestoreId(uid)) continue;
+      const d = sDoc.data();
+      const isPrimary = uid === PRIMARY_ADMIN_UID;
+      await setDoc(doc(db, 'chat_users', uid), {
+        uid,
+        displayName: String(d.displayName || 'Thành viên VTNN Tâm An').slice(0, 120),
+        warehouseName: isPrimary ? 'Tất cả kho' : 'Kho VTNN Tâm An',
+        isPrimaryAdmin: isPrimary,
+        roleLabel: isPrimary ? 'Quản lý chính (Admin)' : d.role === 'manager' ? 'Quản lý kho' : 'Nhân viên',
+        lastSeenAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    console.warn('seedExistingStaffToChatDirectoryIfAdmin warning:', err instanceof Error ? err.message : err);
+  }
+}
+
+export function subscribeToChatUsersDirectory(
+  onChange: (users: ChatUserDirectoryEntry[]) => void
+): () => void {
+  if (!auth.currentUser) {
+    onChange([]);
+    return () => {};
+  }
+
+  return onSnapshot(
+    collection(db, 'chat_users'),
+    (snap) => {
+      const users: ChatUserDirectoryEntry[] = snap.docs.map((docSnap) => {
+        const d = docSnap.data();
+        return {
+          uid: String(d.uid || docSnap.id),
+          displayName: String(d.displayName || 'Thành viên'),
+          warehouseName: String(d.warehouseName || 'VTNN Tâm An'),
+          isPrimaryAdmin: Boolean(d.isPrimaryAdmin) || d.uid === PRIMARY_ADMIN_UID,
+          roleLabel: String(d.roleLabel || ''),
+          lastSeenAt: normalizeTimestamp(d.lastSeenAt),
+        };
+      });
+      onChange(users);
+    },
+    (err) => {
+      console.warn('subscribeToChatUsersDirectory warning:', err.message);
+    }
+  );
+}
+
+export function subscribeToUserChatRooms(
+  currentUid: string,
+  isPrimaryAdminUser: boolean,
+  onChange: (rooms: InternalChatRoom[]) => void
+): () => void {
+  if (!auth.currentUser || !currentUid) {
+    onChange([]);
+    return () => {};
+  }
+
+  const roomMap = new Map<string, InternalChatRoom>();
+  const emitSorted = () => {
+    const sorted = Array.from(roomMap.values()).sort(
+      (a, b) => (b.lastMessageAtMs || 0) - (a.lastMessageAtMs || 0)
+    );
+    onChange(sorted);
+  };
+
+  const toRoom = (id: string, d: Record<string, unknown>): InternalChatRoom => ({
+    roomId: String(d.roomId || id),
+    roomType: d.roomType === 'dm' ? 'dm' : 'group',
+    title: String(d.title || 'Trò chuyện nội bộ'),
+    participants: Array.isArray(d.participants) ? d.participants.map(String) : [],
+    lastMessageText: String(d.lastMessageText || ''),
+    lastMessageType:
+      (d.lastMessageType as InternalChatMessageType) || 'text',
+    lastSenderUid: String(d.lastSenderUid || ''),
+    lastSenderName: String(d.lastSenderName || ''),
+    lastMessageAtMs: Number(d.lastMessageAtMs) || 0,
+    updatedAt: normalizeTimestamp(d.updatedAt),
+  });
+
+  const unsubGeneral = onSnapshot(
+    doc(db, 'chat_rooms', INTERNAL_CHAT_GENERAL_ROOM_ID),
+    (snap) => {
+      if (snap.exists()) {
+        roomMap.set(snap.id, toRoom(snap.id, snap.data()));
+        emitSorted();
+      }
+    },
+    () => {
+      // ignore if general room not created yet
+    }
+  );
+
+  // Single-field query or full collection for Primary Admin (no composite index needed)
+  const dmQuery = isPrimaryAdminUser
+    ? query(collection(db, 'chat_rooms'))
+    : query(collection(db, 'chat_rooms'), where('participants', 'array-contains', currentUid));
+
+  const unsubRooms = onSnapshot(
+    dmQuery,
+    (snap) => {
+      for (const d of snap.docs) {
+        roomMap.set(d.id, toRoom(d.id, d.data()));
+      }
+      emitSorted();
+    },
+    (err) => {
+      console.warn('subscribeToUserChatRooms warning:', err.message);
+    }
+  );
+
+  return () => {
+    unsubGeneral();
+    unsubRooms();
+  };
+}
+
+export function subscribeToChatRoomMessages(
+  roomId: string,
+  onChange: (messages: InternalChatMessage[]) => void
+): () => void {
+  if (!auth.currentUser || !isValidFirestoreId(roomId)) {
+    onChange([]);
+    return () => {};
+  }
+
+  const msgQuery = query(
+    collection(db, 'chat_rooms', roomId, 'messages'),
+    orderBy('createdAtMs', 'asc'),
+    limit(200)
+  );
+
+  return onSnapshot(
+    msgQuery,
+    (snap) => {
+      const list: InternalChatMessage[] = snap.docs.map((docSnap) => {
+        const d = docSnap.data();
+        const rawAttachments = Array.isArray(d.attachments) ? d.attachments : [];
+        const attachments: InternalChatAttachment[] = rawAttachments.map((att: Record<string, unknown>, idx: number) => ({
+          id: String(att.id || `${docSnap.id}_att_${idx}`),
+          name: String(att.name || 'tep_dinh_kem'),
+          mimeType: String(att.mimeType || 'application/octet-stream'),
+          size: Number(att.size) || 0,
+          kind:
+            att.kind === 'image' || att.kind === 'video' || att.kind === 'document'
+              ? att.kind
+              : classifyChatAttachmentKind(String(att.mimeType || ''), String(att.name || '')),
+          downloadUrl: String(att.downloadUrl || ''),
+          storagePath: String(att.storagePath || ''),
+        }));
+        return {
+          id: String(d.id || docSnap.id),
+          roomId: String(d.roomId || roomId),
+          senderUid: String(d.senderUid || ''),
+          senderName: String(d.senderName || 'Thành viên'),
+          senderWarehouse: String(d.senderWarehouse || ''),
+          text: String(d.text || ''),
+          messageType: (d.messageType as InternalChatMessageType) || 'text',
+          attachments,
+          tokenAmount: Math.max(0, Number(d.tokenAmount) || 0),
+          targetUid: String(d.targetUid || ''),
+          createdAtMs: Number(d.createdAtMs) || 0,
+          createdAt: normalizeTimestamp(d.createdAt),
+        };
+      });
+      onChange(list);
+    },
+    (err) => {
+      console.warn('subscribeToChatRoomMessages warning:', err.message);
+    }
+  );
+}
+
+export async function uploadInternalChatAttachment(
+  roomId: string,
+  file: File
+): Promise<InternalChatAttachment> {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('Cần đăng nhập Firebase để tải tệp đính kèm lên đám mây.');
+  }
+  if (!isValidFirestoreId(roomId)) {
+    throw new Error('Mã phòng chat không hợp lệ.');
+  }
+  if (file.size > INTERNAL_CHAT_MAX_FILE_BYTES) {
+    throw new Error(`Tệp "${file.name}" vượt quá giới hạn tối đa 25 MB.`);
+  }
+
+  const safeName = sanitizeChatStorageFileName(file.name);
+  const ts = Date.now();
+  const storagePath = `internal_chat_media/${roomId}/${ts}_${safeName}`;
+  const fileRef = ref(storage, storagePath);
+
+  const snapshot = await uploadBytes(fileRef, file, {
+    contentType: file.type || 'application/octet-stream',
+    customMetadata: {
+      roomId,
+      senderUid: user.uid,
+      originalName: file.name.slice(0, 120),
+    },
+  });
+
+  const downloadUrl = await getDownloadURL(snapshot.ref);
+  return {
+    id: `att_${ts}_${Math.random().toString(36).slice(2, 7)}`,
+    name: file.name.normalize('NFC').slice(0, 150) || safeName,
+    mimeType: file.type || 'application/octet-stream',
+    size: file.size,
+    kind: classifyChatAttachmentKind(file.type || '', file.name),
+    downloadUrl,
+    storagePath,
+  };
+}
+
+export async function sendInternalChatMessage(params: {
+  roomId: string;
+  roomType: 'group' | 'dm';
+  roomTitle: string;
+  participants: string[];
+  senderName: string;
+  senderWarehouse: string;
+  text: string;
+  messageType: InternalChatMessageType;
+  attachments?: InternalChatAttachment[];
+  tokenAmount?: number;
+  targetUid?: string;
+}): Promise<{ ok: boolean; message?: InternalChatMessage; error?: string }> {
+  const user = auth.currentUser;
+  if (!user) {
+    return { ok: false, error: 'Chưa đăng nhập phiên Firebase để gửi tin nhắn.' };
+  }
+  if (!isValidFirestoreId(params.roomId)) {
+    return { ok: false, error: 'Mã phòng chat không hợp lệ.' };
+  }
+
+  const nowMs = Date.now();
+  const msgId = sanitizeFirestoreId(`msg_${nowMs}_${Math.random().toString(36).slice(2, 7)}`);
+  const safeSenderName = (params.senderName || user.displayName || 'Thành viên').slice(0, 120) || 'Thành viên';
+  const safeSenderWh = (params.senderWarehouse || 'VTNN Tâm An').slice(0, 150);
+  const safeText = (params.text || '').normalize('NFC').trim().slice(0, 4000);
+  const attachments = (params.attachments || []).slice(0, 5);
+  const safeTokenAmount = Math.max(0, Math.round(Number(params.tokenAmount) || 0));
+  const safeTargetUid = (params.targetUid || '').slice(0, 128);
+
+  const previewText = (
+    safeText ||
+    (attachments.length > 0
+      ? `[Đính kèm ${attachments.length} tệp: ${attachments[0].name}]`
+      : params.messageType === 'token_request'
+      ? `Xin cấp thêm +${safeTokenAmount.toLocaleString('vi-VN')} token A.I`
+      : params.messageType === 'token_grant'
+      ? `Admin đã cấp +${safeTokenAmount.toLocaleString('vi-VN')} token A.I`
+      : '')
+  ).slice(0, 500);
+
+  const uniqueParticipants = Array.from(
+    new Set([user.uid, ...params.participants.filter((p) => Boolean(p))])
+  ).slice(0, 100);
+
+  try {
+    await setDoc(doc(db, 'chat_rooms', params.roomId), {
+      roomId: params.roomId,
+      roomType: params.roomType,
+      title: (params.roomTitle || 'Trò chuyện nội bộ').slice(0, 150) || 'Trò chuyện nội bộ',
+      participants: uniqueParticipants,
+      lastMessageText: previewText,
+      lastMessageType: params.messageType,
+      lastSenderUid: user.uid,
+      lastSenderName: safeSenderName,
+      lastMessageAtMs: nowMs,
+      updatedAt: serverTimestamp(),
+    });
+
+    await setDoc(doc(db, 'chat_rooms', params.roomId, 'messages', msgId), {
+      id: msgId,
+      roomId: params.roomId,
+      senderUid: user.uid,
+      senderName: safeSenderName,
+      senderWarehouse: safeSenderWh,
+      text: safeText,
+      messageType: params.messageType,
+      attachments,
+      tokenAmount: safeTokenAmount,
+      targetUid: safeTargetUid,
+      createdAtMs: nowMs,
+      createdAt: serverTimestamp(),
+    });
+
+    return {
+      ok: true,
+      message: {
+        id: msgId,
+        roomId: params.roomId,
+        senderUid: user.uid,
+        senderName: safeSenderName,
+        senderWarehouse: safeSenderWh,
+        text: safeText,
+        messageType: params.messageType,
+        attachments,
+        tokenAmount: safeTokenAmount,
+        targetUid: safeTargetUid,
+        createdAtMs: nowMs,
+        createdAt: new Date(nowMs).toISOString(),
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : 'Không thể gửi tin nhắn lúc này.',
+    };
+  }
+}
+
+export async function downloadChatAttachmentToDevice(
+  attachment: Pick<InternalChatAttachment, 'downloadUrl' | 'name' | 'mimeType'>
+): Promise<boolean> {
+  if (!attachment.downloadUrl || typeof document === 'undefined') {
+    return false;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 30000);
+    const response = await fetch(attachment.downloadUrl, {
+      method: 'GET',
+      mode: 'cors',
+      signal: controller.signal,
+    });
+    window.clearTimeout(timer);
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = objectUrl;
+    link.download = attachment.name || 'tep_vtnn_taman';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 15000);
+    return true;
+  } catch {
+    try {
+      const link = document.createElement('a');
+      link.href = attachment.downloadUrl;
+      link.download = attachment.name || 'tep_vtnn_taman';
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }

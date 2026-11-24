@@ -62,6 +62,7 @@ import {
   sanitizeStaffListForStorage,
 } from '../services/localPersistence';
 import {
+  applyAdminTokenGrantToQuota,
   buildGeminiQueryCacheKey,
   buildGeminiSystemInstruction,
   buildGoogleAiModeUrl,
@@ -90,6 +91,14 @@ import {
   shouldEnableExternalWebSearch,
   upsertCommunityMarketPriceBoard,
 } from './geminiReportAssistant';
+import {
+  buildDirectChatRoomId,
+  classifyChatAttachmentKind,
+  formatChatFileSize,
+  sanitizeChatStorageFileName,
+  shouldAutoDownloadAttachment,
+  validateChatAttachmentFile,
+} from './internalChatLogic';
 import {
   CustomerProfile,
   ImportTransaction,
@@ -644,6 +653,7 @@ test('canAccountCreateStaff only allows trannhat1205@gmail.com or phone 03931202
     'vouchers',
     'staff_accounts',
     'gemini_chat',
+    'internal_chat',
   ]);
 });
 
@@ -1725,9 +1735,10 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
   assert.equal(adminScope.canAccessBackupHistory, true);
   assert.equal(adminScope.allowedTabs.includes('backup_history'), true);
   assert.equal(adminScope.allowedTabs.includes('gemini_chat'), true);
-  assert.equal(adminScope.allowedTabs.length, 13);
+  assert.equal(adminScope.allowedTabs.includes('internal_chat'), true);
+  assert.equal(adminScope.allowedTabs.length, 14);
 
-  // 4. Independent single-warehouse user account has 12 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
+  // 4. Independent single-warehouse user account has 13 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
   const newGmailUser: StaffMember = {
     uid: 'user_uid_vtnntaman',
     username: 'vtnntaman',
@@ -1748,9 +1759,10 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
   const userScope = evaluateStaffAccessScope(newGmailUser);
   assert.equal(userScope.isPrimaryOwner, false);
   assert.equal(userScope.canAccessBackupHistory, false);
-  assert.equal(userScope.allowedTabs.length, 12);
+  assert.equal(userScope.allowedTabs.length, 13);
   assert.equal(userScope.allowedTabs.includes('reports'), true);
   assert.equal(userScope.allowedTabs.includes('gemini_chat'), true);
+  assert.equal(userScope.allowedTabs.includes('internal_chat'), true);
   assert.equal(userScope.allowedTabs.includes('backup_history'), false);
   assert.equal(userScope.allowedReportCategories.includes('financial_profit'), true);
   assert.equal(userScope.allowedReportCategories.length, 8);
@@ -1987,10 +1999,14 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
   assert.ok(externalSys.includes('TUYỆT ĐỐI KHÔNG tự đoán'));
   assert.equal(externalSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP'), false);
 
-  // Google AI Mode URL & unverified notice helpers
+  // Google AI Mode URL & unverified notice helpers ("Kiểm chứng" button label)
   const aiModeUrl = buildGoogleAiModeUrl('gap 3 của công ty đồng tháp sen hồng là gì');
   assert.ok(aiModeUrl.startsWith('https://www.google.com/search?udm=50&q='));
-  assert.ok(buildUnverifiedExternalLookupNotice('gap 3').includes('Kiểm chứng trên Google Chế độ AI'));
+  assert.ok(buildUnverifiedExternalLookupNotice('gap 3').includes('"Kiểm chứng"'));
+  assert.equal(
+    buildUnverifiedExternalLookupNotice('gap 3').includes('Kiểm chứng trên Google Chế độ AI (0 token)'),
+    false
+  );
 
   // Shared Firebase Storage Knowledge Cache: Evergreen (BVTV/agronomy forever) vs Volatile (7 days) vs Internal (never)
   assert.equal(classifySharedAiCacheCategory('Tóm tắt báo cáo doanh thu kho'), 'none');
@@ -2130,52 +2146,64 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
   assert.equal(extractedSources.length, 1);
   assert.equal(extractedSources[0].uri, 'https://bvtvgap.com/sen-bay');
 
-  // Per-account daily quota & Vietnam midnight auto-refresh tests
+  // Per-account daily token quota (10.000/day), Admin token grant bonus, & Vietnam midnight auto-refresh tests
   assert.equal(DAILY_AI_QUESTION_LIMIT, 30);
-  assert.equal(DAILY_AI_TOKEN_LIMIT, 90000);
+  assert.equal(DAILY_AI_TOKEN_LIMIT, 10000);
   const beforeMidnightVn = new Date('2026-11-24T16:59:00.000Z'); // 23:59 VN (2026-11-24)
   const afterMidnightVn = new Date('2026-11-24T17:01:00.000Z'); // 00:01 VN (2026-11-25)
 
   let quotaAccA = createFreshAccountDailyAiQuota('acc_A', beforeMidnightVn);
   const quotaAccB = createFreshAccountDailyAiQuota('acc_B', beforeMidnightVn);
 
-  for (let i = 0; i < 30; i++) {
+  // Asking 31 lightweight questions (31 * 200 = 6.200 < 10.000 tokens) is still allowed because limit is token-based
+  for (let i = 0; i < 31; i++) {
     quotaAccA = recordAccountDailyAiUsage(quotaAccA, {
-      tokensUsed: 500,
+      tokensUsed: 200,
       modelUsed: 'gemma-4-26b-a4b-it',
       now: beforeMidnightVn,
     });
   }
+  const checkAUnderTokens = checkAccountDailyAiQuota(quotaAccA, beforeMidnightVn);
+  assert.equal(checkAUnderTokens.allowed, true);
+  assert.equal(checkAUnderTokens.remainingTokens, 3800);
+
+  // Exceeding 10.000 tokens blocks further live AI calls
+  quotaAccA = recordAccountDailyAiUsage(quotaAccA, {
+    tokensUsed: 4000,
+    modelUsed: 'gemini-3.1-flash-lite',
+    now: beforeMidnightVn,
+  });
   const checkA = checkAccountDailyAiQuota(quotaAccA, beforeMidnightVn);
   assert.equal(checkA.allowed, false);
-  assert.equal(checkA.reason, 'question_limit_reached');
-  assert.equal(checkA.remainingQuestions, 0);
+  assert.equal(checkA.reason, 'token_limit_reached');
+  assert.equal(checkA.remainingTokens, 0);
+
+  // Primary Admin grants +20.000 bonus tokens for today -> limit increases to 30.000 -> account A is unblocked
+  const grantedQuotaA = applyAdminTokenGrantToQuota(
+    quotaAccA,
+    { date: '2026-11-24', bonusTokens: 20000 },
+    beforeMidnightVn
+  );
+  const checkAGranted = checkAccountDailyAiQuota(grantedQuotaA, beforeMidnightVn);
+  assert.equal(checkAGranted.allowed, true);
+  assert.equal(checkAGranted.normalizedQuota.tokenLimit, 30000);
+  assert.equal(checkAGranted.remainingTokens, 19800);
 
   // Account B remains completely unaffected
   const checkB = checkAccountDailyAiQuota(quotaAccB, beforeMidnightVn);
   assert.equal(checkB.allowed, true);
-  assert.equal(checkB.remainingQuestions, 30);
+  assert.equal(checkB.remainingTokens, 10000);
 
-  // Token limit guard
-  let quotaAccC = createFreshAccountDailyAiQuota('acc_C', beforeMidnightVn);
-  quotaAccC = recordAccountDailyAiUsage(quotaAccC, {
-    tokensUsed: 95000,
-    modelUsed: 'gemini-4-hydrogen',
-    now: beforeMidnightVn,
-  });
-  const checkC = checkAccountDailyAiQuota(quotaAccC, beforeMidnightVn);
-  assert.equal(checkC.allowed, false);
-  assert.equal(checkC.reason, 'token_limit_reached');
-
-  // Crossing Vietnam midnight resets quota automatically
-  const refreshedAccA = normalizeAccountDailyAiQuotaForToday(
-    quotaAccA,
-    'acc_A',
+  // Crossing Vietnam midnight resets quota AND previous day bonus tokens automatically back to 10.000
+  const refreshedAccA = applyAdminTokenGrantToQuota(
+    grantedQuotaA,
+    { date: '2026-11-24', bonusTokens: 20000 },
     afterMidnightVn
   );
   assert.equal(refreshedAccA.date, '2026-11-25');
   assert.equal(refreshedAccA.questionsUsed, 0);
   assert.equal(refreshedAccA.tokensUsed, 0);
+  assert.equal(refreshedAccA.tokenLimit, 10000);
   assert.equal(checkAccountDailyAiQuota(refreshedAccA, afterMidnightVn).allowed, true);
 
   // Rule 3: Cache key differentiates internal warehouse state vs external market queries
@@ -2231,6 +2259,86 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, auto-r
 
   const agroAns = generateSmartReportAnswer('Kỹ thuật bón phân cho lúa và sầu riêng', snapshot);
   assert.ok(agroAns.includes('Tư vấn Kỹ thuật Nông nghiệp'));
+});
+
+test('Zalo-like Internal Chat Logic: deterministic DM room IDs, media classification, 25MB validation, and auto-download guard', () => {
+  // 1. Symmetric deterministic DM room IDs
+  assert.equal(
+    buildDirectChatRoomId('Gu6OYdsdiWbRvbEINqaWZXj3LV83', 'user_abc_123'),
+    buildDirectChatRoomId('user_abc_123', 'Gu6OYdsdiWbRvbEINqaWZXj3LV83')
+  );
+  assert.match(
+    buildDirectChatRoomId('Gu6OYdsdiWbRvbEINqaWZXj3LV83', 'user_abc_123'),
+    /^dm_[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+$/
+  );
+  assert.equal(buildDirectChatRoomId('same_uid', 'same_uid'), '');
+
+  // 2. Attachment kind classification (image / video / document)
+  assert.equal(classifyChatAttachmentKind('image/jpeg', 'anh_don.jpg'), 'image');
+  assert.equal(classifyChatAttachmentKind('', 'hinh_lua.WEBP'), 'image');
+  assert.equal(classifyChatAttachmentKind('video/mp4', 'video_ruong.mp4'), 'video');
+  assert.equal(classifyChatAttachmentKind('', 'clip.mov'), 'video');
+  assert.equal(classifyChatAttachmentKind('application/pdf', 'hoa_don.pdf'), 'document');
+  assert.equal(classifyChatAttachmentKind('', 'bang_gia_phan_bon.xlsx'), 'document');
+
+  // 3. File size & filename validation
+  assert.equal(validateChatAttachmentFile({ name: 'anh.png', size: 1024 * 500, type: 'image/png' }).ok, true);
+  assert.equal(validateChatAttachmentFile({ name: 'empty.pdf', size: 0 }).ok, false);
+  assert.equal(validateChatAttachmentFile({ name: 'huge.mp4', size: 30 * 1024 * 1024 }).ok, false);
+  assert.equal(formatChatFileSize(1536), '1.5 KB');
+  assert.equal(sanitizeChatStorageFileName('Báo giá phân bón ĐBSCL.pdf'), 'Bao_gia_phan_bon_DBSCL.pdf');
+
+  // 4. Auto-download guard (never downloads own messages or already-downloaded IDs; respects toggle)
+  const sessionStart = Date.now();
+  const downloaded = new Set<string>(['att_already']);
+  assert.equal(
+    shouldAutoDownloadAttachment({
+      enabled: true,
+      senderUid: 'peer_1',
+      currentUid: 'me_1',
+      attachmentId: 'att_new',
+      downloadedIds: downloaded,
+      messageCreatedAtMs: sessionStart + 1000,
+      sessionStartedAtMs: sessionStart,
+    }),
+    true
+  );
+  assert.equal(
+    shouldAutoDownloadAttachment({
+      enabled: true,
+      senderUid: 'me_1',
+      currentUid: 'me_1',
+      attachmentId: 'att_new',
+      downloadedIds: downloaded,
+      messageCreatedAtMs: sessionStart + 1000,
+      sessionStartedAtMs: sessionStart,
+    }),
+    false
+  );
+  assert.equal(
+    shouldAutoDownloadAttachment({
+      enabled: true,
+      senderUid: 'peer_1',
+      currentUid: 'me_1',
+      attachmentId: 'att_already',
+      downloadedIds: downloaded,
+      messageCreatedAtMs: sessionStart + 1000,
+      sessionStartedAtMs: sessionStart,
+    }),
+    false
+  );
+  assert.equal(
+    shouldAutoDownloadAttachment({
+      enabled: false,
+      senderUid: 'peer_1',
+      currentUid: 'me_1',
+      attachmentId: 'att_new',
+      downloadedIds: downloaded,
+      messageCreatedAtMs: sessionStart + 1000,
+      sessionStartedAtMs: sessionStart,
+    }),
+    false
+  );
 });
 
 

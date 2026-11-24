@@ -15,7 +15,7 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = '0.0.0.0';
 
 const DAILY_AI_QUESTION_LIMIT = 30;
-const DAILY_AI_TOKEN_LIMIT = 90000;
+const DAILY_AI_TOKEN_LIMIT = 10000;
 const ACCOUNT_QUOTAS = new Map();
 
 function getTodayVietnamDateStr() {
@@ -200,11 +200,15 @@ const server = http.createServer(async (req, res) => {
           const message = String(parsed.message || '').normalize('NFC').trim();
           const accountId = String(parsed.accountId || 'guest').trim() || 'guest';
           const quota = getOrResetQuota(accountId);
-          if (quota.questionsUsed >= quota.questionLimit || quota.tokensUsed >= quota.tokenLimit) {
+          const bonusTokens = Math.max(0, Math.round(Number(parsed.bonusTokens) || 0));
+          const effectiveTokenLimit = DAILY_AI_TOKEN_LIMIT + bonusTokens;
+          quota.bonusTokens = bonusTokens;
+          quota.tokenLimit = effectiveTokenLimit;
+          if (quota.tokensUsed >= effectiveTokenLimit) {
             res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(
               JSON.stringify({
-                error: `Tài khoản đã sử dụng hết hạn mức ${quota.questionLimit}/${quota.questionLimit} câu hỏi Trợ lý A.I trong ngày ${quota.date}. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai (giờ Việt Nam).`,
+                error: `Tài khoản đã sử dụng hết hạn mức ${effectiveTokenLimit.toLocaleString('vi-VN')} token Trợ lý A.I trong ngày ${quota.date}. Hãy nhắn tin cho Admin quản trị chính trong mục Chat nội bộ để xin cấp thêm token, hoặc chờ tự động làm mới vào 00:00 ngày mai.`,
                 quotaExceeded: true,
                 quota,
               })
@@ -307,7 +311,7 @@ const server = http.createServer(async (req, res) => {
               res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
               res.end(
                 JSON.stringify({
-                  text: `### Chưa thể xác thực thông tin qua Google Search lúc này\n\nHệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Google Search cho câu hỏi: **"${message}"**. Vui lòng bấm **"Kiểm chứng trên Google Chế độ AI (0 token)"** bên dưới hoặc thử lại sau vài giây.`,
+                  text: `### Chưa thể xác thực thông tin qua Google Search lúc này\n\nHệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Google Search cho câu hỏi: **"${message}"**. Vui lòng bấm **"Kiểm chứng"** bên dưới hoặc thử lại sau vài giây.`,
                   modelUsed: fallbackModels[0],
                   queryScope: 'external',
                   apiConnected: true,

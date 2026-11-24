@@ -34,11 +34,23 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isAdmin() {
+    function isPrimaryAdmin() {
       return isSignedIn() && (
         request.auth.uid == 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' ||
-        (isVerified() && request.auth.token.email == 'trannhat1205@gmail.com') ||
-        (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)))
+        (isVerified() && request.auth.token.email == 'trannhat1205@gmail.com')
+      );
+    }
+
+    function isAdmin() {
+      return isPrimaryAdmin() || (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function canAccessChatRoom(roomId) {
+      return isSignedIn() && isValidId(roomId) && (
+        roomId == 'general_all_staff' ||
+        isPrimaryAdmin() ||
+        roomId.matches('^dm_' + request.auth.uid + '__[a-zA-Z0-9_\\-]+$') ||
+        roomId.matches('^dm_[a-zA-Z0-9_\\-]+__' + request.auth.uid + '$')
       );
     }
 
@@ -256,6 +268,88 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidAiTokenGrant(data, accountId) {
+      return data.keys().hasAll([
+          'accountId', 'date', 'bonusTokens', 'lastGrantedAmount',
+          'grantedByUid', 'grantedByName', 'note', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'accountId', 'date', 'bonusTokens', 'lastGrantedAmount',
+          'grantedByUid', 'grantedByName', 'note', 'updatedAt'
+        ]) &&
+        data.accountId is string && isValidId(data.accountId) && data.accountId == accountId &&
+        data.date is string && data.date.size() == 10 &&
+        data.bonusTokens is number && data.bonusTokens >= 0 && data.bonusTokens <= 5000000 &&
+        data.lastGrantedAmount is number && data.lastGrantedAmount >= 0 && data.lastGrantedAmount <= 5000000 &&
+        data.grantedByUid is string && isValidId(data.grantedByUid) &&
+        data.grantedByName is string && data.grantedByName.size() >= 1 && data.grantedByName.size() <= 120 &&
+        data.note is string && data.note.size() <= 300 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidChatUserDirectory(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'warehouseName', 'isPrimaryAdmin', 'roleLabel', 'lastSeenAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'displayName', 'warehouseName', 'isPrimaryAdmin', 'roleLabel', 'lastSeenAt'
+        ]) &&
+        data.uid is string && isValidId(data.uid) && data.uid == userId &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        data.warehouseName is string && data.warehouseName.size() <= 150 &&
+        data.isPrimaryAdmin is bool &&
+        data.roleLabel is string && data.roleLabel.size() <= 120 &&
+        data.lastSeenAt is timestamp;
+    }
+
+    function isValidChatRoom(data, roomId) {
+      return data.keys().hasAll([
+          'roomId', 'roomType', 'title', 'participants', 'lastMessageText',
+          'lastMessageType', 'lastSenderUid', 'lastSenderName', 'lastMessageAtMs', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'roomId', 'roomType', 'title', 'participants', 'lastMessageText',
+          'lastMessageType', 'lastSenderUid', 'lastSenderName', 'lastMessageAtMs', 'updatedAt'
+        ]) &&
+        data.roomId is string && isValidId(data.roomId) && data.roomId == roomId &&
+        data.roomType is string && (data.roomType == 'group' || data.roomType == 'dm') &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.participants is list && data.participants.size() <= 100 &&
+        data.lastMessageText is string && data.lastMessageText.size() <= 500 &&
+        data.lastMessageType is string &&
+        (data.lastMessageType == 'text' || data.lastMessageType == 'media' || data.lastMessageType == 'token_request' || data.lastMessageType == 'token_grant') &&
+        data.lastSenderUid is string && isValidId(data.lastSenderUid) &&
+        data.lastSenderName is string && data.lastSenderName.size() >= 1 && data.lastSenderName.size() <= 120 &&
+        data.lastMessageAtMs is number && data.lastMessageAtMs >= 0 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data, roomId, messageId) {
+      return data.keys().hasAll([
+          'id', 'roomId', 'senderUid', 'senderName', 'senderWarehouse',
+          'text', 'messageType', 'attachments', 'tokenAmount', 'targetUid',
+          'createdAtMs', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'roomId', 'senderUid', 'senderName', 'senderWarehouse',
+          'text', 'messageType', 'attachments', 'tokenAmount', 'targetUid',
+          'createdAtMs', 'createdAt'
+        ]) &&
+        data.id is string && isValidId(data.id) && data.id == messageId &&
+        data.roomId is string && isValidId(data.roomId) && data.roomId == roomId &&
+        data.senderUid is string && isValidId(data.senderUid) &&
+        data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120 &&
+        data.senderWarehouse is string && data.senderWarehouse.size() <= 150 &&
+        data.text is string && data.text.size() <= 4000 &&
+        data.messageType is string &&
+        (data.messageType == 'text' || data.messageType == 'media' || data.messageType == 'token_request' || data.messageType == 'token_grant') &&
+        data.attachments is list && data.attachments.size() <= 5 &&
+        data.tokenAmount is number && data.tokenAmount >= 0 && data.tokenAmount <= 5000000 &&
+        data.targetUid is string && data.targetUid.size() <= 128 &&
+        data.createdAtMs is number && data.createdAtMs >= 0 &&
+        data.createdAt is timestamp;
+    }
+
     // Collection 1: /admins/{adminId}
     match /admins/{adminId} {
       allow get: if isSignedIn() && isValidId(adminId) && (isOwner(adminId) || isAdmin());
@@ -456,6 +550,55 @@ service cloud.firestore {
         existing().status != 'completed' &&
         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'recordCount']);
       allow delete: if isVerified() && isValidId(backupId) && isAdmin();
+    }
+
+    // Collection 11: /ai_token_grants/{accountId} (Primary Admin grants bonus AI tokens)
+    match /ai_token_grants/{accountId} {
+      allow get: if isSignedIn() && isValidId(accountId) && (isOwner(accountId) || isPrimaryAdmin());
+      allow list: if isPrimaryAdmin();
+      allow create, update: if isPrimaryAdmin() && isValidId(accountId) &&
+        isValidAiTokenGrant(incoming(), accountId) &&
+        incoming().grantedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if isPrimaryAdmin() && isValidId(accountId);
+    }
+
+    // Collection 12: /chat_users/{userId} (Internal Chat Directory)
+    match /chat_users/{userId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(userId) &&
+        (isOwner(userId) || isPrimaryAdmin()) &&
+        isValidChatUserDirectory(incoming(), userId) &&
+        (incoming().isPrimaryAdmin == false || isPrimaryAdmin()) &&
+        incoming().lastSeenAt == request.time;
+      allow delete: if isPrimaryAdmin() && isValidId(userId);
+    }
+
+    // Collection 13: /chat_rooms/{roomId} (Internal Zalo-like Chat Rooms)
+    match /chat_rooms/{roomId} {
+      allow get: if canAccessChatRoom(roomId);
+      allow list: if isSignedIn() && (
+        existing().roomType == 'group' ||
+        request.auth.uid in existing().participants ||
+        isPrimaryAdmin()
+      );
+      allow create, update: if canAccessChatRoom(roomId) &&
+        isValidChatRoom(incoming(), roomId) &&
+        incoming().lastSenderUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if isPrimaryAdmin() && isValidId(roomId);
+
+      // Collection 14: /chat_rooms/{roomId}/messages/{messageId}
+      match /messages/{messageId} {
+        allow get, list: if canAccessChatRoom(roomId);
+        allow create: if canAccessChatRoom(roomId) && isValidId(messageId) &&
+          isValidChatMessage(incoming(), roomId, messageId) &&
+          incoming().senderUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          (incoming().messageType != 'token_grant' || isPrimaryAdmin());
+        allow update: if false;
+        allow delete: if isPrimaryAdmin() && canAccessChatRoom(roomId);
+      }
     }
   }
 }

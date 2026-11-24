@@ -99,7 +99,7 @@ function evaluateUpdateSale(
   return 'ALLOW';
 }
 
-test('Firestore rules file contains all 10 required collection blocks and Eight Pillars primitives', () => {
+test('Firestore rules file contains all 14 required collection blocks and Eight Pillars primitives', () => {
   assert.ok(rulesText.includes("rules_version = '2';"));
   assert.ok(rulesText.includes('allow read, write: if false;'));
   assert.ok(rulesText.includes('match /admins/{adminId}'));
@@ -112,6 +112,32 @@ test('Firestore rules file contains all 10 required collection blocks and Eight 
   assert.ok(rulesText.includes('match /sales/{saleId}'));
   assert.ok(rulesText.includes('match /imports/{importId}'));
   assert.ok(rulesText.includes('match /backups/{backupId}'));
+  assert.ok(rulesText.includes('match /ai_token_grants/{accountId}'));
+  assert.ok(rulesText.includes('match /chat_users/{userId}'));
+  assert.ok(rulesText.includes('match /chat_rooms/{roomId}'));
+  assert.ok(rulesText.includes('match /messages/{messageId}'));
+});
+
+test('AI Token Grant & Internal Chat rules enforce primary-admin-only token grants and DM isolation', () => {
+  assert.ok(rulesText.includes('function isPrimaryAdmin()'));
+  assert.ok(rulesText.includes("request.auth.uid == 'Gu6OYdsdiWbRvbEINqaWZXj3LV83'"));
+  assert.ok(rulesText.includes('function canAccessChatRoom(roomId)'));
+  assert.ok(rulesText.includes("incoming().messageType != 'token_grant' || isPrimaryAdmin()"));
+  assert.ok(rulesText.includes('incoming().isPrimaryAdmin == false || isPrimaryAdmin()'));
+  assert.ok(rulesText.includes('allow update: if false;'));
+
+  const canAccessDm = (uid: string, roomId: string, isPrimary: boolean): boolean => {
+    if (roomId === 'general_all_staff' || isPrimary) return true;
+    const prefix = new RegExp(`^dm_${uid}__[a-zA-Z0-9_\\-]+$`);
+    const suffix = new RegExp(`^dm_[a-zA-Z0-9_\\-]+__${uid}$`);
+    return prefix.test(roomId) || suffix.test(roomId);
+  };
+
+  assert.equal(canAccessDm('userA', 'dm_userA__userB', false), true);
+  assert.equal(canAccessDm('userB', 'dm_userA__userB', false), true);
+  assert.equal(canAccessDm('userC', 'dm_userA__userB', false), false);
+  assert.equal(canAccessDm('userC', 'general_all_staff', false), true);
+  assert.equal(canAccessDm('Gu6OYdsdiWbRvbEINqaWZXj3LV83', 'dm_userA__userB', true), true);
 });
 
 test('Dirty Dozen #1: Shadow Field Injection returns PERMISSION_DENIED', () => {
