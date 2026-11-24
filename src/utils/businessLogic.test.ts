@@ -1881,7 +1881,28 @@ test('Gemini Report Assistant: builds accurate warehouse report snapshot, system
   assert.ok(debtAns.includes('Báo cáo Công nợ Phải thu Khách hàng'));
 
   const om18Ans = generateSmartReportAnswer('giá lúa om18 hiện nay bao nhiêu', snapshot);
-  assert.ok(om18Ans.includes('Cập nhật Giá Lúa OM18'));
+  assert.ok(om18Ans.includes('Cập nhật Giá Lúa Gạo Thị Trường Khu Vực ĐBSCL'));
+  assert.ok(om18Ans.includes('Lúa OM 18'));
+
+  // Test fertilizer price query in NFC, NFD (combining diacritics), and unaccented Vietnamese
+  const fertNfcAns = generateSmartReportAnswer('giá phân bón hiện nay thế nào', snapshot);
+  assert.ok(fertNfcAns.includes('Cập nhật Giá Phân Bón Thị Trường Hiện Nay'));
+  assert.ok(!fertNfcAns.includes('Báo cáo Tổng hợp Hoạt động Kinh doanh'));
+
+  const fertNfdQuery = 'giá phân bón hiện nay thế nào'.normalize('NFD');
+  const fertNfdAns = generateSmartReportAnswer(fertNfdQuery, snapshot);
+  assert.ok(fertNfdAns.includes('Cập nhật Giá Phân Bón Thị Trường Hiện Nay'));
+  assert.ok(!fertNfdAns.includes('Báo cáo Tổng hợp Hoạt động Kinh doanh'));
+
+  const fertAsciiAns = generateSmartReportAnswer('gia phan bon hien nay the nao', snapshot);
+  assert.ok(fertAsciiAns.includes('Cập nhật Giá Phân Bón Thị Trường Hiện Nay'));
+  assert.ok(!fertAsciiAns.includes('Báo cáo Tổng hợp Hoạt động Kinh doanh'));
+
+  const bvtvAns = generateSmartReportAnswer('giá thuốc trừ sâu hiện nay', snapshot);
+  assert.ok(bvtvAns.includes('Bảng Giá & Danh Mục Thuốc Bảo Vệ Thực Vật'));
+
+  const durianAns = generateSmartReportAnswer('giá sầu riêng ri6 hôm nay', snapshot);
+  assert.ok(durianAns.includes('Cập nhật Giá Nông Sản & Trái Cây Chủ Lực'));
 
   const agroAns = generateSmartReportAnswer('Kỹ thuật bón phân cho lúa và sầu riêng', snapshot);
   assert.ok(agroAns.includes('Tư vấn Kỹ thuật Nông nghiệp'));

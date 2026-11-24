@@ -91,16 +91,10 @@ function sendFile(req, res, filePath) {
   });
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   if (!req.url) {
     res.writeHead(400);
     res.end('Bad Request');
-    return;
-  }
-
-  if (req.method !== 'GET' && req.method !== 'HEAD') {
-    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('Method Not Allowed');
     return;
   }
 
@@ -111,6 +105,87 @@ const server = http.createServer((req, res) => {
   } catch {
     res.writeHead(400);
     res.end('Bad Request');
+    return;
+  }
+
+  if (pathname.startsWith('/api/gemini/')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (pathname === '/api/gemini/status' && req.method === 'GET') {
+      const apiKey = (process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(
+        JSON.stringify({
+          configured: Boolean(apiKey),
+          keyState: apiKey ? 'connected' : 'not_configured',
+        })
+      );
+      return;
+    }
+    if (pathname === '/api/gemini/chat' && req.method === 'POST') {
+      let rawBody = '';
+      req.on('data', (chunk) => {
+        rawBody += chunk;
+      });
+      req.on('end', async () => {
+        try {
+          const parsed = JSON.parse(rawBody || '{}');
+          const message = String(parsed.message || '').normalize('NFC').trim();
+          const apiKey = (process.env.GEMINI_API_KEY || process.env.API_KEY || '').trim();
+          if (apiKey && message) {
+            const { GoogleGenAI, ThinkingLevel } = await import('@google/genai');
+            const ai = new GoogleGenAI({
+              apiKey,
+              httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+            });
+            const chat = ai.chats.create({
+              model: parsed.model || 'gemini-4-hydrogen',
+              config: {
+                ...(parsed.systemInstruction ? { systemInstruction: parsed.systemInstruction } : {}),
+                thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                tools: [{ googleSearch: {} }],
+              },
+            });
+            const reply = await chat.sendMessage({ message });
+            if (reply.text && reply.text.trim()) {
+              res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+              res.end(
+                JSON.stringify({
+                  text: reply.text.trim(),
+                  modelUsed: parsed.model || 'gemini-4-hydrogen',
+                  apiConnected: true,
+                  keyState: 'connected',
+                })
+              );
+              return;
+            }
+          }
+        } catch {
+          // Fall through to client fallback JSON response
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(
+          JSON.stringify({
+            text: '',
+            fallbackRequired: true,
+            apiConnected: false,
+            keyState: 'not_configured',
+          })
+        );
+      });
+      return;
+    }
+  }
+
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Method Not Allowed');
     return;
   }
 

@@ -2,7 +2,11 @@ import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import {
+  AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
+  isPureInternalWarehouseQuery,
+} from './src/utils/geminiReportAssistant';
 
 const PORT = 3000;
 const HOST = '0.0.0.0';
@@ -65,7 +69,7 @@ async function fetchLiveGoogleNewsVietnam(
   query: string
 ): Promise<GroundingSourceLink[]> {
   try {
-    const cleanQuery = query.trim().slice(0, 120);
+    const cleanQuery = query.normalize('NFC').trim().slice(0, 120);
     const url = `https://news.google.com/rss/search?q=${encodeURIComponent(
       cleanQuery
     )}&hl=vi&gl=VN&ceid=VN:vi`;
@@ -113,7 +117,7 @@ async function fetchVietnameseWikipediaSearch(
   query: string
 ): Promise<GroundingSourceLink[]> {
   try {
-    const cleanQuery = query.trim().slice(0, 100);
+    const cleanQuery = query.normalize('NFC').trim().slice(0, 100);
     const url = `https://vi.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
       cleanQuery
     )}&utf8=&format=json`;
@@ -151,9 +155,39 @@ async function fetchVietnameseWikipediaSearch(
   }
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Gemini call timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise
+      .then((val) => {
+        clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
+
+  // Enable CORS on /api/gemini/* so deployed frontends (e.g. https://vtnntaman.com on Hostinger)
+  // can securely reach the live Gemini backend endpoint.
+  app.use('/api/gemini', (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
 
   app.get('/api/gemini/status', async (_req: express.Request, res: express.Response) => {
     const candidateKeys = getCandidateApiKeys();
@@ -172,10 +206,13 @@ async function startServer() {
           apiKey: candidateKey,
           httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
         });
-        await ai.models.generateContent({
-          model: 'gemini-3.1-flash-lite',
-          contents: 'ping',
-        });
+        await withTimeout(
+          ai.models.generateContent({
+            model: 'gemini-3.1-flash-lite',
+            contents: 'ping',
+          }),
+          6000
+        );
         res.json({
           configured: true,
           keyState: 'connected' as GeminiKeyStatusState,
@@ -203,7 +240,8 @@ async function startServer() {
         systemInstruction?: string;
       };
 
-      if (!message || typeof message !== 'string' || !message.trim()) {
+      const normalizedMessage = typeof message === 'string' ? message.normalize('NFC').trim() : '';
+      if (!normalizedMessage) {
         res.status(400).json({ error: 'Vui lòng nhập nội dung câu hỏi.' });
         return;
       }
@@ -211,8 +249,8 @@ async function startServer() {
       const candidateKeys = getCandidateApiKeys();
       if (candidateKeys.length === 0) {
         const [newsSources, wikiSources] = await Promise.all([
-          fetchLiveGoogleNewsVietnam(message),
-          fetchVietnameseWikipediaSearch(message),
+          fetchLiveGoogleNewsVietnam(normalizedMessage),
+          fetchVietnameseWikipediaSearch(normalizedMessage),
         ]);
         res.status(200).json({
           text: '',
@@ -236,16 +274,55 @@ async function startServer() {
                 typeof item.text === 'string' &&
                 item.text.trim().length > 0
             )
-            .slice(-20)
+            .slice(-16)
             .map((item) => ({
               role: item.role,
-              parts: [{ text: item.text }],
+              parts: [{ text: item.text.normalize('NFC') }],
             }))
         : [];
 
       const candidateModels = Array.from(
         new Set([requestedModel, 'gemini-4-hydrogen', 'gemini-3.1-flash-lite'])
       );
+
+      const isInternalOnly = isPureInternalWarehouseQuery(normalizedMessage);
+
+      // Fetch live Google News Vietnam & Vietnamese Wikipedia in parallel (~1s) for external queries
+      const [newsSources, wikiSources] = isInternalOnly
+        ? [[], []]
+        : await Promise.all([
+            fetchLiveGoogleNewsVietnam(normalizedMessage),
+            fetchVietnameseWikipediaSearch(normalizedMessage),
+          ]);
+      const preFetchedSources = [...newsSources, ...wikiSources].slice(0, 5);
+
+      const liveContextBlock =
+        preFetchedSources.length > 0
+          ? `\n\n=== TIN TỨC & DỮ LIỆU TRA CỨU TRỰC TUYẾN MỚI NHẤT CHO "${normalizedMessage}" ===\n` +
+            preFetchedSources
+              .map(
+                (s, i) =>
+                  `${i + 1}. ${s.title}${s.sourceName ? ` (${s.sourceName})` : ''}${
+                    s.snippet ? ` — ${s.snippet}` : ''
+                  }`
+              )
+              .join('\n')
+          : '';
+
+      const baseSys =
+        systemInstruction && systemInstruction.trim()
+          ? systemInstruction.trim()
+          : `Bạn là Trợ lý A.I — VTNN Tâm An, chuyên gia phân tích thị trường vật tư nông nghiệp, giá phân bón, giá lúa gạo, kỹ thuật cây trồng và quản lý kho.`;
+
+      const effectiveSystemInstruction = [
+        baseSys,
+        baseSys.includes('DỮ LIỆU THAM CHIẾU THỊ TRƯỜNG NÔNG NGHIỆP')
+          ? ''
+          : AGRICULTURAL_MARKET_BENCHMARK_CONTEXT,
+        liveContextBlock,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
 
       for (const apiKey of candidateKeys) {
         const ai = new GoogleGenAI({
@@ -254,72 +331,52 @@ async function startServer() {
         });
 
         for (const candidateModel of candidateModels) {
-          for (const useSearchGrounding of [true, false]) {
-            try {
-              const chat = ai.chats.create({
-                model: candidateModel,
-                history: formattedHistory,
-                config: {
-                  ...(systemInstruction ? { systemInstruction } : {}),
-                  ...(useSearchGrounding ? { tools: [{ googleSearch: {} }] } : {}),
-                },
+          try {
+            const thinkingLevel =
+              candidateModel === 'gemini-4-neon' || candidateModel === 'gemini-4-carbon'
+                ? ThinkingLevel.MEDIUM
+                : ThinkingLevel.LOW;
+
+            const chat = ai.chats.create({
+              model: candidateModel,
+              history: formattedHistory,
+              config: {
+                systemInstruction: effectiveSystemInstruction,
+                thinkingConfig: { thinkingLevel },
+              },
+            });
+
+            const response = await withTimeout(
+              chat.sendMessage({
+                message: normalizedMessage,
+              }),
+              14000
+            );
+
+            const responseText = response.text?.trim();
+            if (responseText) {
+              res.json({
+                text: responseText,
+                modelUsed: candidateModel,
+                apiConnected: true,
+                keyState: 'connected' as GeminiKeyStatusState,
+                maskedKey: maskApiKey(apiKey),
+                sources: preFetchedSources,
               });
-
-              const response = await chat.sendMessage({
-                message: message.trim(),
-              });
-
-              const responseText = response.text?.trim();
-              if (responseText) {
-                const sources: GroundingSourceLink[] = [];
-                const chunks =
-                  response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-                if (Array.isArray(chunks)) {
-                  for (const chunk of chunks) {
-                    const uri = chunk?.web?.uri;
-                    const title = chunk?.web?.title;
-                    if (uri && typeof uri === 'string') {
-                      if (!sources.some((s) => s.uri === uri)) {
-                        sources.push({
-                          title:
-                            typeof title === 'string' && title.trim()
-                              ? title.trim()
-                              : uri,
-                          uri,
-                        });
-                      }
-                    }
-                  }
-                }
-
-                res.json({
-                  text: responseText,
-                  modelUsed: candidateModel,
-                  apiConnected: true,
-                  keyState: 'connected' as GeminiKeyStatusState,
-                  maskedKey: maskApiKey(apiKey),
-                  sources: sources.slice(0, 5),
-                });
-                return;
-              }
-            } catch {
-              // try next model or candidate key
+              return;
             }
+          } catch {
+            // try next model or candidate key
           }
         }
       }
-
-      const [newsSources, wikiSources] = await Promise.all([
-        fetchLiveGoogleNewsVietnam(message),
-        fetchVietnameseWikipediaSearch(message),
-      ]);
 
       res.status(200).json({
         text: '',
         fallbackRequired: true,
         apiConnected: false,
         keyState: 'quota_depleted' as GeminiKeyStatusState,
-        sources: [...newsSources, ...wikiSources].slice(0, 6),
+        sources: preFetchedSources,
       });
     } catch {
       res.status(200).json({

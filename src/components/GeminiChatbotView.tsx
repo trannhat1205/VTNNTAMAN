@@ -28,12 +28,16 @@ import {
   GEMINI_MODEL_OPTIONS,
   GeminiModelOptionId,
   generateSmartReportAnswer,
+  isPureInternalWarehouseQuery,
 } from '../utils/geminiReportAssistant';
 import { formatVND } from '../utils/businessLogic';
 
 export interface GeminiGroundingSource {
   title: string;
   uri: string;
+  publishedAt?: string;
+  sourceName?: string;
+  snippet?: string;
 }
 
 export interface GeminiChatMessage {
@@ -65,75 +69,187 @@ interface GeminiChatbotViewProps {
   paymentVouchers: CashPaymentVoucher[];
 }
 
+const REMOTE_GEMINI_API_FALLBACKS = [
+  'https://ais-pre-d6gejt24bdkwlhvgmjms2b-804647049989.asia-southeast1.run.app/api/gemini/chat',
+  'https://ais-dev-d6gejt24bdkwlhvgmjms2b-804647049989.asia-southeast1.run.app/api/gemini/chat',
+];
+
+async function fetchBrowserWikipediaFallback(query: string): Promise<GeminiGroundingSource[]> {
+  try {
+    const cleanQuery = query.normalize('NFC').trim().slice(0, 100);
+    if (!cleanQuery) return [];
+    const url = `https://vi.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+      cleanQuery
+    )}&utf8=&format=json&origin=*`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return [];
+    const data = (await res.json()) as {
+      query?: { search?: Array<{ title: string; snippet: string }> };
+    };
+    const items = data.query?.search || [];
+    return items.slice(0, 3).map((item) => ({
+      title: `${item.title} — Wikipedia Tiếng Việt`,
+      uri: `https://vi.wikipedia.org/wiki/${encodeURIComponent(item.title.replace(/\s+/g, '_'))}`,
+      sourceName: 'Wikipedia',
+      snippet: item.snippet
+        .replace(/<[^>]+>/g, '')
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .trim(),
+    }));
+  } catch {
+    return [];
+  }
+}
+
 function renderFormattedMessage(text: string) {
   const lines = text.split('\n');
-  return (
-    <div className="space-y-2 text-sm leading-relaxed text-slate-800">
-      {lines.map((rawLine, index) => {
-        const line = rawLine.trimEnd();
-        if (!line.trim()) {
-          return <div key={index} className="h-1.5" />;
-        }
+  const elements: React.ReactNode[] = [];
+  let i = 0;
 
-        if (line.startsWith('### ')) {
-          return (
-            <h3
-              key={index}
-              className="text-base font-bold text-slate-900 pt-2 pb-0.5 border-b border-slate-100"
-            >
-              {formatInlineBold(line.replace(/^###\s+/, ''))}
-            </h3>
-          );
-        }
+  while (i < lines.length) {
+    const rawLine = lines[i];
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
 
-        if (line.startsWith('#### ')) {
-          return (
-            <h4 key={index} className="text-sm font-bold text-emerald-800 pt-1.5">
-              {formatInlineBold(line.replace(/^####\s+/, ''))}
-            </h4>
-          );
-        }
+    // Detect Markdown Table block
+    if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
+      const tableLines: string[] = [];
+      while (
+        i < lines.length &&
+        lines[i].trim().startsWith('|') &&
+        lines[i].trim().endsWith('|')
+      ) {
+        tableLines.push(lines[i].trim());
+        i++;
+      }
 
-        if (line.startsWith('---')) {
-          return <hr key={index} className="border-slate-200 my-2" />;
-        }
+      const parsedRows = tableLines
+        .filter((row) => !/^\|[\s:|-]+\|$/.test(row))
+        .map((row) =>
+          row
+            .slice(1, -1)
+            .split('|')
+            .map((cell) => cell.trim())
+        );
 
-        if (line.startsWith('> ')) {
-          return (
-            <blockquote
-              key={index}
-              className="border-l-4 border-emerald-500 bg-emerald-50/70 px-3.5 py-2.5 rounded-r-xl text-slate-700 italic"
-            >
-              {formatInlineBold(line.replace(/^>\s+/, ''))}
-            </blockquote>
-          );
-        }
+      if (parsedRows.length > 0) {
+        const headerRow = parsedRows[0];
+        const bodyRows = parsedRows.slice(1);
+        elements.push(
+          <div
+            key={`table_${i}`}
+            className="my-2.5 overflow-x-auto rounded-xl border border-slate-200 bg-white"
+          >
+            <table className="min-w-full text-xs text-left border-collapse">
+              <thead className="bg-emerald-50/80 text-emerald-950 border-b border-slate-200">
+                <tr>
+                  {headerRow.map((cell, cIdx) => (
+                    <th key={cIdx} className="px-3 py-2 font-bold whitespace-nowrap">
+                      {formatInlineBold(cell)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {bodyRows.map((row, rIdx) => (
+                  <tr key={rIdx} className="hover:bg-slate-50/80">
+                    {row.map((cell, cIdx) => (
+                      <td key={cIdx} className="px-3 py-2 text-slate-700 align-top">
+                        {formatInlineBold(cell)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+        continue;
+      }
+    }
 
-        if (/^[-*]\s+/.test(line.trim())) {
-          return (
-            <div key={index} className="flex items-start gap-2 pl-1">
-              <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-emerald-600 shrink-0" />
-              <div className="flex-1">{formatInlineBold(line.trim().replace(/^[-*]\s+/, ''))}</div>
-            </div>
-          );
-        }
+    if (!trimmed) {
+      elements.push(<div key={i} className="h-1.5" />);
+      i++;
+      continue;
+    }
 
-        const numberedMatch = line.trim().match(/^(\d+)\.\s+(.*)$/);
-        if (numberedMatch) {
-          return (
-            <div key={index} className="flex items-start gap-2 pl-1">
-              <span className="font-bold text-emerald-700 shrink-0 min-w-[1.25rem]">
-                {numberedMatch[1]}.
-              </span>
-              <div className="flex-1">{formatInlineBold(numberedMatch[2])}</div>
-            </div>
-          );
-        }
+    if (line.startsWith('### ')) {
+      elements.push(
+        <h3
+          key={i}
+          className="text-base font-bold text-slate-900 pt-2 pb-0.5 border-b border-slate-100"
+        >
+          {formatInlineBold(line.replace(/^###\s+/, ''))}
+        </h3>
+      );
+      i++;
+      continue;
+    }
 
-        return <p key={index}>{formatInlineBold(line)}</p>;
-      })}
-    </div>
-  );
+    if (line.startsWith('#### ')) {
+      elements.push(
+        <h4 key={i} className="text-sm font-bold text-emerald-800 pt-1.5">
+          {formatInlineBold(line.replace(/^####\s+/, ''))}
+        </h4>
+      );
+      i++;
+      continue;
+    }
+
+    if (line.startsWith('---')) {
+      elements.push(<hr key={i} className="border-slate-200 my-2" />);
+      i++;
+      continue;
+    }
+
+    if (line.startsWith('> ')) {
+      elements.push(
+        <blockquote
+          key={i}
+          className="border-l-4 border-emerald-500 bg-emerald-50/70 px-3.5 py-2.5 rounded-r-xl text-slate-700 italic"
+        >
+          {formatInlineBold(line.replace(/^>\s+/, ''))}
+        </blockquote>
+      );
+      i++;
+      continue;
+    }
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      elements.push(
+        <div key={i} className="flex items-start gap-2 pl-1">
+          <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-emerald-600 shrink-0" />
+          <div className="flex-1">{formatInlineBold(trimmed.replace(/^[-*]\s+/, ''))}</div>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    const numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
+    if (numberedMatch) {
+      elements.push(
+        <div key={i} className="flex items-start gap-2 pl-1">
+          <span className="font-bold text-emerald-700 shrink-0 min-w-[1.25rem]">
+            {numberedMatch[1]}.
+          </span>
+          <div className="flex-1">{formatInlineBold(numberedMatch[2])}</div>
+        </div>
+      );
+      i++;
+      continue;
+    }
+
+    elements.push(<p key={i}>{formatInlineBold(line)}</p>);
+    i++;
+  }
+
+  return <div className="space-y-2 text-sm leading-relaxed text-slate-800">{elements}</div>;
 }
 
 function formatInlineBold(text: string): React.ReactNode {
@@ -326,7 +442,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   };
 
   const handleSendMessage = async (customText?: string) => {
-    const promptText = (customText ?? inputPrompt).trim();
+    const promptText = (customText ?? inputPrompt).normalize('NFC').trim();
     if (!promptText || isGenerating || !activeSession) return;
 
     const userMessage: GeminiChatMessage = {
@@ -341,7 +457,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
 
     const previousHistory = activeSession.messages.map((m) => ({
       role: m.role,
-      text: m.text,
+      text: m.text.normalize('NFC'),
     }));
 
     const updatedTitle =
@@ -374,43 +490,66 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     let replySources: GeminiGroundingSource[] = [];
     let apiConnectedFlag = false;
 
-    try {
-      const response = await fetch('/api/gemini/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: promptText,
-          history: previousHistory,
-          model: selectedModel,
-          systemInstruction,
-        }),
-      });
+    const payloadBody = JSON.stringify({
+      message: promptText,
+      history: previousHistory,
+      model: selectedModel,
+      systemInstruction,
+    });
 
-      if (response.ok) {
-        const data = (await response.json()) as {
-          text?: string;
-          modelUsed?: GeminiModelOptionId;
-          sources?: GeminiGroundingSource[];
-          apiConnected?: boolean;
-        };
-        if (typeof data.apiConnected === 'boolean') {
-          apiConnectedFlag = data.apiConnected;
-        }
-        if (Array.isArray(data.sources)) {
-          replySources = data.sources;
-        }
-        if (data.text && data.text.trim()) {
-          replyText = data.text.trim();
-          if (data.modelUsed) {
-            usedModelId = data.modelUsed;
+    const isLocalOrCloudRun =
+      typeof window !== 'undefined' &&
+      (window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1' ||
+        window.location.hostname.endsWith('.run.app'));
+
+    const candidateEndpoints = isLocalOrCloudRun
+      ? ['/api/gemini/chat']
+      : ['/api/gemini/chat', ...REMOTE_GEMINI_API_FALLBACKS];
+
+    for (const endpoint of candidateEndpoints) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 22000);
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payloadBody,
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+
+        const contentType = response.headers.get('content-type') || '';
+        if (response.ok && contentType.includes('application/json')) {
+          const data = (await response.json()) as {
+            text?: string;
+            modelUsed?: GeminiModelOptionId;
+            sources?: GeminiGroundingSource[];
+            apiConnected?: boolean;
+          };
+          if (typeof data.apiConnected === 'boolean') {
+            apiConnectedFlag = data.apiConnected;
+          }
+          if (Array.isArray(data.sources) && data.sources.length > 0) {
+            replySources = data.sources;
+          }
+          if (data.text && data.text.trim()) {
+            replyText = data.text.trim();
+            if (data.modelUsed) {
+              usedModelId = data.modelUsed;
+            }
+            break;
           }
         }
+      } catch {
+        // Try next candidate endpoint or client-side fallback
       }
-    } catch {
-      // Fallback to local smart report & agronomy assistant if static hosting or offline
     }
 
     if (!replyText) {
+      if (replySources.length === 0 && !isPureInternalWarehouseQuery(promptText)) {
+        replySources = await fetchBrowserWikipediaFallback(promptText);
+      }
       replyText = generateSmartReportAnswer(promptText, reportSnapshot, replySources);
     }
 
