@@ -6,14 +6,72 @@
       ".read": "auth != null && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
       "$ownerUid": {
         ".read": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
-        ".write": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))"
+        ".write": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+        "meta": {
+          ".validate": "newData.hasChild('ownerUid') && newData.child('ownerUid').isString()"
+        },
+        "settings": {},
+        "products": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('stock') || newData.child('stock').isNumber())"
+          }
+        },
+        "customers": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200"
+          }
+        },
+        "suppliers": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200"
+          }
+        },
+        "sales": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('quantity') || newData.child('quantity').isNumber()) && (!newData.hasChild('totalAmount') || newData.child('totalAmount').isNumber()) && (!newData.hasChild('paidAmount') || newData.child('paidAmount').isNumber()) && (!newData.hasChild('debtAmount') || newData.child('debtAmount').isNumber())"
+          }
+        },
+        "imports": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('quantity') || newData.child('quantity').isNumber()) && (!newData.hasChild('totalCost') || newData.child('totalCost').isNumber()) && (!newData.hasChild('paidAmount') || newData.child('paidAmount').isNumber()) && (!newData.hasChild('debtAmount') || newData.child('debtAmount').isNumber())"
+          }
+        },
+        "receiptVouchers": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('amount') || newData.child('amount').isNumber())"
+          }
+        },
+        "paymentVouchers": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('amount') || newData.child('amount').isNumber())"
+          }
+        },
+        "savedVouchers": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200"
+          }
+        },
+        "auditLogs": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200"
+          }
+        },
+        "backups": {
+          "$recKey": {
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200"
+          }
+        },
+        "$other": {
+          ".validate": false
+        }
       }
     },
     "users_directory": {
       ".read": "auth != null && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
       "$uid": {
         ".read": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
-        ".write": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))"
+        ".write": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+        ".validate": "newData.hasChild('uid') && newData.child('uid').isString() && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com') || $uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || ((!newData.hasChild('email') || newData.child('email').val() !== 'trannhat1205@gmail.com') && (!newData.hasChild('positionRole') || newData.child('positionRole').val() !== 'primary_manager') && (!newData.hasChild('assignedWarehouse') || newData.child('assignedWarehouse').val() !== 'Tất cả kho')))"
       }
     }
   }
