@@ -70,6 +70,7 @@ import {
   canStaffFilterMultiWarehouses,
   canViewAuditHistory,
   computeDueDateAfterDays,
+  computeSaleEditStockDeltas,
   createAuditLogEntry,
   evaluateDebtUrgency,
   evaluateStaffAccessScope,
@@ -88,7 +89,11 @@ import {
   getPositionRoleLabel,
   getTodayVietnamDateStr,
   normalizeCustomTamAnWarehouseName,
+  normalizeVietnameseSearch,
+  reconcileCustomersFromSales,
   resolveActiveWarehouses,
+  reverseCustomerReceiptVoucherAllocations,
+  reverseSupplierPaymentVoucherAllocations,
   updateImportRecord,
   updateSaleRecord,
 } from './utils/businessLogic';
@@ -107,7 +112,12 @@ import {
   logoutUser,
   resendVerificationEmail,
   seedExistingStaffToChatDirectoryIfAdmin,
+  seedExistingStaffToRealtimeDirectoryIfAdmin,
   subscribeToAiTokenGrant,
+  subscribeToAllRealtimeWorkspacesForAdmin,
+  subscribeToRealtimeUsersDirectory,
+  subscribeToRealtimeWorkspace,
+  subscribeToRtdbConnectionState,
   subscribeToUserChatRooms,
   syncCustomerToFirestore,
   syncImportToFirestore,
@@ -116,9 +126,21 @@ import {
   syncSaleToFirestore,
   uploadBackupToGoogleDrive,
   upsertChatUserDirectoryProfile,
+  upsertRealtimeUserDirectoryProfile,
+  writeRealtimeWorkspace,
 } from './services/firebaseService';
 import { AiTokenGrantRecord } from './utils/geminiReportAssistant';
 import { buildDirectChatRoomId } from './utils/internalChatLogic';
+import {
+  AdminWarehouseAccountSummary,
+  aggregateAdminWorkspacesFromRtdb,
+  computeWorkspaceFingerprint,
+  dedupeRecordsById,
+  mergeDirectoryIntoStaffList,
+  partitionAdminStateByWorkspace,
+  RtdbUserDirectoryProfile,
+  RtdbWorkspacePayload,
+} from './utils/rtdbSyncLogic';
 import {
   loadWorkspaceFromStorage,
   mergeRecordsById,
@@ -232,6 +254,19 @@ export default function App() {
   const [chatTargetRoomId, setChatTargetRoomId] = useState<string | null>(null);
   const [unreadChatCount, setUnreadChatCount] = useState<number>(0);
   const lastGrantBonusRef = useRef<number | null>(null);
+
+  // Firebase Realtime Database (gapgold-e6b62-default-rtdb) Sync State & Guards
+  const [rtdbSyncState, setRtdbSyncState] = useState<'connecting' | 'live' | 'offline'>('connecting');
+  const [adminWorkspaceSummaries, setAdminWorkspaceSummaries] = useState<
+    AdminWarehouseAccountSummary[]
+  >([]);
+  const rtdbHydratedKeyRef = useRef<string | null>(null);
+  const rtdbSuppressNextWriteRef = useRef<boolean>(false);
+  const rtdbLastFingerprintsRef = useRef<Record<string, string>>({});
+  const rtdbKnownOwnerUidsRef = useRef<Set<string>>(new Set([PRIMARY_ADMIN_UID]));
+  const adminWorkspacesMapRef = useRef<Record<string, unknown>>({});
+  const rtdbUsersDirMapRef = useRef<Record<string, RtdbUserDirectoryProfile>>({});
+  const [rtdbWriteTrigger, setRtdbWriteTrigger] = useState<number>(0);
 
   // Auth & Role State
   const [role, setRole] = useState<UserRole>('staff');
@@ -710,6 +745,431 @@ export default function App() {
     activeTab,
   ]);
 
+  // Keep a live reference to latest state so RTDB hydration callbacks never read stale closures
+  const latestWorkspaceRef = useRef({
+    products,
+    customers,
+    suppliers,
+    sales,
+    imports,
+    receiptVouchers,
+    paymentVouchers,
+    savedVouchers,
+    auditLogs,
+    backups,
+    warehouses,
+    customerGroups,
+    productCategories,
+    receiptGroups,
+    paymentGroups,
+    staffList,
+    notificationPrefs,
+    autoDailyBackupEnabled,
+  });
+  latestWorkspaceRef.current = {
+    products,
+    customers,
+    suppliers,
+    sales,
+    imports,
+    receiptVouchers,
+    paymentVouchers,
+    savedVouchers,
+    auditLogs,
+    backups,
+    warehouses,
+    customerGroups,
+    productCategories,
+    receiptGroups,
+    paymentGroups,
+    staffList,
+    notificationPrefs,
+    autoDailyBackupEnabled,
+  };
+
+  // Monitor Firebase RTDB connection state (.info/connected)
+  useEffect(() => {
+    if (!isGoogleAuthenticated || !auth.currentUser) {
+      setRtdbSyncState('offline');
+      return;
+    }
+    setRtdbSyncState('connecting');
+    const unsubConn = subscribeToRtdbConnectionState((connected) => {
+      setRtdbSyncState(connected ? 'live' : 'offline');
+    });
+    return () => {
+      unsubConn();
+    };
+  }, [isGoogleAuthenticated]);
+
+  // Real-time bidirectional sync with Firebase Realtime Database (gapgold-e6b62-default-rtdb)
+  useEffect(() => {
+    const fbUser = auth.currentUser;
+    if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) {
+      rtdbHydratedKeyRef.current = null;
+      return;
+    }
+
+    const isPrimary = isCurrentUserAdmin(fbUser) || canAccountCreateStaff(currentStaff);
+    const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
+    const sessionKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
+
+    rtdbHydratedKeyRef.current = null;
+
+    // Publish user directory profile to RTDB /users_directory/{uid}
+    void upsertRealtimeUserDirectoryProfile({
+      ...currentStaff,
+      uid: activeUid,
+      email: currentStaff.email || fbUser.email || '',
+    });
+
+    if (isPrimary) {
+      void seedExistingStaffToRealtimeDirectoryIfAdmin(latestWorkspaceRef.current.staffList);
+
+      const applyAdminAggregate = () => {
+        const wsMap = adminWorkspacesMapRef.current;
+        const dirMap = rtdbUsersDirMapRef.current;
+        const agg = aggregateAdminWorkspacesFromRtdb(wsMap, dirMap);
+        setAdminWorkspaceSummaries(agg.adminSummaries);
+
+        const dirProfiles = Object.values(dirMap);
+        if (dirProfiles.length > 0) {
+          setStaffList((prev) => mergeDirectoryIntoStaffList(prev, dirProfiles));
+        }
+
+        const wsKeys = Object.keys(wsMap);
+        wsKeys.forEach((uid) => rtdbKnownOwnerUidsRef.current.add(uid));
+
+        if (wsKeys.length === 0) {
+          // RTDB is currently empty -> seed existing local state up partitioned by ownerId
+          if (rtdbHydratedKeyRef.current !== sessionKey) {
+            rtdbHydratedKeyRef.current = sessionKey;
+            setRtdbWriteTrigger((n) => n + 1);
+          }
+          return;
+        }
+
+        // Check if any remote workspace bucket changed compared to our last known fingerprint
+        let hasRemoteChanges = rtdbHydratedKeyRef.current !== sessionKey;
+        for (const [uid, normPayload] of Object.entries(agg.normalizedWorkspaces)) {
+          const remoteFp = computeWorkspaceFingerprint(normPayload);
+          if (rtdbLastFingerprintsRef.current[uid] !== remoteFp) {
+            rtdbLastFingerprintsRef.current[uid] = remoteFp;
+            hasRemoteChanges = true;
+          }
+        }
+
+        if (hasRemoteChanges) {
+          const firstHydration = rtdbHydratedKeyRef.current !== sessionKey;
+          rtdbHydratedKeyRef.current = sessionKey;
+          rtdbSuppressNextWriteRef.current = true;
+
+          const cur = latestWorkspaceRef.current;
+          setProducts(
+            firstHydration ? dedupeRecordsById([...cur.products, ...agg.products]) : agg.products
+          );
+          setCustomers(
+            firstHydration
+              ? dedupeRecordsById([...cur.customers, ...agg.customers])
+              : agg.customers
+          );
+          setSuppliers(
+            firstHydration
+              ? dedupeRecordsById([...cur.suppliers, ...agg.suppliers])
+              : agg.suppliers
+          );
+          setSales(
+            firstHydration ? dedupeRecordsById([...cur.sales, ...agg.sales]) : agg.sales
+          );
+          setImports(
+            firstHydration ? dedupeRecordsById([...cur.imports, ...agg.imports]) : agg.imports
+          );
+          setReceiptVouchers(
+            firstHydration
+              ? dedupeRecordsById([...cur.receiptVouchers, ...agg.receiptVouchers])
+              : agg.receiptVouchers
+          );
+          setPaymentVouchers(
+            firstHydration
+              ? dedupeRecordsById([...cur.paymentVouchers, ...agg.paymentVouchers])
+              : agg.paymentVouchers
+          );
+          setSavedVouchers(
+            firstHydration
+              ? dedupeRecordsById([...cur.savedVouchers, ...agg.savedVouchers])
+              : agg.savedVouchers
+          );
+          setAuditLogs(
+            firstHydration
+              ? dedupeRecordsById([...cur.auditLogs, ...agg.auditLogs])
+              : agg.auditLogs
+          );
+          setBackups(
+            firstHydration ? dedupeRecordsById([...cur.backups, ...agg.backups]) : agg.backups
+          );
+          setWarehouses(Array.from(new Set([...cur.warehouses, ...agg.warehouses])));
+          setCustomerGroups(
+            Array.from(new Set([...cur.customerGroups, ...agg.customerGroups]))
+          );
+          setProductCategories(
+            Array.from(new Set([...cur.productCategories, ...agg.productCategories]))
+          );
+          setReceiptGroups(Array.from(new Set([...cur.receiptGroups, ...agg.receiptGroups])));
+          setPaymentGroups(Array.from(new Set([...cur.paymentGroups, ...agg.paymentGroups])));
+
+          if (firstHydration) {
+            setRtdbWriteTrigger((n) => n + 1);
+          }
+        }
+      };
+
+      const unsubAllWs = subscribeToAllRealtimeWorkspacesForAdmin((wsMap) => {
+        adminWorkspacesMapRef.current = wsMap;
+        applyAdminAggregate();
+      });
+      const unsubDir = subscribeToRealtimeUsersDirectory(PRIMARY_ADMIN_UID, true, (dirMap) => {
+        rtdbUsersDirMapRef.current = dirMap;
+        applyAdminAggregate();
+      });
+
+      return () => {
+        unsubAllWs();
+        unsubDir();
+      };
+    }
+
+    // Standard single-warehouse user subscription (/workspaces/{uid} + /users_directory/{uid})
+    const unsubUserWs = subscribeToRealtimeWorkspace(activeUid, (remoteWs) => {
+      if (!remoteWs) {
+        // First time this warehouse user connects to RTDB -> push local workspace immediately
+        rtdbHydratedKeyRef.current = sessionKey;
+        setRtdbWriteTrigger((n) => n + 1);
+        return;
+      }
+
+      const incomingFp = computeWorkspaceFingerprint(remoteWs);
+      if (
+        rtdbHydratedKeyRef.current === sessionKey &&
+        rtdbLastFingerprintsRef.current[activeUid] === incomingFp
+      ) {
+        return;
+      }
+
+      const firstHydration = rtdbHydratedKeyRef.current !== sessionKey;
+      rtdbHydratedKeyRef.current = sessionKey;
+      rtdbLastFingerprintsRef.current[activeUid] = incomingFp;
+      rtdbSuppressNextWriteRef.current = true;
+
+      const cur = latestWorkspaceRef.current;
+      setProducts(
+        firstHydration
+          ? dedupeRecordsById([...cur.products, ...remoteWs.products])
+          : remoteWs.products
+      );
+      setCustomers(
+        firstHydration
+          ? dedupeRecordsById([...cur.customers, ...remoteWs.customers])
+          : remoteWs.customers
+      );
+      setSuppliers(
+        firstHydration
+          ? dedupeRecordsById([...cur.suppliers, ...remoteWs.suppliers])
+          : remoteWs.suppliers
+      );
+      setSales(
+        firstHydration ? dedupeRecordsById([...cur.sales, ...remoteWs.sales]) : remoteWs.sales
+      );
+      setImports(
+        firstHydration
+          ? dedupeRecordsById([...cur.imports, ...remoteWs.imports])
+          : remoteWs.imports
+      );
+      setReceiptVouchers(
+        firstHydration
+          ? dedupeRecordsById([...cur.receiptVouchers, ...remoteWs.receiptVouchers])
+          : remoteWs.receiptVouchers
+      );
+      setPaymentVouchers(
+        firstHydration
+          ? dedupeRecordsById([...cur.paymentVouchers, ...remoteWs.paymentVouchers])
+          : remoteWs.paymentVouchers
+      );
+      setSavedVouchers(
+        firstHydration
+          ? dedupeRecordsById([...cur.savedVouchers, ...remoteWs.savedVouchers])
+          : remoteWs.savedVouchers
+      );
+      setAuditLogs(
+        firstHydration
+          ? dedupeRecordsById([...cur.auditLogs, ...remoteWs.auditLogs]).slice(0, 500)
+          : remoteWs.auditLogs
+      );
+      setBackups(
+        firstHydration
+          ? dedupeRecordsById([...cur.backups, ...remoteWs.backups])
+          : remoteWs.backups
+      );
+      if (remoteWs.settings.warehouses.length > 0) {
+        setWarehouses((prev) => Array.from(new Set([...prev, ...remoteWs.settings.warehouses])));
+      }
+      if (remoteWs.settings.customerGroups.length > 0) {
+        setCustomerGroups((prev) =>
+          Array.from(new Set([...prev, ...remoteWs.settings.customerGroups]))
+        );
+      }
+      if (remoteWs.settings.productCategories.length > 0) {
+        setProductCategories((prev) =>
+          Array.from(new Set([...prev, ...remoteWs.settings.productCategories]))
+        );
+      }
+      if (remoteWs.settings.receiptGroups.length > 0) {
+        setReceiptGroups((prev) =>
+          Array.from(new Set([...prev, ...remoteWs.settings.receiptGroups]))
+        );
+      }
+      if (remoteWs.settings.paymentGroups.length > 0) {
+        setPaymentGroups((prev) =>
+          Array.from(new Set([...prev, ...remoteWs.settings.paymentGroups]))
+        );
+      }
+      if (remoteWs.settings.notificationPrefs) {
+        setNotificationPrefs(remoteWs.settings.notificationPrefs);
+      }
+
+      if (firstHydration) {
+        setRtdbWriteTrigger((n) => n + 1);
+      }
+    });
+
+    const unsubUserDir = subscribeToRealtimeUsersDirectory(activeUid, false, (dirMap) => {
+      const profiles = Object.values(dirMap);
+      if (profiles.length > 0) {
+        setStaffList((prev) => mergeDirectoryIntoStaffList(prev, profiles));
+      }
+    });
+
+    return () => {
+      unsubUserWs();
+      unsubUserDir();
+    };
+  }, [isSessionLoggedIn, isGoogleAuthenticated, currentStaff.uid]);
+
+  // Debounced auto-sync to Firebase Realtime Database on every state mutation
+  useEffect(() => {
+    const fbUser = auth.currentUser;
+    if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) return;
+
+    const isPrimary = isCurrentUserAdmin(fbUser) || canAccountCreateStaff(currentStaff);
+    const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
+    const expectedKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
+
+    if (rtdbHydratedKeyRef.current !== expectedKey) return;
+    if (rtdbSuppressNextWriteRef.current) {
+      rtdbSuppressNextWriteRef.current = false;
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const nowIso = new Date().toISOString();
+      const settingsObj = {
+        warehouses,
+        customerGroups,
+        productCategories,
+        receiptGroups,
+        paymentGroups,
+        notificationPrefs,
+        autoDailyBackupEnabled,
+      };
+
+      if (isPrimary) {
+        const partitioned = partitionAdminStateByWorkspace({
+          products,
+          customers,
+          suppliers,
+          sales,
+          imports,
+          receiptVouchers,
+          paymentVouchers,
+          savedVouchers,
+          auditLogs,
+          backups,
+          settings: settingsObj,
+          staffList,
+          knownOwnerUids: Array.from(rtdbKnownOwnerUidsRef.current),
+          adminUid: PRIMARY_ADMIN_UID,
+          nowIso,
+        });
+
+        Object.entries(partitioned).forEach(([bucketUid, bucketPayload]) => {
+          const nextFp = computeWorkspaceFingerprint(bucketPayload);
+          if (rtdbLastFingerprintsRef.current[bucketUid] !== nextFp) {
+            rtdbLastFingerprintsRef.current[bucketUid] = nextFp;
+            rtdbKnownOwnerUidsRef.current.add(bucketUid);
+            void writeRealtimeWorkspace(bucketUid, bucketPayload);
+          }
+        });
+      } else {
+        const payload: RtdbWorkspacePayload = {
+          meta: {
+            ownerUid: activeUid,
+            ownerEmail: currentStaff.email || fbUser.email || '',
+            ownerDisplayName: currentStaff.displayName || fbUser.displayName || '',
+            assignedWarehouse: currentStaff.assignedWarehouse || 'Tâm An Mỹ Ngãi',
+            updatedAt: nowIso,
+            updatedByUid: activeUid,
+            schemaVersion: 1,
+          },
+          products,
+          customers,
+          suppliers,
+          sales,
+          imports,
+          receiptVouchers,
+          paymentVouchers,
+          savedVouchers,
+          auditLogs: auditLogs.slice(0, 500),
+          backups: backups.map((b) => ({ ...b, snapshotPayload: undefined })),
+          settings: settingsObj,
+        };
+        const nextFp = computeWorkspaceFingerprint(payload);
+        if (rtdbLastFingerprintsRef.current[activeUid] !== nextFp) {
+          rtdbLastFingerprintsRef.current[activeUid] = nextFp;
+          void writeRealtimeWorkspace(activeUid, payload);
+        }
+      }
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [
+    isSessionLoggedIn,
+    isGoogleAuthenticated,
+    currentStaff.uid,
+    currentStaff.email,
+    currentStaff.displayName,
+    currentStaff.assignedWarehouse,
+    products,
+    customers,
+    suppliers,
+    sales,
+    imports,
+    receiptVouchers,
+    paymentVouchers,
+    savedVouchers,
+    auditLogs,
+    backups,
+    warehouses,
+    customerGroups,
+    productCategories,
+    receiptGroups,
+    paymentGroups,
+    staffList,
+    notificationPrefs,
+    autoDailyBackupEnabled,
+    rtdbWriteTrigger,
+  ]);
+
   // Generate live notifications based on user preferences using real Vietnam date
   const todayVietnamDate = getTodayVietnamDateStr();
   const notifications = useMemo(
@@ -1045,17 +1505,19 @@ export default function App() {
     if (!existing) return;
 
     const updated = updateSaleRecord(existing, changes, nowIso);
-    setSales((prev) => prev.map((s) => (s.id === saleId ? updated : s)));
+    const nextSales = sales.map((s) => (s.id === saleId ? updated : s));
+    setSales(nextSales);
 
-    // Reconcile inventory stock delta when quantity or gift quantity changes
-    const qtyDelta = existing.quantity - updated.quantity;
-    if (qtyDelta !== 0) {
+    // Reconcile inventory stock delta for both main product and promotional gift product
+    const stockDeltas = computeSaleEditStockDeltas(existing, updated);
+    if (Object.keys(stockDeltas).length > 0) {
       setProducts((prev) =>
         prev.map((p) => {
-          if (p.id !== existing.productId) return p;
+          const delta = stockDeltas[p.id];
+          if (!delta) return p;
           const nextProd = {
             ...p,
-            stock: Math.max(0, p.stock + qtyDelta),
+            stock: Math.max(0, p.stock + delta),
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
@@ -1064,24 +1526,14 @@ export default function App() {
       );
     }
 
-    // Reconcile customer purchase & debt totals
-    const totalDelta = updated.totalAmount - existing.totalAmount;
-    const debtDelta = updated.debtAmount - existing.debtAmount;
-    if (totalDelta !== 0 || debtDelta !== 0) {
-      setCustomers((prev) =>
-        prev.map((c) => {
-          if (c.id !== existing.customerId) return c;
-          const nextCust = {
-            ...c,
-            totalPurchased: Math.max(0, c.totalPurchased + totalDelta),
-            totalDebt: Math.max(0, c.totalDebt + debtDelta),
-            updatedAt: nowIso,
-          };
-          if (isGoogleAuthenticated) void syncCustomerToFirestore(nextCust, false);
-          return nextCust;
-        })
-      );
-    }
+    // Reconcile customer purchase & debt totals directly from linked sales
+    setCustomers((prev) => {
+      const reconciled = reconcileCustomersFromSales(prev, nextSales, nowIso);
+      if (isGoogleAuthenticated) {
+        reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+      }
+      return reconciled.customers;
+    });
 
     if (isGoogleAuthenticated) {
       void syncSaleToFirestore(updated, false);
@@ -1125,8 +1577,17 @@ export default function App() {
       );
 
       // Reconcile customer purchase & debt totals
-      setCustomers((prev) =>
-        prev.map((c) => {
+      const nextSales = sales.filter((s) => s.id !== saleId);
+      setCustomers((prev) => {
+        const custHasRemainingSales = nextSales.some((s) => s.customerId === target.customerId);
+        if (custHasRemainingSales) {
+          const reconciled = reconcileCustomersFromSales(prev, nextSales, nowIso);
+          if (isGoogleAuthenticated) {
+            reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+          }
+          return reconciled.customers;
+        }
+        return prev.map((c) => {
           if (c.id !== target.customerId) return c;
           const nextCust = {
             ...c,
@@ -1136,8 +1597,8 @@ export default function App() {
           };
           if (isGoogleAuthenticated) void syncCustomerToFirestore(nextCust, false);
           return nextCust;
-        })
-      );
+        });
+      });
 
       if (isGoogleAuthenticated) {
         void deleteFirestoreDocIfAdmin('sales', saleId);
@@ -1663,72 +2124,188 @@ export default function App() {
 
   const handleCollectCustomerDebt = (saleId: string, amount: number, note: string) => {
     const existing = sales.find((s) => s.id === saleId);
-    const nowIso = new Date().toISOString();
-    setSales((prev) =>
-      prev.map((s) => {
-        if (s.id !== saleId) return s;
-        const updated = applyDebtPayment(
-          { ...s, note: note || s.note },
-          amount,
-          nowIso
-        );
-        if (isGoogleAuthenticated) {
-          void syncSaleToFirestore(updated, false);
-        }
-        return updated;
-      })
+    if (!existing) return;
+    const actualCollected = Math.min(
+      Math.max(0, Number(existing.debtAmount) || 0),
+      Math.max(0, Math.round(Number(amount) || 0))
     );
-    if (existing) {
-      recordAuditLog({
-        actionCategory: 'debt_payment',
-        targetEntity: 'debt',
-        targetCode: existing.invoiceCode,
-        warehouseName: existing.warehouseName,
-        summary: `Thu nợ khách hàng ${existing.customerName} (+${formatVND(amount)}) cho HĐ ${
-          existing.invoiceCode
-        }`,
-        details: `Nợ trước khi thu: ${formatVND(existing.debtAmount)} · Số tiền thu: ${formatVND(
-          amount
-        )} · Ghi chú: ${note || 'Thu nợ trực tiếp'}`,
-        snapshotData: JSON.stringify(existing),
-      });
+    if (actualCollected <= 0) {
+      showToast('Hóa đơn này đã thanh toán đủ hoặc số tiền thu phải lớn hơn 0.');
+      return;
     }
-    showToast(`Đã ghi nhận thu nợ khách hàng: +${formatVND(amount)}`);
+    const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const cleanNote = (note || '').trim();
+    const noteSuffix = cleanNote
+      ? `[Thu nợ HĐ ${existing.invoiceCode}: +${actualCollected.toLocaleString('vi-VN')}đ - ${cleanNote}]`
+      : `[Thu nợ HĐ ${existing.invoiceCode}: +${actualCollected.toLocaleString('vi-VN')}đ]`;
+    const mergedNote = existing.note ? `${existing.note} | ${noteSuffix}` : noteSuffix;
+
+    const updatedSale = applyDebtPayment(
+      { ...existing, note: mergedNote },
+      actualCollected,
+      nowIso
+    );
+    const nextSales = sales.map((s) => (s.id === saleId ? updatedSale : s));
+    setSales(nextSales);
+    if (isGoogleAuthenticated) {
+      void syncSaleToFirestore(updatedSale, false);
+    }
+
+    setCustomers((prev) => {
+      const reconciled = reconcileCustomersFromSales(prev, nextSales, nowIso);
+      if (isGoogleAuthenticated) {
+        reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+      }
+      return reconciled.customers;
+    });
+
+    const voucherCode = generateSequentialVoucherCode(
+      'PT',
+      receiptVouchers.map((r) => r.voucherCode)
+    );
+    const linkedReceiptVoucher: CashReceiptVoucher = {
+      id: `rv_direct_${Date.now()}`,
+      voucherCode,
+      groupName: 'Thu nợ bán hàng khách hàng',
+      warehouseName: existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+      partnerId: existing.customerId,
+      partnerName: existing.customerName,
+      partnerPhone: existing.customerPhone || '',
+      amount: actualCollected,
+      paymentMethod: 'Tiền mặt / Chuyển khoản',
+      isDebtSettlement: true,
+      settledAllocations: [
+        {
+          recordId: existing.id,
+          code: existing.invoiceCode,
+          date: (existing.createdAt || '').slice(0, 10),
+          dueDate: existing.dueDate || '',
+          productName: existing.productName,
+          previousDebt: existing.debtAmount,
+          allocatedAmount: actualCollected,
+          remainingDebt: updatedSale.debtAmount,
+        },
+      ],
+      totalPreviousDebt: existing.debtAmount,
+      totalRemainingDebt: updatedSale.debtAmount,
+      countsTowardOtherIncome: false,
+      note:
+        cleanNote ||
+        `Thu nợ trực tiếp hóa đơn ${existing.invoiceCode} (${existing.customerName})`,
+      staffName: currentStaff.displayName,
+      ownerId: existing.ownerId || activeUid,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setReceiptVouchers((prev) => [linkedReceiptVoucher, ...prev]);
+
+    recordAuditLog({
+      actionCategory: 'debt_payment',
+      targetEntity: 'debt',
+      targetCode: existing.invoiceCode,
+      warehouseName: existing.warehouseName,
+      summary: `Thu nợ khách hàng ${existing.customerName} (+${formatVND(
+        actualCollected
+      )}) cho HĐ ${existing.invoiceCode} -> Lập phiếu ${voucherCode}`,
+      details: `Nợ trước khi thu: ${formatVND(existing.debtAmount)} · Số tiền thu: ${formatVND(
+        actualCollected
+      )} · Nợ còn lại: ${formatVND(updatedSale.debtAmount)} · Ghi chú: ${
+        cleanNote || 'Thu nợ trực tiếp'
+      }`,
+      snapshotData: JSON.stringify(existing),
+    });
+    showToast(
+      `Đã ghi nhận thu nợ +${formatVND(actualCollected)} & tự động lưu Phiếu thu ${voucherCode}!`
+    );
   };
 
   const handlePaySupplierDebt = (importId: string, amount: number, note: string) => {
     const existing = imports.find((imp) => imp.id === importId);
-    const nowIso = new Date().toISOString();
-    setImports((prev) =>
-      prev.map((imp) => {
-        if (imp.id !== importId) return imp;
-        const updated = applyDebtPayment(
-          { ...imp, note: note || imp.note },
-          amount,
-          nowIso
-        );
-        if (isGoogleAuthenticated) {
-          void syncImportToFirestore(updated, false);
-        }
-        return updated;
-      })
+    if (!existing) return;
+    const actualPaid = Math.min(
+      Math.max(0, Number(existing.debtAmount) || 0),
+      Math.max(0, Math.round(Number(amount) || 0))
     );
-    if (existing) {
-      recordAuditLog({
-        actionCategory: 'debt_payment',
-        targetEntity: 'debt',
-        targetCode: existing.receiptCode,
-        warehouseName: existing.warehouseName,
-        summary: `Thanh toán nợ NCC ${existing.supplierName} (${formatVND(amount)}) cho phiếu ${
-          existing.receiptCode
-        }`,
-        details: `Nợ NCC trước khi trả: ${formatVND(
-          existing.debtAmount
-        )} · Số tiền trả: ${formatVND(amount)} · Ghi chú: ${note || 'Thanh toán nợ NCC'}`,
-        snapshotData: JSON.stringify(existing),
-      });
+    if (actualPaid <= 0) {
+      showToast('Phiếu nhập này đã thanh toán đủ hoặc số tiền trả phải lớn hơn 0.');
+      return;
     }
-    showToast(`Đã thanh toán công nợ Nhà cung cấp: ${formatVND(amount)}`);
+    const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const cleanNote = (note || '').trim();
+    const noteSuffix = cleanNote
+      ? `[Trả nợ NCC ${existing.receiptCode}: -${actualPaid.toLocaleString('vi-VN')}đ - ${cleanNote}]`
+      : `[Trả nợ NCC ${existing.receiptCode}: -${actualPaid.toLocaleString('vi-VN')}đ]`;
+    const mergedNote = existing.note ? `${existing.note} | ${noteSuffix}` : noteSuffix;
+
+    const updatedImport = applyDebtPayment(
+      { ...existing, note: mergedNote },
+      actualPaid,
+      nowIso
+    );
+    setImports((prev) => prev.map((imp) => (imp.id === importId ? updatedImport : imp)));
+    if (isGoogleAuthenticated) {
+      void syncImportToFirestore(updatedImport, false);
+    }
+
+    const voucherCode = generateSequentialVoucherCode(
+      'PC',
+      paymentVouchers.map((p) => p.voucherCode)
+    );
+    const linkedPaymentVoucher: CashPaymentVoucher = {
+      id: `pv_direct_${Date.now()}`,
+      voucherCode,
+      groupName: 'Chi trả nợ Nhà cung cấp',
+      warehouseName: existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+      partnerName: existing.supplierName,
+      partnerPhone: existing.supplierPhone || '',
+      amount: actualPaid,
+      paymentMethod: 'Chuyển khoản ngân hàng',
+      isDebtSettlement: true,
+      settledAllocations: [
+        {
+          recordId: existing.id,
+          code: existing.receiptCode,
+          date: (existing.createdAt || '').slice(0, 10),
+          dueDate: existing.dueDate || '',
+          productName: existing.productName,
+          previousDebt: existing.debtAmount,
+          allocatedAmount: actualPaid,
+          remainingDebt: updatedImport.debtAmount,
+        },
+      ],
+      totalPreviousDebt: existing.debtAmount,
+      totalRemainingDebt: updatedImport.debtAmount,
+      countsTowardOperatingExpense: false,
+      note:
+        cleanNote ||
+        `Thanh toán trực tiếp phiếu nhập ${existing.receiptCode} (${existing.supplierName})`,
+      staffName: currentStaff.displayName,
+      ownerId: existing.ownerId || activeUid,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setPaymentVouchers((prev) => [linkedPaymentVoucher, ...prev]);
+
+    recordAuditLog({
+      actionCategory: 'debt_payment',
+      targetEntity: 'debt',
+      targetCode: existing.receiptCode,
+      warehouseName: existing.warehouseName,
+      summary: `Thanh toán nợ NCC ${existing.supplierName} (${formatVND(
+        actualPaid
+      )}) cho phiếu ${existing.receiptCode} -> Lập phiếu ${voucherCode}`,
+      details: `Nợ NCC trước khi trả: ${formatVND(
+        existing.debtAmount
+      )} · Số tiền trả: ${formatVND(actualPaid)} · Nợ còn lại: ${formatVND(
+        updatedImport.debtAmount
+      )} · Ghi chú: ${cleanNote || 'Thanh toán nợ NCC'}`,
+      snapshotData: JSON.stringify(existing),
+    });
+    showToast(
+      `Đã thanh toán nợ NCC ${formatVND(actualPaid)} & tự động lưu Phiếu chi ${voucherCode}!`
+    );
   };
 
   // Automatic FIFO Debt Settlement for Customer (ordered by oldest debt date first)
@@ -2052,7 +2629,89 @@ export default function App() {
       showToast('Chỉ Quản lý mới có quyền sửa phiếu thu tiền đã lưu.');
       return;
     }
+    const existingVoucher = receiptVouchers.find((rv) => rv.id === id);
+    if (!existingVoucher) return;
     const nowIso = new Date().toISOString();
+    const roundedNewAmount = Math.max(0, Math.round(Number(changes.amount) || 0));
+
+    if (
+      existingVoucher.isDebtSettlement &&
+      existingVoucher.settledAllocations &&
+      existingVoucher.settledAllocations.length > 0 &&
+      roundedNewAmount !== existingVoucher.amount
+    ) {
+      const reversed = reverseCustomerReceiptVoucherAllocations(sales, existingVoucher, nowIso);
+      let nextSales = reversed.updatedSales;
+      let nextAllocations = existingVoucher.settledAllocations;
+      let nextAmount = 0;
+      let nextPrevDebt = 0;
+      let nextRemDebt = 0;
+
+      if (roundedNewAmount > 0) {
+        try {
+          const reFifo = applyCustomerFifoDebtSettlement(
+            reversed.updatedSales,
+            {
+              customerId: existingVoucher.partnerId,
+              customerName: changes.partnerName || existingVoucher.partnerName,
+              customerPhone: changes.partnerPhone || existingVoucher.partnerPhone,
+            },
+            roundedNewAmount,
+            changes.note || existingVoucher.note,
+            nowIso
+          );
+          nextSales = reFifo.updatedSales;
+          nextAllocations = reFifo.settledAllocations;
+          nextAmount = reFifo.totalAllocated;
+          nextPrevDebt = reFifo.totalPreviousDebt;
+          nextRemDebt = reFifo.totalRemainingDebt;
+        } catch {
+          nextAllocations = [];
+          nextAmount = 0;
+        }
+      } else {
+        nextAllocations = [];
+      }
+
+      setSales(nextSales);
+      if (isGoogleAuthenticated) {
+        const affectedIds = new Set([
+          ...reversed.reversedSaleIds,
+          ...nextAllocations.map((a) => a.recordId),
+        ]);
+        nextSales
+          .filter((s) => affectedIds.has(s.id))
+          .forEach((s) => void syncSaleToFirestore(s, false));
+      }
+      setCustomers((prev) => {
+        const reconciled = reconcileCustomersFromSales(prev, nextSales, nowIso);
+        if (isGoogleAuthenticated) {
+          reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+        }
+        return reconciled.customers;
+      });
+
+      setReceiptVouchers((prev) =>
+        prev.map((rv) =>
+          rv.id === id
+            ? {
+                ...rv,
+                ...changes,
+                amount: nextAmount,
+                settledAllocations: nextAllocations,
+                totalPreviousDebt: nextPrevDebt,
+                totalRemainingDebt: nextRemDebt,
+                updatedAt: nowIso,
+              }
+            : rv
+        )
+      );
+      showToast(
+        `Đã cập nhật phiếu thu ${changes.voucherCode} & đối soát lại ${nextAllocations.length} hóa đơn công nợ.`
+      );
+      return;
+    }
+
     setReceiptVouchers((prev) =>
       prev.map((rv) => (rv.id === id ? { ...rv, ...changes, updatedAt: nowIso } : rv))
     );
@@ -2062,19 +2721,45 @@ export default function App() {
   const handleDeleteReceiptVoucher = (id: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = receiptVouchers.find((rv) => rv.id === id);
+    const nowIso = new Date().toISOString();
     setReceiptVouchers((prev) => prev.filter((rv) => rv.id !== id));
     if (target) {
+      if (target.isDebtSettlement && target.settledAllocations?.length) {
+        const reversed = reverseCustomerReceiptVoucherAllocations(sales, target, nowIso);
+        if (reversed.reversedSaleIds.length > 0) {
+          setSales(reversed.updatedSales);
+          if (isGoogleAuthenticated) {
+            const idSet = new Set(reversed.reversedSaleIds);
+            reversed.updatedSales
+              .filter((s) => idSet.has(s.id))
+              .forEach((s) => void syncSaleToFirestore(s, false));
+          }
+          setCustomers((prev) => {
+            const reconciled = reconcileCustomersFromSales(prev, reversed.updatedSales, nowIso);
+            if (isGoogleAuthenticated) {
+              reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+            }
+            return reconciled.customers;
+          });
+        }
+      }
       recordAuditLog({
         actionCategory: 'delete',
         targetEntity: 'voucher',
         targetCode: target.voucherCode,
         warehouseName: target.warehouseName,
         summary: `Xóa phiếu thu tiền ${target.voucherCode} (+${formatVND(target.amount)})`,
-        details: `Nhóm phiếu thu: ${target.groupName} · Đối tác: ${target.partnerName}`,
+        details: `Nhóm phiếu thu: ${target.groupName} · Đối tác: ${target.partnerName}${
+          target.isDebtSettlement ? ' · Đã hoàn lại dư nợ trên hóa đơn liên kết' : ''
+        }`,
         snapshotData: JSON.stringify(target),
       });
     }
-    showToast('Đã xóa phiếu thu tiền khỏi nhật ký.');
+    showToast(
+      target?.isDebtSettlement
+        ? 'Đã xóa phiếu thu & tự động hoàn lại công nợ khách hàng trên các hóa đơn liên kết.'
+        : 'Đã xóa phiếu thu tiền khỏi nhật ký.'
+    );
   };
 
   // Payment Voucher CRUD Handlers
@@ -2162,7 +2847,81 @@ export default function App() {
       showToast('Chỉ Quản lý mới có quyền sửa phiếu chi tiền đã lưu.');
       return;
     }
+    const existingVoucher = paymentVouchers.find((pv) => pv.id === id);
+    if (!existingVoucher) return;
     const nowIso = new Date().toISOString();
+    const roundedNewAmount = Math.max(0, Math.round(Number(changes.amount) || 0));
+
+    if (
+      existingVoucher.isDebtSettlement &&
+      existingVoucher.settledAllocations &&
+      existingVoucher.settledAllocations.length > 0 &&
+      roundedNewAmount !== existingVoucher.amount
+    ) {
+      const reversed = reverseSupplierPaymentVoucherAllocations(imports, existingVoucher, nowIso);
+      let nextImports = reversed.updatedImports;
+      let nextAllocations = existingVoucher.settledAllocations;
+      let nextAmount = 0;
+      let nextPrevDebt = 0;
+      let nextRemDebt = 0;
+
+      if (roundedNewAmount > 0) {
+        try {
+          const reFifo = applySupplierFifoDebtSettlement(
+            reversed.updatedImports,
+            {
+              supplierName: changes.partnerName || existingVoucher.partnerName,
+              supplierPhone: changes.partnerPhone || existingVoucher.partnerPhone,
+            },
+            roundedNewAmount,
+            changes.note || existingVoucher.note,
+            nowIso
+          );
+          nextImports = reFifo.updatedImports;
+          nextAllocations = reFifo.settledAllocations;
+          nextAmount = reFifo.totalAllocated;
+          nextPrevDebt = reFifo.totalPreviousDebt;
+          nextRemDebt = reFifo.totalRemainingDebt;
+        } catch {
+          nextAllocations = [];
+          nextAmount = 0;
+        }
+      } else {
+        nextAllocations = [];
+      }
+
+      setImports(nextImports);
+      if (isGoogleAuthenticated) {
+        const affectedIds = new Set([
+          ...reversed.reversedImportIds,
+          ...nextAllocations.map((a) => a.recordId),
+        ]);
+        nextImports
+          .filter((imp) => affectedIds.has(imp.id))
+          .forEach((imp) => void syncImportToFirestore(imp, false));
+      }
+
+      setPaymentVouchers((prev) =>
+        prev.map((pv) =>
+          pv.id === id
+            ? {
+                ...pv,
+                ...changes,
+                amount: nextAmount,
+                settledAllocations: nextAllocations,
+                totalPreviousDebt: nextPrevDebt,
+                totalRemainingDebt: nextRemDebt,
+                updatedAt: nowIso,
+              }
+            : pv
+        )
+      );
+      showToast(
+        `Đã cập nhật phiếu chi ${changes.voucherCode} & đối soát lại ${nextAllocations.length} phiếu nhập NCC.`
+      );
+      return;
+    }
+
     setPaymentVouchers((prev) =>
       prev.map((pv) => (pv.id === id ? { ...pv, ...changes, updatedAt: nowIso } : pv))
     );
@@ -2172,19 +2931,38 @@ export default function App() {
   const handleDeletePaymentVoucher = (id: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = paymentVouchers.find((pv) => pv.id === id);
+    const nowIso = new Date().toISOString();
     setPaymentVouchers((prev) => prev.filter((pv) => pv.id !== id));
     if (target) {
+      if (target.isDebtSettlement && target.settledAllocations?.length) {
+        const reversed = reverseSupplierPaymentVoucherAllocations(imports, target, nowIso);
+        if (reversed.reversedImportIds.length > 0) {
+          setImports(reversed.updatedImports);
+          if (isGoogleAuthenticated) {
+            const idSet = new Set(reversed.reversedImportIds);
+            reversed.updatedImports
+              .filter((imp) => idSet.has(imp.id))
+              .forEach((imp) => void syncImportToFirestore(imp, false));
+          }
+        }
+      }
       recordAuditLog({
         actionCategory: 'delete',
         targetEntity: 'voucher',
         targetCode: target.voucherCode,
         warehouseName: target.warehouseName,
         summary: `Xóa phiếu chi tiền ${target.voucherCode} (-${formatVND(target.amount)})`,
-        details: `Nhóm phiếu chi: ${target.groupName} · Đối tác: ${target.partnerName}`,
+        details: `Nhóm phiếu chi: ${target.groupName} · Đối tác: ${target.partnerName}${
+          target.isDebtSettlement ? ' · Đã hoàn lại dư nợ NCC trên các phiếu nhập liên kết' : ''
+        }`,
         snapshotData: JSON.stringify(target),
       });
     }
-    showToast('Đã xóa phiếu chi tiền khỏi nhật ký.');
+    showToast(
+      target?.isDebtSettlement
+        ? 'Đã xóa phiếu chi & tự động hoàn lại công nợ NCC trên các phiếu nhập liên kết.'
+        : 'Đã xóa phiếu chi tiền khỏi nhật ký.'
+    );
   };
 
   // Excel Direct Import Handlers across all 5 modules
@@ -2284,23 +3062,44 @@ export default function App() {
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedSales: SaleTransaction[] = [];
+    const prodDeltaById = new Map<string, number>();
+
     rows.forEach((r, idx) => {
       const custName = String(r['Tên Khách Hàng'] || '').trim();
       const prodName = String(r['Tên Vật Tư Nông Nghiệp'] || r['Sản Phẩm'] || '').trim();
       const qty = Math.max(1, Number(r['Số Lượng Bán'] || r['Số Lượng'] || 1));
       const price = Math.max(0, Number(r['Đơn Giá Bán (VNĐ)'] || r['Đơn Giá (đ)'] || 0));
       if (!custName || !prodName) return;
+      const wh =
+        lockedWarehouse ||
+        String(r['Kho Xuất Bán'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim();
+      const custPhone = String(r['Số Điện Thoại KH'] || r['Số Điện Thoại'] || '').trim();
+      const matchedCust = customers.find(
+        (c) =>
+          (!c.warehouseName || !wh || c.warehouseName === wh) &&
+          ((custPhone && c.phone && c.phone.trim() === custPhone) ||
+            normalizeVietnameseSearch(c.name) === normalizeVietnameseSearch(custName))
+      );
+      const matchedProd = products.find(
+        (p) =>
+          (!p.warehouseName || !wh || p.warehouseName === wh) &&
+          normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
+      );
+      if (matchedProd) {
+        prodDeltaById.set(matchedProd.id, (prodDeltaById.get(matchedProd.id) || 0) - qty);
+      }
+
       const paid = Math.max(0, Number(r['Khách Đã Trả (VNĐ)'] || r['Đã Thu (đ)'] || qty * price));
       const sum = calculateSaleSummary(qty, price, paid);
       addedSales.push({
         id: `sale_xl_${Date.now()}_${idx}`,
         invoiceCode: `HD-XL-${sales.length + idx + 1}`,
-        customerId: `cust_xl_${idx}`,
-        customerName: custName,
-        customerPhone: String(r['Số Điện Thoại KH'] || r['Số Điện Thoại'] || '').trim(),
-        productId: `prod_xl_${idx}`,
-        productName: prodName,
-        unit: String(r['Đơn Vị'] || 'Bao').trim(),
+        customerId: matchedCust?.id || `cust_xl_${idx}`,
+        customerName: matchedCust?.name || custName,
+        customerPhone: matchedCust?.phone || custPhone,
+        productId: matchedProd?.id || `prod_xl_${idx}`,
+        productName: matchedProd?.name || prodName,
+        unit: matchedProd?.unit || String(r['Đơn Vị'] || 'Bao').trim(),
         quantity: qty,
         unitPrice: price,
         totalAmount: sum.totalAmount,
@@ -2309,9 +3108,7 @@ export default function App() {
         dueDate: String(r['Hạn Thanh Toán Nợ (YYYY-MM-DD)'] || defaultDueDate).trim(),
         status: sum.status,
         note: String(r['Ghi Chú Đơn Hàng'] || 'Nhập từ Excel').trim(),
-        warehouseName:
-          lockedWarehouse ||
-          String(r['Kho Xuất Bán'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim(),
+        warehouseName: wh,
         staffName: currentStaff.displayName,
         ownerId: activeUid,
         createdAt: nowIso,
@@ -2319,7 +3116,19 @@ export default function App() {
       });
     });
     if (addedSales.length > 0) {
-      setSales((prev) => [...addedSales, ...prev]);
+      const nextSales = [...addedSales, ...sales];
+      setSales(nextSales);
+      if (prodDeltaById.size > 0) {
+        setProducts((prev) =>
+          prev.map((p) => {
+            const delta = prodDeltaById.get(p.id);
+            return delta
+              ? { ...p, stock: Math.max(0, p.stock + delta), updatedAt: nowIso }
+              : p;
+          })
+        );
+      }
+      setCustomers((prev) => reconcileCustomersFromSales(prev, nextSales, nowIso).customers);
       showToast(`Đã tải lên ${addedSales.length} hóa đơn bán hàng từ tệp Excel!`);
     }
     return addedSales.length;
@@ -2330,12 +3139,30 @@ export default function App() {
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedImports: ImportTransaction[] = [];
+    const prodDeltaById = new Map<string, { qty: number; unitCost: number }>();
+
     rows.forEach((r, idx) => {
       const prodName = String(r['Tên Vật Tư Nhập Kho'] || r['Sản Phẩm'] || '').trim();
       const supName = String(r['Nhà Cung Cấp'] || '').trim();
       const qty = Math.max(1, Number(r['Số Lượng Nhập'] || 1));
       const cost = Math.max(0, Number(r['Đơn Giá Nhập (VNĐ)'] || r['Giá Nhập (đ)'] || 0));
       if (!prodName || !supName) return;
+      const wh =
+        lockedWarehouse ||
+        String(r['Kho Nhập Hàng'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim();
+      const matchedProd = products.find(
+        (p) =>
+          (!p.warehouseName || !wh || p.warehouseName === wh) &&
+          normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
+      );
+      if (matchedProd) {
+        const prevD = prodDeltaById.get(matchedProd.id) || { qty: 0, unitCost: cost };
+        prodDeltaById.set(matchedProd.id, {
+          qty: prevD.qty + qty,
+          unitCost: cost > 0 ? cost : prevD.unitCost,
+        });
+      }
+
       const paid = Math.max(
         0,
         Number(r['Đã Thanh Toán NCC (VNĐ)'] || r['Đã Trả NCC (đ)'] || qty * cost)
@@ -2346,9 +3173,9 @@ export default function App() {
         receiptCode: `PN-XL-${imports.length + idx + 1}`,
         supplierName: supName,
         supplierPhone: String(r['SĐT Nhà Cung Cấp'] || r['SĐT NCC'] || '').trim(),
-        productId: `prod_xl_${idx}`,
-        productName: prodName,
-        unit: String(r['Đơn Vị Tính'] || r['Đơn Vị'] || 'Bao').trim(),
+        productId: matchedProd?.id || `prod_xl_${idx}`,
+        productName: matchedProd?.name || prodName,
+        unit: matchedProd?.unit || String(r['Đơn Vị Tính'] || r['Đơn Vị'] || 'Bao').trim(),
         quantity: qty,
         unitCost: cost,
         totalCost: sum.totalCost,
@@ -2357,9 +3184,7 @@ export default function App() {
         dueDate: String(r['Hạn Trả Nợ NCC (YYYY-MM-DD)'] || defaultDueDate).trim(),
         status: sum.status,
         note: String(r['Ghi Chú Lô Nhập'] || 'Nhập từ Excel').trim(),
-        warehouseName:
-          lockedWarehouse ||
-          String(r['Kho Nhập Hàng'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim(),
+        warehouseName: wh,
         staffName: currentStaff.displayName,
         ownerId: activeUid,
         createdAt: nowIso,
@@ -2368,6 +3193,21 @@ export default function App() {
     });
     if (addedImports.length > 0) {
       setImports((prev) => [...addedImports, ...prev]);
+      if (prodDeltaById.size > 0) {
+        setProducts((prev) =>
+          prev.map((p) => {
+            const delta = prodDeltaById.get(p.id);
+            return delta
+              ? {
+                  ...p,
+                  stock: p.stock + delta.qty,
+                  importPrice: delta.unitCost > 0 ? delta.unitCost : p.importPrice,
+                  updatedAt: nowIso,
+                }
+              : p;
+          })
+        );
+      }
       showToast(`Đã tải lên ${addedImports.length} phiếu nhập kho từ tệp Excel!`);
     }
     return addedImports.length;
@@ -2376,6 +3216,11 @@ export default function App() {
   const handleImportDebtPaymentsFromExcel = (rows: Record<string, unknown>[]): number => {
     let updatedCount = 0;
     const nowIso = new Date().toISOString();
+    let workingSales = [...sales];
+    let workingImports = [...imports];
+    let salesChanged = false;
+    let importsChanged = false;
+
     rows.forEach((r) => {
       const code = String(r['Mã Hóa Đơn / Mã Phiếu Nhập'] || '').trim();
       const amount = Math.max(0, Number(r['Số Tiền Thanh Toán Đợt Này (VNĐ)'] || 0));
@@ -2383,25 +3228,39 @@ export default function App() {
       if (!code || amount <= 0) return;
 
       if (code.startsWith('HD-')) {
-        setSales((prev) =>
-          prev.map((s) =>
-            s.invoiceCode === code
-              ? applyDebtPayment({ ...s, note: note || s.note }, amount, nowIso)
-              : s
-          )
-        );
-        updatedCount += 1;
+        workingSales = workingSales.map((s) => {
+          if (s.invoiceCode !== code || s.debtAmount <= 0) return s;
+          salesChanged = true;
+          updatedCount += 1;
+          const noteSuffix = `[Thu nợ Excel: +${Math.min(s.debtAmount, Math.round(amount)).toLocaleString('vi-VN')}đ${note ? ' - ' + note : ''}]`;
+          return applyDebtPayment(
+            { ...s, note: s.note ? `${s.note} | ${noteSuffix}` : noteSuffix },
+            amount,
+            nowIso
+          );
+        });
       } else if (code.startsWith('PN-')) {
-        setImports((prev) =>
-          prev.map((i) =>
-            i.receiptCode === code
-              ? applyDebtPayment({ ...i, note: note || i.note }, amount, nowIso)
-              : i
-          )
-        );
-        updatedCount += 1;
+        workingImports = workingImports.map((i) => {
+          if (i.receiptCode !== code || i.debtAmount <= 0) return i;
+          importsChanged = true;
+          updatedCount += 1;
+          const noteSuffix = `[Trả nợ Excel: -${Math.min(i.debtAmount, Math.round(amount)).toLocaleString('vi-VN')}đ${note ? ' - ' + note : ''}]`;
+          return applyDebtPayment(
+            { ...i, note: i.note ? `${i.note} | ${noteSuffix}` : noteSuffix },
+            amount,
+            nowIso
+          );
+        });
       }
     });
+
+    if (salesChanged) {
+      setSales(workingSales);
+      setCustomers((prev) => reconcileCustomersFromSales(prev, workingSales, nowIso).customers);
+    }
+    if (importsChanged) {
+      setImports(workingImports);
+    }
     if (updatedCount > 0) {
       showToast(`Đã cập nhật thanh toán cho ${updatedCount} chứng từ công nợ từ Excel!`);
     }
@@ -2659,6 +3518,9 @@ export default function App() {
       };
 
       setStaffList((prev) => [...prev, created]);
+    if (isGoogleAuthenticated) {
+      void upsertRealtimeUserDirectoryProfile(created);
+    }
       setCurrentStaffId(created.uid);
       setRole(created.role);
       setCurrentUserEmail(created.email);
@@ -2813,23 +3675,27 @@ export default function App() {
       ? await hashPassword(payload.newPassword, target.uid)
       : target.password;
 
+    const updatedProfileTarget: StaffMember = {
+      ...target,
+      displayName: payload.displayName || target.displayName,
+      phone: payload.phone || target.phone,
+      email: payload.email || target.email,
+      password: nextPasswordHash,
+      assignedWarehouse: nextWarehouse,
+      updatedAt: nowIso,
+    };
     setStaffList((prev) =>
       prev.map((s) =>
         s.uid === payload.uid
-          ? {
-              ...s,
-              displayName: payload.displayName || s.displayName,
-              phone: payload.phone || s.phone,
-              email: payload.email || s.email,
-              password: nextPasswordHash,
-              assignedWarehouse: nextWarehouse,
-              updatedAt: nowIso,
-            }
+          ? updatedProfileTarget
           : isSingleWhAccount && nextWarehouse !== oldWarehouse && s.assignedWarehouse === oldWarehouse
           ? { ...s, assignedWarehouse: nextWarehouse, updatedAt: nowIso }
           : s
       )
     );
+    if (isGoogleAuthenticated) {
+      void upsertRealtimeUserDirectoryProfile(updatedProfileTarget);
+    }
     recordAuditLog({
       actionCategory: 'update',
       targetEntity: 'staff',
@@ -2933,6 +3799,9 @@ export default function App() {
       updatedAt: nowIso,
     };
     setStaffList((prev) => [...prev, created]);
+    if (isGoogleAuthenticated) {
+      void upsertRealtimeUserDirectoryProfile(created);
+    }
     recordAuditLog({
       actionCategory: 'permission',
       targetEntity: 'staff',
@@ -2970,6 +3839,13 @@ export default function App() {
       )
     );
     if (target) {
+      if (isGoogleAuthenticated) {
+        void upsertRealtimeUserDirectoryProfile({
+          ...target,
+          assignedWarehouse: warehouseName,
+          updatedAt: nowIso,
+        });
+      }
       recordAuditLog({
         actionCategory: 'permission',
         targetEntity: 'staff',
@@ -3021,6 +3897,16 @@ export default function App() {
       setRole(resolvedRole);
     }
     if (target) {
+      if (isGoogleAuthenticated) {
+        void upsertRealtimeUserDirectoryProfile({
+          ...target,
+          role: resolvedRole,
+          positionRole,
+          permissions,
+          assignedWarehouse,
+          updatedAt: nowIso,
+        });
+      }
       recordAuditLog({
         actionCategory: 'permission',
         targetEntity: 'staff',
@@ -3055,6 +3941,13 @@ export default function App() {
       prev.map((s) => (s.uid === uid ? { ...s, active: !s.active } : s))
     );
     if (target) {
+      if (isGoogleAuthenticated) {
+        void upsertRealtimeUserDirectoryProfile({
+          ...target,
+          active: !target.active,
+          updatedAt: new Date().toISOString(),
+        });
+      }
       recordAuditLog({
         actionCategory: 'permission',
         targetEntity: 'staff',
@@ -3301,19 +4194,42 @@ export default function App() {
       return;
     }
     try {
+      const nowIso = new Date().toISOString();
       const parsed = JSON.parse(audit.snapshotData);
       if (audit.targetEntity === 'sale') {
         const restoredSale = parsed as SaleTransaction;
-        setSales((prev) => {
-          const filtered = prev.filter((s) => s.id !== restoredSale.id);
-          return [restoredSale, ...filtered];
-        });
+        const existingSale = sales.find((s) => s.id === restoredSale.id);
+        const nextSales = [restoredSale, ...sales.filter((s) => s.id !== restoredSale.id)];
+        setSales(nextSales);
+        const deltas = computeSaleEditStockDeltas(
+          existingSale || { productId: restoredSale.productId, quantity: 0, giftQuantity: 0 },
+          restoredSale
+        );
+        if (Object.keys(deltas).length > 0) {
+          setProducts((prev) =>
+            prev.map((p) => {
+              const delta = deltas[p.id];
+              return delta
+                ? { ...p, stock: Math.max(0, p.stock + delta), updatedAt: nowIso }
+                : p;
+            })
+          );
+        }
+        setCustomers((prev) => reconcileCustomersFromSales(prev, nextSales, nowIso).customers);
       } else if (audit.targetEntity === 'import') {
         const restoredImp = parsed as ImportTransaction;
-        setImports((prev) => {
-          const filtered = prev.filter((i) => i.id !== restoredImp.id);
-          return [restoredImp, ...filtered];
-        });
+        const existingImp = imports.find((i) => i.id === restoredImp.id);
+        setImports((prev) => [restoredImp, ...prev.filter((i) => i.id !== restoredImp.id)]);
+        const qtyDelta = restoredImp.quantity - (existingImp?.quantity || 0);
+        if (qtyDelta !== 0) {
+          setProducts((prev) =>
+            prev.map((p) =>
+              p.id === restoredImp.productId
+                ? { ...p, stock: Math.max(0, p.stock + qtyDelta), updatedAt: nowIso }
+                : p
+            )
+          );
+        }
       } else if (audit.targetEntity === 'product') {
         const restoredProd = parsed as ProductItem;
         setProducts((prev) => {
@@ -3327,11 +4243,26 @@ export default function App() {
           return [restoredCust, ...filtered];
         });
       } else if (audit.targetEntity === 'voucher') {
-        const restoredVc = parsed as SavedVoucherRecord;
-        setSavedVouchers((prev) => {
-          const filtered = prev.filter((v) => v.id !== restoredVc.id);
-          return [restoredVc, ...filtered];
-        });
+        const rec = parsed as Record<string, unknown>;
+        if (typeof rec.voucherType === 'string') {
+          const restoredVc = parsed as SavedVoucherRecord;
+          setSavedVouchers((prev) => [restoredVc, ...prev.filter((v) => v.id !== restoredVc.id)]);
+        } else if (
+          String(rec.id || '').startsWith('rv_') ||
+          String(rec.voucherCode || '').startsWith('PT')
+        ) {
+          const restoredRv = parsed as CashReceiptVoucher;
+          setReceiptVouchers((prev) => [restoredRv, ...prev.filter((r) => r.id !== restoredRv.id)]);
+        } else if (
+          String(rec.id || '').startsWith('pv_') ||
+          String(rec.voucherCode || '').startsWith('PC')
+        ) {
+          const restoredPv = parsed as CashPaymentVoucher;
+          setPaymentVouchers((prev) => [restoredPv, ...prev.filter((p) => p.id !== restoredPv.id)]);
+        } else {
+          const restoredVc = parsed as SavedVoucherRecord;
+          setSavedVouchers((prev) => [restoredVc, ...prev.filter((v) => v.id !== restoredVc.id)]);
+        }
       }
 
       const restoredAtStamp = new Date().toISOString().slice(0, 16).replace('T', ' ');
@@ -3916,6 +4847,37 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+              {/* Live Firebase Realtime Database Connection Pill */}
+              {isGoogleAuthenticated && (
+                <span
+                  title="Trạng thái đồng bộ dữ liệu thời gian thực Firebase Realtime Database (gapgold-e6b62-default-rtdb)"
+                  className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border whitespace-nowrap ${
+                    rtdbSyncState === 'live'
+                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      : rtdbSyncState === 'connecting'
+                      ? 'bg-amber-50 text-amber-800 border-amber-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      rtdbSyncState === 'live'
+                        ? 'bg-emerald-500'
+                        : rtdbSyncState === 'connecting'
+                        ? 'bg-amber-500'
+                        : 'bg-slate-400'
+                    }`}
+                  />
+                  <span>
+                    {rtdbSyncState === 'live'
+                      ? 'Realtime DB'
+                      : rtdbSyncState === 'connecting'
+                      ? 'Đang kết nối...'
+                      : 'Ngoại tuyến'}
+                  </span>
+                </span>
+              )}
+
               {/* Desktop Multi-Warehouse Selector for Primary Manager & Deputy General Manager */}
               <div className="hidden md:block">
                 <MultiWarehouseFilterPopover
@@ -4730,6 +5692,18 @@ export default function App() {
               onUpdateStaffProfile={handleUpdateStaffProfile}
               isSessionLoggedIn={isSessionLoggedIn}
               onLogout={handleLogoutApp}
+              rtdbSyncState={rtdbSyncState}
+              adminWorkspaceSummaries={adminWorkspaceSummaries}
+              onInspectWarehouse={(whName) => {
+                if (whName === 'Tất cả kho' || !whName || whName === 'Chưa phân kho') {
+                  setSelectedFilterWarehouses([]);
+                } else {
+                  setSelectedFilterWarehouses([whName]);
+                }
+                setActiveTab('dashboard');
+                scrollToTopOfPage();
+                showToast(`Đang xem dữ liệu thời gian thực của: ${whName}`);
+              }}
             />
           )}
 

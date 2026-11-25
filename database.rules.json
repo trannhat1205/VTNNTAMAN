@@ -1,0 +1,20 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "workspaces": {
+      ".read": "auth != null && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+      "$ownerUid": {
+        ".read": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+        ".write": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))"
+      }
+    },
+    "users_directory": {
+      ".read": "auth != null && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+      "$uid": {
+        ".read": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+        ".write": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))"
+      }
+    }
+  }
+}

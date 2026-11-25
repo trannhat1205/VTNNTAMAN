@@ -28,6 +28,13 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  getDatabase,
+  off,
+  onValue,
+  ref as rtdbRef,
+  set as rtdbSet,
+} from 'firebase/database';
+import {
   deleteObject,
   getDownloadURL,
   getStorage,
@@ -43,6 +50,7 @@ import {
   NotificationPrefs,
   ProductItem,
   SaleTransaction,
+  StaffMember,
   UserRole,
 } from '../types';
 import { ADMIN_BACKUP_EMAIL, PRIMARY_ADMIN_UID } from '../data/seedData';
@@ -68,9 +76,17 @@ import {
   classifyChatAttachmentKind,
   sanitizeChatStorageFileName,
 } from '../utils/internalChatLogic';
+import {
+  normalizeWorkspaceFromRtdb,
+  RtdbUserDirectoryProfile,
+  RtdbWorkspacePayload,
+  sanitizeForRealtimeDb,
+  toRtdbUserDirectoryProfile,
+} from '../utils/rtdbSyncLogic';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const rtdb = getDatabase(app, firebaseConfig.databaseURL);
 export const auth = getAuth(app);
 export const storage = getStorage(
   app,
@@ -1875,3 +1891,217 @@ export async function downloadChatAttachmentToDevice(
     }
   }
 }
+
+// ============================================================================
+// FIREBASE REALTIME DATABASE SYNC (gapgold-e6b62-default-rtdb)
+// ============================================================================
+
+export function subscribeToRtdbConnectionState(
+  onConnectedChange: (connected: boolean) => void
+): () => void {
+  const connRef = rtdbRef(rtdb, '.info/connected');
+  const unsub = onValue(
+    connRef,
+    (snap) => {
+      onConnectedChange(Boolean(snap.val()));
+    },
+    () => {
+      onConnectedChange(false);
+    }
+  );
+  return () => {
+    off(connRef, 'value', unsub);
+  };
+}
+
+export async function writeRealtimeWorkspace(
+  ownerUid: string,
+  payload: RtdbWorkspacePayload
+): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user || !ownerUid) return false;
+  const safeUid = sanitizeFirestoreId(ownerUid);
+  if (user.uid !== safeUid && !isCurrentUserAdmin(user)) {
+    return false;
+  }
+
+  try {
+    const cleanPayload = sanitizeForRealtimeDb({
+      ...payload,
+      auditLogs: (payload.auditLogs || []).slice(0, 500),
+      backups: (payload.backups || []).map((b) => ({ ...b, snapshotPayload: undefined })),
+    });
+    await rtdbSet(rtdbRef(rtdb, `workspaces/${safeUid}`), cleanPayload);
+    return true;
+  } catch (err) {
+    console.warn('writeRealtimeWorkspace warning:', err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+export function subscribeToRealtimeWorkspace(
+  ownerUid: string,
+  onSnapshotData: (workspace: RtdbWorkspacePayload | null) => void,
+  onError?: (err: Error) => void
+): () => void {
+  const safeUid = sanitizeFirestoreId(ownerUid);
+  if (!auth.currentUser || !safeUid) {
+    return () => {};
+  }
+  const wsRef = rtdbRef(rtdb, `workspaces/${safeUid}`);
+  const unsub = onValue(
+    wsRef,
+    (snap) => {
+      if (!snap.exists()) {
+        onSnapshotData(null);
+        return;
+      }
+      onSnapshotData(normalizeWorkspaceFromRtdb(snap.val(), safeUid));
+    },
+    (err) => {
+      console.warn('subscribeToRealtimeWorkspace warning:', err.message);
+      onError?.(err);
+    }
+  );
+  return () => {
+    off(wsRef, 'value', unsub);
+  };
+}
+
+export function subscribeToAllRealtimeWorkspacesForAdmin(
+  onWorkspacesMap: (workspacesMap: Record<string, unknown>) => void,
+  onError?: (err: Error) => void
+): () => void {
+  const user = auth.currentUser;
+  if (!user || !isCurrentUserAdmin(user)) {
+    return () => {};
+  }
+  const allRef = rtdbRef(rtdb, 'workspaces');
+  const unsub = onValue(
+    allRef,
+    (snap) => {
+      const val = snap.val();
+      if (!val || typeof val !== 'object') {
+        onWorkspacesMap({});
+        return;
+      }
+      onWorkspacesMap(val as Record<string, unknown>);
+    },
+    (err) => {
+      console.warn('subscribeToAllRealtimeWorkspacesForAdmin warning:', err.message);
+      onError?.(err);
+    }
+  );
+  return () => {
+    off(allRef, 'value', unsub);
+  };
+}
+
+export async function upsertRealtimeUserDirectoryProfile(staff: StaffMember): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user || !staff.uid) return false;
+  const safeUid = sanitizeFirestoreId(staff.uid);
+  if (user.uid !== safeUid && !isCurrentUserAdmin(user)) {
+    return false;
+  }
+  try {
+    const cleanProfile = toRtdbUserDirectoryProfile({
+      ...staff,
+      uid: safeUid,
+    });
+    await rtdbSet(rtdbRef(rtdb, `users_directory/${safeUid}`), cleanProfile);
+    return true;
+  } catch (err) {
+    console.warn('upsertRealtimeUserDirectoryProfile warning:', err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+export function subscribeToRealtimeUsersDirectory(
+  targetUid: string,
+  isAdmin: boolean,
+  onUsers: (usersMap: Record<string, RtdbUserDirectoryProfile>) => void
+): () => void {
+  const user = auth.currentUser;
+  if (!user) return () => {};
+  if (isAdmin && isCurrentUserAdmin(user)) {
+    const dirRef = rtdbRef(rtdb, 'users_directory');
+    const unsub = onValue(
+      dirRef,
+      (snap) => {
+        const val = snap.val();
+        onUsers(val && typeof val === 'object' ? (val as Record<string, RtdbUserDirectoryProfile>) : {});
+      },
+      (err) => {
+        console.warn('subscribeToRealtimeUsersDirectory(admin) warning:', err.message);
+      }
+    );
+    return () => {
+      off(dirRef, 'value', unsub);
+    };
+  }
+
+  const safeUid = sanitizeFirestoreId(targetUid || user.uid);
+  const singleRef = rtdbRef(rtdb, `users_directory/${safeUid}`);
+  const unsub = onValue(
+    singleRef,
+    (snap) => {
+      const val = snap.val();
+      if (!val || typeof val !== 'object') {
+        onUsers({});
+        return;
+      }
+      onUsers({ [safeUid]: val as RtdbUserDirectoryProfile });
+    },
+    (err) => {
+      console.warn('subscribeToRealtimeUsersDirectory(user) warning:', err.message);
+    }
+  );
+  return () => {
+    off(singleRef, 'value', unsub);
+  };
+}
+
+export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
+  localStaffList: StaffMember[]
+): Promise<void> {
+  const user = auth.currentUser;
+  if (!user || !isCurrentUserAdmin(user)) return;
+
+  try {
+    const staffSnap = await getDocs(collection(db, 'staff'));
+    const byUid = new Map<string, StaffMember>();
+    for (const st of localStaffList) {
+      if (st.uid) byUid.set(st.uid, st);
+    }
+    for (const sDoc of staffSnap.docs) {
+      const uid = sDoc.id;
+      const d = sDoc.data();
+      const existing = byUid.get(uid);
+      if (!existing) {
+        const isPrimary = uid === PRIMARY_ADMIN_UID;
+        byUid.set(uid, {
+          uid,
+          username: String(d.username || `user_${uid.slice(0, 6)}`),
+          password: '',
+          displayName: String(d.displayName || 'Thành viên VTNN Tâm An'),
+          phone: String(d.phone || ''),
+          email: String(d.email || ''),
+          role: d.role === 'manager' ? 'manager' : 'staff',
+          positionRole: isPrimary ? 'primary_manager' : d.role === 'manager' ? 'warehouse_manager' : 'sales_warehouse_staff',
+          assignedWarehouse: isPrimary ? 'Tất cả kho' : String(d.assignedWarehouse || 'Kho VTNN Tâm An'),
+          active: d.active !== false,
+          createdAt: normalizeTimestamp(d.createdAt),
+          updatedAt: normalizeTimestamp(d.updatedAt),
+        });
+      }
+    }
+
+    await Promise.all(
+      Array.from(byUid.values()).map((st) => upsertRealtimeUserDirectoryProfile(st))
+    );
+  } catch (err) {
+    console.warn('seedExistingStaffToRealtimeDirectoryIfAdmin warning:', err instanceof Error ? err.message : err);
+  }
+}
+

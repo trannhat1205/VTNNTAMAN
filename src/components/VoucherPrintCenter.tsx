@@ -106,6 +106,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   const [unit, setUnit] = useState<string>('');
   const [quantity, setQuantity] = useState<string>('');
   const [unitPrice, setUnitPrice] = useState<string>('');
+  const [discountAmount, setDiscountAmount] = useState<string>('0');
   const [paidOrCollected, setPaidOrCollected] = useState<string>('');
   const [previousDebt, setPreviousDebt] = useState<string>('');
   const [dueDate, setDueDate] = useState<string>('');
@@ -149,6 +150,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
     setUnit('');
     setQuantity('');
     setUnitPrice('');
+    setDiscountAmount('0');
     setPaidOrCollected('');
     setPreviousDebt('');
     setDueDate('');
@@ -208,6 +210,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         setUnit(sale.unit);
         setQuantity(String(sale.quantity));
         setUnitPrice(String(sale.unitPrice));
+        setDiscountAmount(String(sale.discountAmount || 0));
         setPaidOrCollected(String(sale.paidAmount));
         setDueDate(sale.dueDate);
         setNote(sale.note);
@@ -256,7 +259,9 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
 
   const qtyNum = Math.max(0, Number(quantity) || 0);
   const priceNum = Math.max(0, Number(unitPrice) || 0);
-  const computedTotal = Math.round(qtyNum * priceNum);
+  const discountNum =
+    activeVoucher === 'sale_invoice' ? Math.max(0, Math.round(Number(discountAmount) || 0)) : 0;
+  const computedTotal = Math.max(0, Math.round(qtyNum * priceNum) - discountNum);
   const paidNum = Math.max(0, Number(paidOrCollected) || 0);
   const prevDebtNum = Math.max(0, Number(previousDebt) || 0);
   const remainingDebt =

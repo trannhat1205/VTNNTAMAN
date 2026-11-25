@@ -38,6 +38,7 @@ import {
   canAccountCreateStaff,
   extractCustomWarehouseSuffix,
   formatDefaultWarehouseNameFromGmail,
+  formatVND,
   getDefaultPermissionsForPosition,
   getPositionRoleLabel,
   hasCompletedStaffPersonalGmail,
@@ -45,6 +46,7 @@ import {
   normalizeCustomTamAnWarehouseName,
   SearchableOptionItem,
 } from '../utils/businessLogic';
+import { AdminWarehouseAccountSummary } from '../utils/rtdbSyncLogic';
 
 export interface GmailRecoveryLog {
   id: string;
@@ -740,6 +742,9 @@ interface StaffAccountManagerProps {
   }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   isSessionLoggedIn?: boolean;
   onLogout?: () => void;
+  rtdbSyncState?: 'connecting' | 'live' | 'offline';
+  adminWorkspaceSummaries?: AdminWarehouseAccountSummary[];
+  onInspectWarehouse?: (warehouseName: string) => void;
 }
 
 export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
@@ -755,6 +760,9 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   onToggleStaffActive,
   onUpdateStaffProfile,
   onLogout,
+  rtdbSyncState = 'connecting',
+  adminWorkspaceSummaries = [],
+  onInspectWarehouse,
 }) => {
   // Personal Profile & Gmail Supplementation State ("Chỉnh sửa thông tin cá nhân — Bổ sung Gmail nhân viên")
   const [personalTargetUid, setPersonalTargetUid] = useState<string>(currentStaff.uid);
@@ -1254,6 +1262,124 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   </div>
                 );
               })}
+            </div>
+
+            {/* Real-Time Firebase RTDB Cross-Warehouse & User Monitoring Table (Primary Admin Exclusive) */}
+            <div className="mt-4 pt-4 border-t border-emerald-200/80 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h4 className="text-xs sm:text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <span
+                      className={`inline-block w-2.5 h-2.5 rounded-full ${
+                        rtdbSyncState === 'live'
+                          ? 'bg-emerald-500'
+                          : rtdbSyncState === 'connecting'
+                          ? 'bg-amber-500'
+                          : 'bg-slate-400'
+                      }`}
+                    />
+                    <span>
+                      Giám sát Dữ liệu Thời gian thực Tất cả Tài khoản Kho &amp; Người dùng (Realtime DB)
+                    </span>
+                  </h4>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Mọi đơn bán, phiếu nhập, phiếu thu/chi, tồn kho và hồ sơ người dùng từ từng tài khoản kho được đồng bộ trực tiếp về gapgold-e6b62-default-rtdb.
+                  </p>
+                </div>
+                <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-900 border border-emerald-200">
+                  {rtdbSyncState === 'live'
+                    ? 'Đang kết nối Realtime DB'
+                    : rtdbSyncState === 'connecting'
+                    ? 'Đang đồng bộ Realtime DB...'
+                    : 'Chế độ ngoại tuyến'}
+                </span>
+              </div>
+
+              <div className="overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full text-left border-collapse text-xs min-w-[820px]">
+                  <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                    <tr>
+                      <th className="py-2.5 px-3">Tài khoản &amp; Người dùng</th>
+                      <th className="py-2.5 px-3">Kho phụ trách</th>
+                      <th className="py-2.5 px-3 text-right">Vật tư / KH</th>
+                      <th className="py-2.5 px-3 text-right">Đơn bán &amp; Doanh thu</th>
+                      <th className="py-2.5 px-3 text-right">Nợ KH / Nợ NCC</th>
+                      <th className="py-2.5 px-3 text-right">Thu / Chi / In</th>
+                      <th className="py-2.5 px-3 text-right">Đồng bộ cuối</th>
+                      <th className="py-2.5 px-3 text-center">Kiểm tra</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 bg-white">
+                    {adminWorkspaceSummaries.length === 0 ? (
+                      <tr>
+                        <td colSpan={8} className="py-4 px-3 text-center text-slate-500">
+                          Đang tải danh sách dữ liệu thời gian thực từ Firebase Realtime Database...
+                        </td>
+                      </tr>
+                    ) : (
+                      adminWorkspaceSummaries.map((item) => (
+                        <tr key={`rtdb-sum-${item.uid}`} className="hover:bg-emerald-50/40">
+                          <td className="py-2.5 px-3">
+                            <div className="font-bold text-slate-900 flex items-center gap-1.5">
+                              <span>{item.displayName}</span>
+                              {item.isPrimaryAdmin && (
+                                <span className="px-1.5 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded">
+                                  Admin Chính
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              @{item.username} · {item.email || item.phone || item.uid.slice(0, 10)}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 font-semibold text-emerald-900">
+                            {item.assignedWarehouse}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono">
+                            {item.productsCount} VT · {item.customersCount} KH
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <div className="font-bold text-slate-900 font-mono">
+                              {formatVND(item.salesRevenue)}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {item.salesCount} đơn bán · {item.importsCount} nhập
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono">
+                            <div className="text-amber-700 font-semibold">
+                              KH: {formatVND(item.customerDebtTotal)}
+                            </div>
+                            <div className="text-rose-700 text-[11px]">
+                              NCC: {formatVND(item.supplierDebtTotal)}
+                            </div>
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono text-slate-700">
+                            {item.receiptVouchersCount} PT · {item.paymentVouchersCount} PC ·{' '}
+                            {item.savedVouchersCount} In
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-mono text-[11px] text-slate-500">
+                            {item.lastSyncedAt
+                              ? item.lastSyncedAt.slice(0, 19).replace('T', ' ')
+                              : 'Chưa có phát sinh'}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            {onInspectWarehouse && (
+                              <button
+                                type="button"
+                                onClick={() => onInspectWarehouse(item.assignedWarehouse)}
+                                className="px-2.5 py-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
+                              >
+                                Xem dữ liệu
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>

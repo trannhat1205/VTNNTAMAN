@@ -407,10 +407,12 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
         customers,
         sales,
         imports,
+        receiptVouchers,
+        paymentVouchers,
         fromDate,
         toDate,
       }),
-    [currentStaff, products, customers, sales, imports, fromDate, toDate]
+    [currentStaff, products, customers, sales, imports, receiptVouchers, paymentVouchers, fromDate, toDate]
   );
 
   // Date-range KPI calculations (including promotional discounts, gift items, receipt vouchers & payment vouchers)
@@ -539,6 +541,8 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       customers: filteredCustomers,
       sales: salesInRange,
       imports: importsInRange,
+      receiptVouchers: cashflowFinancial.filteredReceiptVouchers,
+      paymentVouchers: cashflowFinancial.filteredPaymentVouchers,
       savedVouchers,
       recommendations: smartRecommendations,
     });
@@ -559,6 +563,8 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       customers: filteredCustomers,
       sales: salesInRange,
       imports: importsInRange,
+      receiptVouchers: cashflowFinancial.filteredReceiptVouchers,
+      paymentVouchers: cashflowFinancial.filteredPaymentVouchers,
     });
     onNotifyToast(
       `Đã xuất Báo cáo tổng hợp PDF (${fromDate} đến ${toDate}): ${fileName}`

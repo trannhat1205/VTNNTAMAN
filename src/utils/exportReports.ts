@@ -1,6 +1,8 @@
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import {
+  CashPaymentVoucher,
+  CashReceiptVoucher,
   CustomerProfile,
   ImportTransaction,
   ProductItem,
@@ -1530,6 +1532,8 @@ export function exportComprehensiveDateRangeReportExcel(params: {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
   savedVouchers?: SavedVoucherRecord[];
   recommendations?: SmartReportRecommendation[];
 }): string {
@@ -1537,18 +1541,36 @@ export function exportComprehensiveDateRangeReportExcel(params: {
   const today = new Date().toISOString().slice(0, 10);
   const periodText = `Từ ngày ${params.fromDate} đến ngày ${params.toDate}`;
 
+  const receiptVouchers = params.receiptVouchers || [];
+  const paymentVouchers = params.paymentVouchers || [];
   const totalRevenue = params.sales.reduce((sum, s) => sum + s.totalAmount, 0);
   const totalCollected = params.sales.reduce((sum, s) => sum + s.paidAmount, 0);
+  const otherReceiptInflow = receiptVouchers
+    .filter((rv) => !rv.isDebtSettlement)
+    .reduce((sum, rv) => sum + rv.amount, 0);
+  const totalCashInflow = totalCollected + otherReceiptInflow;
   const totalCustomerDebt = params.sales.reduce((sum, s) => sum + s.debtAmount, 0);
   const totalImportCost = params.imports.reduce((sum, i) => sum + i.totalCost, 0);
   const totalPaidSupplier = params.imports.reduce((sum, i) => sum + i.paidAmount, 0);
+  const operatingPaymentOutflow = paymentVouchers
+    .filter((pv) => !pv.isDebtSettlement)
+    .reduce((sum, pv) => sum + pv.amount, 0);
+  const totalCashOutflow = totalPaidSupplier + operatingPaymentOutflow;
+  const netCashflow = totalCashInflow - totalCashOutflow;
   const totalSupplierDebt = params.imports.reduce((sum, i) => sum + i.debtAmount, 0);
 
   const canSeeProfit = params.allowedCategories.includes('financial_profit');
   const estimatedGrossProfit = params.sales.reduce((sum, sale) => {
     const prod = params.products.find((p) => p.id === sale.productId);
     const cost = (prod ? prod.importPrice : sale.unitPrice * 0.85) * sale.quantity;
-    return sum + (sale.totalAmount - cost);
+    const giftProd = sale.giftProductId
+      ? params.products.find((p) => p.id === sale.giftProductId)
+      : undefined;
+    const giftCost =
+      sale.giftQuantity && sale.giftQuantity > 0
+        ? (sale.giftUnitCost ?? giftProd?.importPrice ?? 0) * sale.giftQuantity
+        : 0;
+    return sum + (sale.totalAmount - cost - giftCost);
   }, 0);
 
   // Sheet 1: Tổng hợp & Đề xuất báo cáo cấp trên
@@ -1582,7 +1604,11 @@ export function exportComprehensiveDateRangeReportExcel(params: {
     );
   }
   if (params.allowedCategories.includes('cashflow_treasury')) {
-    overviewRows.push(['Dòng tiền ròng (Tổng thu - Tổng chi)', totalCollected - totalPaidSupplier]);
+    overviewRows.push(
+      ['Tổng dòng tiền vào (Thu bán hàng + Thu khác)', totalCashInflow],
+      ['Tổng dòng tiền ra (Trả NCC + Chi vận hành)', totalCashOutflow],
+      ['Dòng tiền ròng (Tổng thu - Tổng chi)', netCashflow]
+    );
   }
   if (params.allowedCategories.includes('inventory_stock')) {
     overviewRows.push(['Tổng số mặt hàng quản lý trong kho', params.products.length]);
@@ -1750,6 +1776,18 @@ export function exportComprehensiveDateRangeReportExcel(params: {
           'Số Tiền Chi (- VNĐ)': 0,
           'Kho': s.warehouseName || 'Tâm An Mỹ Ngãi',
         })),
+      ...receiptVouchers
+        .filter((rv) => !rv.isDebtSettlement && rv.amount > 0)
+        .map((rv) => ({
+          'Ngày Giao Dịch': (rv.createdAt || '').slice(0, 10),
+          'Loại Dòng Tiền': `PHIẾU THU KHÁC (${rv.groupName})`,
+          'Mã Chứng Từ': rv.voucherCode,
+          'Đối Tác': rv.partnerName,
+          'Nội Dung': rv.note || rv.groupName,
+          'Số Tiền Thu (+ VNĐ)': rv.amount,
+          'Số Tiền Chi (- VNĐ)': 0,
+          'Kho': rv.warehouseName || 'Tâm An Mỹ Ngãi',
+        })),
       ...params.imports
         .filter((i) => i.paidAmount > 0)
         .map((i) => ({
@@ -1762,6 +1800,18 @@ export function exportComprehensiveDateRangeReportExcel(params: {
           'Số Tiền Chi (- VNĐ)': i.paidAmount,
           'Kho': i.warehouseName || 'Tâm An Mỹ Ngãi',
         })),
+      ...paymentVouchers
+        .filter((pv) => !pv.isDebtSettlement && pv.amount > 0)
+        .map((pv) => ({
+          'Ngày Giao Dịch': (pv.createdAt || '').slice(0, 10),
+          'Loại Dòng Tiền': `PHIẾU CHI VẬN HÀNH (${pv.groupName})`,
+          'Mã Chứng Từ': pv.voucherCode,
+          'Đối Tác': pv.partnerName,
+          'Nội Dung': pv.note || pv.groupName,
+          'Số Tiền Thu (+ VNĐ)': 0,
+          'Số Tiền Chi (- VNĐ)': pv.amount,
+          'Kho': pv.warehouseName || 'Tâm An Mỹ Ngãi',
+        })),
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cashRows), 'Thu_Chi_Dong_Tien');
   }
@@ -1771,7 +1821,14 @@ export function exportComprehensiveDateRangeReportExcel(params: {
     const finRows = params.sales.map((s, idx) => {
       const prod = params.products.find((p) => p.id === s.productId);
       const unitCost = prod ? prod.importPrice : Math.round(s.unitPrice * 0.85);
-      const totalCost = unitCost * s.quantity;
+      const giftProd = s.giftProductId
+        ? params.products.find((p) => p.id === s.giftProductId)
+        : undefined;
+      const giftCost =
+        s.giftQuantity && s.giftQuantity > 0
+          ? (s.giftUnitCost ?? giftProd?.importPrice ?? 0) * s.giftQuantity
+          : 0;
+      const totalCost = unitCost * s.quantity + giftCost;
       const profit = s.totalAmount - totalCost;
       return {
         STT: idx + 1,
@@ -1781,7 +1838,7 @@ export function exportComprehensiveDateRangeReportExcel(params: {
         'Mặt Hàng': s.productName,
         'Số Lượng': `${s.quantity} ${s.unit}`,
         'Doanh Thu Bán (VNĐ)': s.totalAmount,
-        'Giá Vốn Ước Tính (VNĐ)': totalCost,
+        'Giá Vốn & KM Ước Tính (VNĐ)': totalCost,
         'Lợi Nhuận Gộp (VNĐ)': profit,
         'Tỷ Suất LN (%)': s.totalAmount > 0 ? `${Math.round((profit / s.totalAmount) * 100)}%` : '0%',
       };
@@ -1806,16 +1863,29 @@ export function exportComprehensiveDateRangeReportPDF(params: {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
 }): string {
   const today = new Date().toISOString().slice(0, 10);
   const periodLabel = `Từ ${params.fromDate || 'Đầu kỳ'} đến ${params.toDate || today}`;
   const fileName = `BaoCao_TongHop_TamAn_${params.fromDate || 'All'}_den_${params.toDate || today}.pdf`;
 
+  const receiptVouchers = params.receiptVouchers || [];
+  const paymentVouchers = params.paymentVouchers || [];
   const totalRevenue = params.sales.reduce((sum, s) => sum + s.totalAmount, 0);
   const totalCollected = params.sales.reduce((sum, s) => sum + s.paidAmount, 0);
+  const otherReceiptInflow = receiptVouchers
+    .filter((rv) => !rv.isDebtSettlement)
+    .reduce((sum, rv) => sum + rv.amount, 0);
+  const totalCashInflow = totalCollected + otherReceiptInflow;
   const totalCustomerDebt = params.sales.reduce((sum, s) => sum + s.debtAmount, 0);
   const totalImportCost = params.imports.reduce((sum, i) => sum + i.totalCost, 0);
   const totalPaidSupplier = params.imports.reduce((sum, i) => sum + i.paidAmount, 0);
+  const operatingPaymentOutflow = paymentVouchers
+    .filter((pv) => !pv.isDebtSettlement)
+    .reduce((sum, pv) => sum + pv.amount, 0);
+  const totalCashOutflow = totalPaidSupplier + operatingPaymentOutflow;
+  const netCashflow = totalCashInflow - totalCashOutflow;
   const totalSupplierDebt = params.imports.reduce((sum, i) => sum + i.debtAmount, 0);
 
   return saveCanvasAsA4PDF(
@@ -1915,7 +1985,7 @@ export function exportComprehensiveDateRangeReportPDF(params: {
       ctx.font = `700 13.5px ${FONT_FAMILY}`;
       ctx.fillText(
         `2. NHẬT KÝ NHẬP HÀNG & THU - CHI DÒNG TIỀN (Dòng tiền ròng: ${formatVND(
-          totalCollected - totalPaidSupplier
+          netCashflow
         )})`,
         marginX,
         y

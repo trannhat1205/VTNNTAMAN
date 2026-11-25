@@ -1848,14 +1848,27 @@ export function generateSmartReportRecommendations(params: {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
 }): SmartReportRecommendation[] {
-  const { staff, fromDate, toDate, products = [], sales = [], imports = [] } = params;
+  const {
+    staff,
+    fromDate,
+    toDate,
+    products = [],
+    sales = [],
+    imports = [],
+    receiptVouchers = [],
+    paymentVouchers = [],
+  } = params;
   const resolvedScope = params.accessScope || evaluateStaffAccessScope(staff);
   const recommendations: SmartReportRecommendation[] = [];
   const allowed = resolvedScope.allowedReportCategories;
 
   const rangeSales = sales.filter((s) => isDateWithinRange(s.createdAt, fromDate, toDate));
   const rangeImports = imports.filter((i) => isDateWithinRange(i.createdAt, fromDate, toDate));
+  const rangeReceipts = receiptVouchers.filter((rv) => isDateWithinRange(rv.createdAt, fromDate, toDate));
+  const rangePayments = paymentVouchers.filter((pv) => isDateWithinRange(pv.createdAt, fromDate, toDate));
 
   const unpaidSales = rangeSales.filter((s) => s.debtAmount > 0);
   const totalSalesRevenue = rangeSales.reduce((sum, s) => sum + s.totalAmount, 0);
@@ -1953,7 +1966,15 @@ export function generateSmartReportRecommendations(params: {
 
   // 5. Cashflow & Treasury Inflow / Outflow Recommendation
   if (allowed.includes('cashflow_treasury')) {
-    const netCashflow = totalSalesPaid - totalImportPaid;
+    const otherReceiptInflow = rangeReceipts
+      .filter((rv) => !rv.isDebtSettlement)
+      .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
+    const operatingPaymentOutflow = rangePayments
+      .filter((pv) => !pv.isDebtSettlement)
+      .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
+    const totalInflow = totalSalesPaid + otherReceiptInflow;
+    const totalOutflow = totalImportPaid + operatingPaymentOutflow;
+    const netCashflow = totalInflow - totalOutflow;
     const advice =
       'Thủ quỹ và Kế toán nên chốt sổ thu - chi theo khoảng ngày để báo cáo số dư quỹ thực tế và chuẩn bị nguồn tiền thanh toán các lô hàng sắp đến hạn.';
     recommendations.push({
@@ -1963,7 +1984,7 @@ export function generateSmartReportRecommendations(params: {
       priority: 'medium',
       badgeLabel: 'Đề xuất Thủ quỹ & Kế toán Dòng tiền',
       title: 'Báo cáo Thu - Chi Dòng tiền Thực tế & Cân đối Quỹ Tiền mặt / Ngân hàng',
-      summary: `Tổng dòng tiền thực thu từ bán hàng & thu nợ đạt ${formatVND(totalSalesPaid)}; tổng dòng tiền thực chi trả NCC là ${formatVND(totalImportPaid)}.`,
+      summary: `Tổng dòng tiền thực thu (bán hàng, thu nợ & thu khác) đạt ${formatVND(totalInflow)}; tổng dòng tiền thực chi (trả NCC & chi vận hành) là ${formatVND(totalOutflow)}.`,
       suggestedAction: advice,
       actionAdvice: advice,
       metricHighlight: `Dòng tiền ròng: ${netCashflow >= 0 ? '+' : ''}${formatVND(netCashflow)}`,
@@ -3451,5 +3472,215 @@ export function formatSelectedWarehousesBadge(
   }
   return `Đã chọn ${active.length}/${allWarehouses.length} kho`;
 }
+
+/**
+ * Computes net inventory stock deltas (`+` restores stock, `-` deducts stock) when an
+ * existing sale invoice is edited (accounting for both main product and gift product changes).
+ */
+export function computeSaleEditStockDeltas(
+  existingSale: Pick<SaleTransaction, 'productId' | 'quantity' | 'giftProductId' | 'giftQuantity'>,
+  updatedSale: Pick<SaleTransaction, 'productId' | 'quantity' | 'giftProductId' | 'giftQuantity'>
+): Record<string, number> {
+  const deltas: Record<string, number> = {};
+  const addDelta = (prodId: string | undefined, qty: number) => {
+    if (!prodId || !Number.isFinite(qty) || qty === 0) return;
+    deltas[prodId] = (deltas[prodId] || 0) + qty;
+  };
+
+  // Restore previous deductions
+  addDelta(existingSale.productId, Number(existingSale.quantity) || 0);
+  if (existingSale.giftProductId && (Number(existingSale.giftQuantity) || 0) > 0) {
+    addDelta(existingSale.giftProductId, Number(existingSale.giftQuantity) || 0);
+  }
+
+  // Apply new deductions
+  addDelta(updatedSale.productId, -(Number(updatedSale.quantity) || 0));
+  if (updatedSale.giftProductId && (Number(updatedSale.giftQuantity) || 0) > 0) {
+    addDelta(updatedSale.giftProductId, -(Number(updatedSale.giftQuantity) || 0));
+  }
+
+  for (const key of Object.keys(deltas)) {
+    if (deltas[key] === 0) {
+      delete deltas[key];
+    }
+  }
+  return deltas;
+}
+
+/**
+ * Reconciles customer `totalPurchased` and `totalDebt` strictly from linked sales transactions.
+ * Customers with zero matched sales retain their existing opening balances unless `resetZeroSales` is true.
+ */
+export function reconcileCustomersFromSales(
+  customers: CustomerProfile[],
+  sales: SaleTransaction[],
+  nowIso?: string,
+  options?: { resetZeroSalesCustomerIds?: Set<string> }
+): {
+  customers: CustomerProfile[];
+  changedCustomers: CustomerProfile[];
+} {
+  const changedCustomers: CustomerProfile[] = [];
+  const nextCustomers = customers.map((c) => {
+    const cleanPhone = (c.phone || '').trim();
+    const cleanName = normalizeVietnameseSearch(c.name);
+    const matchedSales = sales.filter((s) => {
+      if (s.customerId === c.id) return true;
+      if ((s.customerId || '').startsWith('cust_xl_')) {
+        if (c.warehouseName && s.warehouseName && c.warehouseName !== s.warehouseName) {
+          return false;
+        }
+        if (cleanPhone && s.customerPhone && s.customerPhone.trim() === cleanPhone) {
+          return true;
+        }
+        if (cleanName && normalizeVietnameseSearch(s.customerName) === cleanName) {
+          return true;
+        }
+      }
+      return false;
+    });
+
+    if (matchedSales.length === 0) {
+      if (options?.resetZeroSalesCustomerIds?.has(c.id)) {
+        if (c.totalPurchased !== 0 || c.totalDebt !== 0) {
+          const resetCust: CustomerProfile = {
+            ...c,
+            totalPurchased: 0,
+            totalDebt: 0,
+            updatedAt: nowIso || c.updatedAt,
+          };
+          changedCustomers.push(resetCust);
+          return resetCust;
+        }
+      }
+      return c;
+    }
+
+    const nextPurchased = Math.max(
+      0,
+      Math.round(matchedSales.reduce((sum, s) => sum + (Number(s.totalAmount) || 0), 0))
+    );
+    const nextDebt = Math.max(
+      0,
+      Math.round(matchedSales.reduce((sum, s) => sum + (Number(s.debtAmount) || 0), 0))
+    );
+
+    if (c.totalPurchased === nextPurchased && c.totalDebt === nextDebt) {
+      return c;
+    }
+
+    const updated: CustomerProfile = {
+      ...c,
+      totalPurchased: nextPurchased,
+      totalDebt: nextDebt,
+      updatedAt: nowIso || c.updatedAt,
+    };
+    changedCustomers.push(updated);
+    return updated;
+  });
+
+  return { customers: nextCustomers, changedCustomers };
+}
+
+/**
+ * Reverses allocated debt settlements on linked sales invoices when a debt-settlement receipt voucher is deleted or re-allocated.
+ */
+export function reverseCustomerReceiptVoucherAllocations(
+  sales: SaleTransaction[],
+  voucher: Pick<CashReceiptVoucher, 'voucherCode' | 'isDebtSettlement' | 'settledAllocations'>,
+  nowIso: string
+): { updatedSales: SaleTransaction[]; reversedSaleIds: string[] } {
+  if (!voucher.isDebtSettlement || !voucher.settledAllocations?.length) {
+    return { updatedSales: sales, reversedSaleIds: [] };
+  }
+
+  const byRecordId = new Map<string, number>();
+  const byCode = new Map<string, number>();
+  for (const alloc of voucher.settledAllocations) {
+    const amt = Math.max(0, Math.round(Number(alloc.allocatedAmount) || 0));
+    if (amt <= 0) continue;
+    if (alloc.recordId) {
+      byRecordId.set(alloc.recordId, (byRecordId.get(alloc.recordId) || 0) + amt);
+    }
+    if (alloc.code) {
+      byCode.set(alloc.code, (byCode.get(alloc.code) || 0) + amt);
+    }
+  }
+
+  const reversedSaleIds: string[] = [];
+  const updatedSales = sales.map((s) => {
+    const reversal = byRecordId.get(s.id) || byCode.get(s.invoiceCode) || 0;
+    if (reversal <= 0) return s;
+
+    const total = Math.max(0, Number(s.totalAmount) || 0);
+    const nextPaid = Math.max(0, Math.min(total, (Number(s.paidAmount) || 0) - reversal));
+    const nextDebt = Math.max(0, total - nextPaid);
+    const nextStatus: PaymentStatus =
+      nextDebt === 0 ? 'paid' : nextPaid > 0 ? 'partial' : 'unpaid';
+    const noteSuffix = `[Hoàn hủy phiếu thu ${voucher.voucherCode}: -${reversal.toLocaleString('vi-VN')}đ]`;
+    reversedSaleIds.push(s.id);
+    return {
+      ...s,
+      paidAmount: nextPaid,
+      debtAmount: nextDebt,
+      status: nextStatus,
+      note: s.note ? `${s.note} | ${noteSuffix}` : noteSuffix,
+      updatedAt: nowIso,
+    };
+  });
+
+  return { updatedSales, reversedSaleIds };
+}
+
+/**
+ * Reverses allocated debt settlements on linked import receipts when a debt-settlement payment voucher is deleted or re-allocated.
+ */
+export function reverseSupplierPaymentVoucherAllocations(
+  imports: ImportTransaction[],
+  voucher: Pick<CashPaymentVoucher, 'voucherCode' | 'isDebtSettlement' | 'settledAllocations'>,
+  nowIso: string
+): { updatedImports: ImportTransaction[]; reversedImportIds: string[] } {
+  if (!voucher.isDebtSettlement || !voucher.settledAllocations?.length) {
+    return { updatedImports: imports, reversedImportIds: [] };
+  }
+
+  const byRecordId = new Map<string, number>();
+  const byCode = new Map<string, number>();
+  for (const alloc of voucher.settledAllocations) {
+    const amt = Math.max(0, Math.round(Number(alloc.allocatedAmount) || 0));
+    if (amt <= 0) continue;
+    if (alloc.recordId) {
+      byRecordId.set(alloc.recordId, (byRecordId.get(alloc.recordId) || 0) + amt);
+    }
+    if (alloc.code) {
+      byCode.set(alloc.code, (byCode.get(alloc.code) || 0) + amt);
+    }
+  }
+
+  const reversedImportIds: string[] = [];
+  const updatedImports = imports.map((imp) => {
+    const reversal = byRecordId.get(imp.id) || byCode.get(imp.receiptCode) || 0;
+    if (reversal <= 0) return imp;
+
+    const total = Math.max(0, Number(imp.totalCost) || 0);
+    const nextPaid = Math.max(0, Math.min(total, (Number(imp.paidAmount) || 0) - reversal));
+    const nextDebt = Math.max(0, total - nextPaid);
+    const nextStatus: PaymentStatus =
+      nextDebt === 0 ? 'paid' : nextPaid > 0 ? 'partial' : 'unpaid';
+    const noteSuffix = `[Hoàn hủy phiếu chi ${voucher.voucherCode}: -${reversal.toLocaleString('vi-VN')}đ]`;
+    reversedImportIds.push(imp.id);
+    return {
+      ...imp,
+      paidAmount: nextPaid,
+      debtAmount: nextDebt,
+      status: nextStatus,
+      note: imp.note ? `${imp.note} | ${noteSuffix}` : noteSuffix,
+      updatedAt: nowIso,
+    };
+  });
+
+  return { updatedImports, reversedImportIds };
+}
+
 
 

@@ -19,6 +19,7 @@ import {
   computeCustomerOldDebtSummary,
   computeDueDateAfterDays,
   computeReceivedItemsAndDebtReport,
+  computeSaleEditStockDeltas,
   computeSupplierOldDebtSummary,
   computeTaxAuthorityFinancialStatement,
   createAuditLogEntry,
@@ -44,7 +45,10 @@ import {
   previewCustomerFifoDebtSettlement,
   previewFiscalYearCloseAndCleanup,
   previewSupplierFifoDebtSettlement,
+  reconcileCustomersFromSales,
   resolveActiveWarehouses,
+  reverseCustomerReceiptVoucherAllocations,
+  reverseSupplierPaymentVoucherAllocations,
   updateImportRecord,
   updateSaleRecord,
   PRIMARY_ADMIN_UID,
@@ -99,6 +103,15 @@ import {
   shouldAutoDownloadAttachment,
   validateChatAttachmentFile,
 } from './internalChatLogic';
+import {
+  aggregateAdminWorkspacesFromRtdb,
+  computeWorkspaceFingerprint,
+  mergeDirectoryIntoStaffList,
+  normalizeWorkspaceFromRtdb,
+  partitionAdminStateByWorkspace,
+  sanitizeForRealtimeDb,
+  toRtdbUserDirectoryProfile,
+} from './rtdbSyncLogic';
 import {
   CustomerProfile,
   ImportTransaction,
@@ -2340,5 +2353,367 @@ test('Zalo-like Internal Chat Logic: deterministic DM room IDs, media classifica
     false
   );
 });
+
+test('Linked accounting reconciliation: gift stock deltas, customer debt/purchased reconciliation, voucher reversal, and AI snapshot non-double-counting cashflow', () => {
+  const deltas = computeSaleEditStockDeltas(
+    { productId: 'p1', quantity: 10, giftProductId: 'p2', giftQuantity: 2 },
+    { productId: 'p1', quantity: 7, giftProductId: 'p3', giftQuantity: 5 }
+  );
+  assert.deepEqual(deltas, { p1: 3, p2: 2, p3: -5 });
+
+  const sameGiftDeltas = computeSaleEditStockDeltas(
+    { productId: 'p1', quantity: 5, giftProductId: 'p1', giftQuantity: 1 },
+    { productId: 'p1', quantity: 8, giftProductId: 'p1', giftQuantity: 2 }
+  );
+  assert.deepEqual(sameGiftDeltas, { p1: -4 });
+
+  const sampleCusts: CustomerProfile[] = [
+    {
+      id: 'c1',
+      code: 'KH-01',
+      name: 'Anh Ba',
+      phone: '0901112222',
+      email: '',
+      address: 'Cao Lãnh',
+      group: 'Nhà nông',
+      note: '',
+      totalPurchased: 999,
+      totalDebt: 999,
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      ownerId: 'u1',
+      createdAt: '2026-11-01T00:00:00Z',
+      updatedAt: '2026-11-01T00:00:00Z',
+    },
+    {
+      id: 'c_no_sales',
+      code: 'KH-02',
+      name: 'Chị Tư (Dư đầu kỳ)',
+      phone: '0903334444',
+      email: '',
+      address: 'Sa Đéc',
+      group: 'Nhà nông',
+      note: '',
+      totalPurchased: 500000,
+      totalDebt: 200000,
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      ownerId: 'u1',
+      createdAt: '2026-11-01T00:00:00Z',
+      updatedAt: '2026-11-01T00:00:00Z',
+    },
+  ];
+
+  const linkedSales: SaleTransaction[] = [
+    {
+      id: 's_a',
+      invoiceCode: 'HD-01',
+      customerId: 'c1',
+      customerName: 'Anh Ba',
+      customerPhone: '0901112222',
+      productId: 'prod_1',
+      productName: 'NPK',
+      unit: 'Bao',
+      quantity: 2,
+      unitPrice: 500000,
+      totalAmount: 1000000,
+      paidAmount: 400000,
+      debtAmount: 600000,
+      dueDate: '2026-12-01',
+      status: 'partial',
+      giftProductId: 'prod_2',
+      giftQuantity: 1,
+      giftUnitCost: 50000,
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-10T08:00:00Z',
+      updatedAt: '2026-11-10T08:00:00Z',
+    },
+  ];
+
+  const reconciledCust = reconcileCustomersFromSales(sampleCusts, linkedSales, '2026-11-20T00:00:00Z');
+  assert.equal(reconciledCust.customers.find((c) => c.id === 'c1')?.totalPurchased, 1000000);
+  assert.equal(reconciledCust.customers.find((c) => c.id === 'c1')?.totalDebt, 600000);
+  // Customer with zero sales retains opening balances
+  assert.equal(reconciledCust.customers.find((c) => c.id === 'c_no_sales')?.totalDebt, 200000);
+
+  // Reverse debt-settlement receipt voucher allocation
+  const settledRes = applyCustomerFifoDebtSettlement(
+    linkedSales,
+    { customerId: 'c1' },
+    350000,
+    'Thu đợt 1',
+    '2026-11-12T00:00:00Z'
+  );
+  assert.equal(settledRes.updatedSales[0].paidAmount, 750000);
+  assert.equal(settledRes.updatedSales[0].debtAmount, 250000);
+
+  const reversedRes = reverseCustomerReceiptVoucherAllocations(
+    settledRes.updatedSales,
+    {
+      voucherCode: 'PT-0001',
+      isDebtSettlement: true,
+      settledAllocations: settledRes.settledAllocations,
+    },
+    '2026-11-13T00:00:00Z'
+  );
+  assert.equal(reversedRes.updatedSales[0].paidAmount, 400000);
+  assert.equal(reversedRes.updatedSales[0].debtAmount, 600000);
+  assert.equal(reversedRes.updatedSales[0].status, 'partial');
+
+  // Reverse supplier payment voucher allocation
+  const sampleImports: ImportTransaction[] = [
+    {
+      id: 'i1',
+      receiptCode: 'PN-01',
+      supplierName: 'NCC A',
+      supplierPhone: '0909000111',
+      productId: 'prod_1',
+      productName: 'NPK',
+      unit: 'Bao',
+      quantity: 10,
+      unitCost: 400000,
+      totalCost: 4000000,
+      paidAmount: 2500000,
+      debtAmount: 1500000,
+      dueDate: '2026-12-01',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-05T00:00:00Z',
+      updatedAt: '2026-11-05T00:00:00Z',
+    },
+  ];
+  const reversedImp = reverseSupplierPaymentVoucherAllocations(
+    sampleImports,
+    {
+      voucherCode: 'PC-0001',
+      isDebtSettlement: true,
+      settledAllocations: [
+        {
+          recordId: 'i1',
+          code: 'PN-01',
+          date: '2026-11-05',
+          dueDate: '2026-12-01',
+          productName: 'NPK',
+          previousDebt: 2500000,
+          allocatedAmount: 1000000,
+          remainingDebt: 1500000,
+        },
+      ],
+    },
+    '2026-11-15T00:00:00Z'
+  );
+  assert.equal(reversedImp.updatedImports[0].paidAmount, 1500000);
+  assert.equal(reversedImp.updatedImports[0].debtAmount, 2500000);
+
+  // Verify buildWarehouseReportSnapshot does NOT double-count debt-settlement vouchers
+  const snapshotNoDoubleCount = buildWarehouseReportSnapshot({
+    warehouseLabel: 'Tâm An Mỹ Ngãi',
+    currentStaff: undefined,
+    products: [],
+    customers: reconciledCust.customers,
+    suppliers: [],
+    sales: settledRes.updatedSales, // paidAmount = 750,000
+    imports: sampleImports, // paidAmount = 2,500,000
+    receiptVouchers: [
+      {
+        id: 'rv_debt',
+        voucherCode: 'PT-01',
+        groupName: 'Thu nợ bán hàng',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Anh Ba',
+        partnerPhone: '0901112222',
+        amount: 350000,
+        paymentMethod: 'Tiền mặt',
+        isDebtSettlement: true,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-12T00:00:00Z',
+        updatedAt: '2026-11-12T00:00:00Z',
+      },
+      {
+        id: 'rv_other',
+        voucherCode: 'PT-02',
+        groupName: 'Thu khác',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'NCC A',
+        partnerPhone: '',
+        amount: 100000,
+        paymentMethod: 'Tiền mặt',
+        isDebtSettlement: false,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-12T00:00:00Z',
+        updatedAt: '2026-11-12T00:00:00Z',
+      },
+    ],
+    paymentVouchers: [
+      {
+        id: 'pv_debt',
+        voucherCode: 'PC-01',
+        groupName: 'Trả nợ NCC',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'NCC A',
+        partnerPhone: '0909000111',
+        amount: 1000000,
+        paymentMethod: 'CK',
+        isDebtSettlement: true,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-10T00:00:00Z',
+        updatedAt: '2026-11-10T00:00:00Z',
+      },
+      {
+        id: 'pv_op',
+        voucherCode: 'PC-02',
+        groupName: 'Chi vận chuyển',
+        warehouseName: 'Tâm An Mỹ Ngãi',
+        partnerName: 'Xe tải',
+        partnerPhone: '',
+        amount: 50000,
+        paymentMethod: 'Tiền mặt',
+        isDebtSettlement: false,
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-12T00:00:00Z',
+        updatedAt: '2026-11-12T00:00:00Z',
+      },
+    ],
+  });
+
+  // 750,000 (sale.paidAmount) + 100,000 (non-debt RV) = 850,000 (NO double counting of 350,000)
+  assert.equal(snapshotNoDoubleCount.totalCashIn, 850000);
+  // 2,500,000 (imp.paidAmount) + 50,000 (non-debt PV) = 2,550,000 (NO double counting of 1,000,000)
+  assert.equal(snapshotNoDoubleCount.totalCashOut, 2550000);
+  assert.equal(snapshotNoDoubleCount.netCashFlow, -1700000);
+});
+
+test('Firebase Realtime Database sync helpers sanitize undefined/NaN, protect passwords, aggregate multi-warehouse data for Primary Admin, and partition edits by ownerId', () => {
+  // 1. sanitizeForRealtimeDb strips undefined keys and NaN without throwing
+  const dirty = {
+    a: 1,
+    b: undefined,
+    c: NaN,
+    nested: { x: 'ok', y: undefined },
+    arr: [1, undefined, { z: undefined, ok: true }],
+  };
+  const clean = sanitizeForRealtimeDb(dirty) as Record<string, unknown>;
+  assert.equal('b' in clean, false);
+  assert.equal(clean.c, 0);
+  assert.deepEqual(clean.nested, { x: 'ok' });
+  assert.deepEqual(clean.arr, [1, { ok: true }]);
+
+  // 2. Password is NEVER written into RTDB user directory, and merging preserves local password hash
+  const staffUser: StaffMember = {
+    uid: 'user_warehouse_1',
+    username: 'kho_basao',
+    password: 'secret_hash_should_not_leak',
+    displayName: 'Nguyễn Văn A',
+    phone: '0901234567',
+    email: 'khobasao@gmail.com',
+    role: 'manager',
+    positionRole: 'warehouse_manager',
+    permissions: ['manage_single_warehouse'],
+    assignedWarehouse: 'TÂM AN BA SAO',
+    active: true,
+    createdAt: '2026-11-01T00:00:00Z',
+    updatedAt: '2026-11-20T00:00:00Z',
+  };
+  const dirProfile = toRtdbUserDirectoryProfile(staffUser, '2026-11-25T10:00:00Z');
+  assert.equal('password' in dirProfile, false);
+  const mergedStaff = mergeDirectoryIntoStaffList([staffUser], [
+    { ...dirProfile, displayName: 'Nguyễn Văn A (Đã sửa từ Cloud)' },
+  ]);
+  assert.equal(mergedStaff[0].displayName, 'Nguyễn Văn A (Đã sửa từ Cloud)');
+  assert.equal(mergedStaff[0].password, 'secret_hash_should_not_leak');
+
+  // 3. Aggregate across multiple user workspaces for Primary Admin + fingerprint stability
+  const wsUser1Raw = {
+    meta: {
+      ownerUid: 'user_warehouse_1',
+      ownerEmail: 'khobasao@gmail.com',
+      ownerDisplayName: 'Nguyễn Văn A',
+      assignedWarehouse: 'TÂM AN BA SAO',
+      updatedAt: '2026-11-25T09:00:00Z',
+      updatedByUid: 'user_warehouse_1',
+      schemaVersion: 1,
+    },
+    sales: [
+      {
+        id: 's_u1',
+        invoiceCode: 'HD-001',
+        customerId: 'c_u1',
+        customerName: 'Khách Ba Sao',
+        customerPhone: '0911',
+        productId: 'p_u1',
+        productName: 'Urê',
+        unit: 'Bao',
+        quantity: 2,
+        unitPrice: 600000,
+        totalAmount: 1200000,
+        paidAmount: 700000,
+        debtAmount: 500000,
+        dueDate: '2026-12-01',
+        status: 'partial',
+        warehouseName: 'TÂM AN BA SAO',
+        note: '',
+        staffName: 'Nguyễn Văn A',
+        createdAt: '2026-11-25T08:00:00Z',
+        updatedAt: '2026-11-25T08:00:00Z',
+      },
+    ],
+    settings: {
+      warehouses: ['TÂM AN BA SAO'],
+    },
+  };
+
+  const norm1 = normalizeWorkspaceFromRtdb(wsUser1Raw, 'user_warehouse_1');
+  assert.equal(norm1.sales[0].ownerId, 'user_warehouse_1');
+  const fpA = computeWorkspaceFingerprint(norm1);
+  const fpB = computeWorkspaceFingerprint({
+    ...norm1,
+    meta: { ...norm1.meta, updatedAt: '2026-11-25T23:59:59Z' },
+  });
+  assert.equal(fpA, fpB);
+
+  const agg = aggregateAdminWorkspacesFromRtdb(
+    { user_warehouse_1: wsUser1Raw },
+    { user_warehouse_1: dirProfile }
+  );
+  assert.equal(agg.sales.length, 1);
+  assert.equal(agg.warehouses.includes('TÂM AN BA SAO'), true);
+  assert.equal(agg.adminSummaries.length, 1);
+  assert.equal(agg.adminSummaries[0].salesRevenue, 1200000);
+  assert.equal(agg.adminSummaries[0].customerDebtTotal, 500000);
+
+  // 4. Partition Admin changes cleanly back to ownerId buckets
+  const partitioned = partitionAdminStateByWorkspace({
+    products: [],
+    customers: [],
+    suppliers: [],
+    sales: agg.sales,
+    imports: [],
+    receiptVouchers: [],
+    paymentVouchers: [],
+    savedVouchers: [],
+    auditLogs: [],
+    backups: [],
+    settings: norm1.settings,
+    staffList: [staffUser],
+    knownOwnerUids: ['user_warehouse_1'],
+    adminUid: PRIMARY_ADMIN_UID,
+    nowIso: '2026-11-25T10:05:00Z',
+  });
+  assert.equal(partitioned['user_warehouse_1'].sales.length, 1);
+  assert.equal(partitioned[PRIMARY_ADMIN_UID].sales.length, 0);
+});
+
 
 

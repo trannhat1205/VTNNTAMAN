@@ -4,6 +4,7 @@
   "apiKey": "AIzaSyC61vp22wSyRJtF5koXA4fKn0o35okDlCM",
   "authDomain": "gapgold-e6b62.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-f4ba431b-caee-4e51-963d-b72f14574529",
+  "databaseURL": "https://gapgold-e6b62-default-rtdb.asia-southeast1.firebasedatabase.app",
   "storageBucket": "gapgold-e6b62.firebasestorage.app",
   "messagingSenderId": "519726864116",
   "measurementId": "",

@@ -749,8 +749,15 @@ export function buildWarehouseReportSnapshot(params: {
     totalSalesNewDebt += debt;
 
     const prod = productById.get(s.productId);
-    const unitImportCost = prod ? Number(prod.importPrice) || 0 : (Number(s.unitPrice) || 0) * 0.8;
-    const giftCost = (Number(s.giftQuantity) || 0) * (Number(s.giftUnitCost) || 0);
+    const unitImportCost = prod ? Number(prod.importPrice) || 0 : (Number(s.unitPrice) || 0) * 0.85;
+    const giftProd = s.giftProductId ? productById.get(s.giftProductId) : undefined;
+    const giftUnitCost =
+      s.giftUnitCost !== undefined
+        ? Number(s.giftUnitCost) || 0
+        : giftProd
+        ? Number(giftProd.importPrice) || 0
+        : 0;
+    const giftCost = (Number(s.giftQuantity) || 0) * giftUnitCost;
     estimatedCogs += (Number(s.quantity) || 0) * unitImportCost + giftCost;
 
     const existing = productSalesMap.get(s.productName) || {
@@ -897,9 +904,18 @@ export function buildWarehouseReportSnapshot(params: {
     0
   );
 
-  // Total cash in = direct cash collected on sales + standalone receipt vouchers
-  const totalCashIn = totalSalesCollected + totalReceiptVouchersAmount;
-  const totalCashOut = totalImportPaid + totalPaymentVouchersAmount;
+  // Align strictly with computeCashflowAndFinancialReport:
+  // Debt-settlement vouchers (isDebtSettlement === true) are ALREADY reflected inside sale.paidAmount / import.paidAmount!
+  // Only non-debt vouchers (Thu khác / Chi vận hành) are added to totalCashIn / totalCashOut so nothing is double-counted.
+  const otherReceiptInflow = receiptVouchers
+    .filter((r) => !r.isDebtSettlement)
+    .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+  const operatingPaymentOutflow = paymentVouchers
+    .filter((p) => !p.isDebtSettlement)
+    .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+
+  const totalCashIn = totalSalesCollected + otherReceiptInflow;
+  const totalCashOut = totalImportPaid + operatingPaymentOutflow;
   const netCashFlow = totalCashIn - totalCashOut;
 
   return {
@@ -1096,11 +1112,11 @@ ${catalogSummary}
 6. TOP MẶT HÀNG BÁN CHẠY:
 ${topProductsSummary}
 
-7. DÒNG TIỀN & QUỸ THU - CHI:
-   - Phiếu thu tiền mặt/chuyển khoản (${snapshot.receiptVouchersCount} phiếu): ${formatVND(snapshot.totalReceiptVouchersAmount)}
-   - Phiếu chi tiền mặt/chuyển khoản (${snapshot.paymentVouchersCount} phiếu): ${formatVND(snapshot.totalPaymentVouchersAmount)}
-   - Tổng dòng tiền thu vào (Bán thu ngay + Phiếu thu): ${formatVND(snapshot.totalCashIn)}
-   - Tổng dòng tiền chi ra (Nhập trả ngay + Phiếu chi): ${formatVND(snapshot.totalCashOut)}
+7. DÒNG TIỀN & QUỸ THU - CHI (Không cộng trùng phiếu thu/chi quyết toán công nợ đã ghi nhận vào thực thu/thực chi hóa đơn):
+   - Tổng giá trị Phiếu thu ghi sổ (${snapshot.receiptVouchersCount} phiếu): ${formatVND(snapshot.totalReceiptVouchersAmount)}
+   - Tổng giá trị Phiếu chi ghi sổ (${snapshot.paymentVouchersCount} phiếu): ${formatVND(snapshot.totalPaymentVouchersAmount)}
+   - Tổng dòng tiền thu vào thực tế (Bán hàng + Thu nợ + Thu khác): ${formatVND(snapshot.totalCashIn)}
+   - Tổng dòng tiền chi ra thực tế (Nhập hàng + Trả NCC + Chi vận hành): ${formatVND(snapshot.totalCashOut)}
    - Cân đối dòng tiền thuần (Thu - Chi): ${formatVND(snapshot.netCashFlow)}
 ===================================================================`;
 
@@ -2334,19 +2350,19 @@ ${
   if (isCashFlowTopic) {
     return `### Báo cáo Đối soát Dòng tiền Thu - Chi — ${snapshot.warehouseLabel}
 
-- **Thu trực tiếp từ hóa đơn bán hàng:** **${formatVND(snapshot.totalSalesCollected)}**
-- **Thu từ Phiếu thu công nợ & thu khác (${snapshot.receiptVouchersCount} phiếu):** **${formatVND(
+- **Thực thu bán hàng & thu nợ khách hàng (Hóa đơn + Phiếu thu công nợ):** **${formatVND(snapshot.totalSalesCollected)}**
+- **Tổng giá trị sổ Phiếu thu (${snapshot.receiptVouchersCount} phiếu, đã loại trừ trùng lắp khi tổng hợp quỹ):** **${formatVND(
       snapshot.totalReceiptVouchersAmount
     )}**
-- **Tổng dòng tiền thu vào:** **${formatVND(snapshot.totalCashIn)}**
+- **Tổng dòng tiền thu vào thực tế (Thu bán hàng/nợ + Thu khác):** **${formatVND(snapshot.totalCashIn)}**
 
 ---
 
-- **Chi thanh toán trực tiếp khi nhập kho:** **${formatVND(snapshot.totalImportPaid)}**
-- **Chi từ Phiếu chi NCC & chi phí vận hành (${snapshot.paymentVouchersCount} phiếu):** **${formatVND(
+- **Thực chi nhập kho & trả nợ NCC (Phiếu nhập + Phiếu chi công nợ):** **${formatVND(snapshot.totalImportPaid)}**
+- **Tổng giá trị sổ Phiếu chi (${snapshot.paymentVouchersCount} phiếu, đã loại trừ trùng lắp khi tổng hợp quỹ):** **${formatVND(
       snapshot.totalPaymentVouchersAmount
     )}**
-- **Tổng dòng tiền chi ra:** **${formatVND(snapshot.totalCashOut)}**
+- **Tổng dòng tiền chi ra thực tế (Trả NCC + Chi vận hành khác):** **${formatVND(snapshot.totalCashOut)}**
 
 ---
 
