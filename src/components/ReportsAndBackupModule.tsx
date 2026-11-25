@@ -112,6 +112,10 @@ interface ReportsAndBackupModuleProps {
   onSwitchRolePreview: (role: UserRole) => void;
   onNotifyToast: (message: string) => void;
   onCollectCustomerDebt?: (saleId: string, amount: number, note: string) => void;
+  onCollectCustomerDebtBatch?: (
+    items: Array<{ saleId: string; amount: number }>,
+    note: string
+  ) => void;
   onSettleCustomerTotalDebtFifo?: (params: {
     customerId?: string;
     customerName: string;
@@ -221,6 +225,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
   onSwitchRolePreview,
   onNotifyToast,
   onCollectCustomerDebt,
+  onCollectCustomerDebtBatch,
   onSettleCustomerTotalDebtFifo,
   onExecuteFiscalYearCloseAndCleanup,
   onExecuteFullApplicationDataWipe,
@@ -4048,14 +4053,24 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                           if (dCmp !== 0) return dCmp;
                           return a.dueDate.localeCompare(b.dueDate);
                         });
+                      const batchItems: Array<{ saleId: string; amount: number }> = [];
                       unpaidRows.forEach((row) => {
                         if (remaining <= 0) return;
                         const pay = Math.min(row.debtAmount, remaining);
                         if (pay > 0) {
-                          onCollectCustomerDebt(row.saleId, pay, noteText);
+                          batchItems.push({ saleId: row.saleId, amount: pay });
                           remaining -= pay;
                         }
                       });
+                      if (batchItems.length > 0) {
+                        if (onCollectCustomerDebtBatch) {
+                          onCollectCustomerDebtBatch(batchItems, noteText);
+                        } else {
+                          batchItems.forEach((item) => {
+                            onCollectCustomerDebt(item.saleId, item.amount, noteText);
+                          });
+                        }
+                      }
                     }
                     exportCombinedReceivedItemsAndDebtPDF({
                       customerName: selectedCustomerObj

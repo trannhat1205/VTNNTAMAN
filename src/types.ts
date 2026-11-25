@@ -380,6 +380,7 @@ export interface BackupSnapshotPayload {
   paymentVouchers?: CashPaymentVoucher[];
   staffList: StaffMember[];
   auditLogs: AuditLogEntry[];
+  missingCollections?: string[];
 }
 
 

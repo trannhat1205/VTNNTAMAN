@@ -119,11 +119,15 @@ export function applySaleToInventory(
   if (!target) {
     throw new Error('Không tìm thấy sản phẩm trong kho.');
   }
-  if (quantitySold <= 0) {
-    throw new Error('Số lượng bán phải lớn hơn 0.');
+  if (!Number.isFinite(quantitySold) || quantitySold <= 0) {
+    throw new Error('Số lượng bán phải là số hợp lệ lớn hơn 0.');
+  }
+  const rawGift = Number(giftQuantity);
+  if (giftQuantity !== undefined && !Number.isFinite(rawGift)) {
+    throw new Error('Số lượng quà tặng phải là số hợp lệ.');
   }
 
-  const safeGiftQty = Math.max(0, Math.round(Number(giftQuantity) || 0));
+  const safeGiftQty = Math.max(0, Math.round(rawGift || 0));
   const hasGift = Boolean(giftProductId && safeGiftQty > 0);
 
   if (hasGift && giftProductId === productId) {
@@ -191,8 +195,11 @@ export function applyImportToInventory(
   if (!target) {
     throw new Error('Không tìm thấy sản phẩm trong kho.');
   }
-  if (quantityImported <= 0) {
-    throw new Error('Số lượng nhập phải lớn hơn 0.');
+  if (!Number.isFinite(quantityImported) || quantityImported <= 0) {
+    throw new Error('Số lượng nhập phải là số hợp lệ lớn hơn 0.');
+  }
+  if (!Number.isFinite(unitCost) || unitCost < 0) {
+    throw new Error('Đơn giá nhập phải là số không âm hợp lệ.');
   }
 
   const updatedProduct: ProductItem = {
@@ -1441,6 +1448,12 @@ export function parseAndValidateBackupPayload(
       };
     }
 
+    const missingCollections: string[] = [];
+    if (!Array.isArray(parsed.savedVouchers)) missingCollections.push('savedVouchers');
+    if (!Array.isArray(parsed.receiptVouchers)) missingCollections.push('receiptVouchers');
+    if (!Array.isArray(parsed.paymentVouchers)) missingCollections.push('paymentVouchers');
+    if (!Array.isArray(parsed.suppliers)) missingCollections.push('suppliers');
+
     const auditLogs: AuditLogEntry[] = Array.isArray(parsed.auditLogs)
       ? parsed.auditLogs
       : [];
@@ -1508,6 +1521,7 @@ export function parseAndValidateBackupPayload(
         paymentVouchers,
         staffList,
         auditLogs,
+        ...(missingCollections.length > 0 ? { missingCollections } : {}),
       },
     };
   } catch {
@@ -1632,7 +1646,58 @@ export function matchDebtTermDays(
 }
 
 /**
- * Checks whether an ISO timestamp or YYYY-MM-DD date string falls within [fromDate, toDate] inclusive.
+ * Reads a numeric Excel cell across candidate column headers without treating explicit `0` as falsy.
+ * Returns `fallback` ONLY when all candidate keys are missing or blank (`undefined | null | ''`).
+ * Strips formatting characters in strings (keeping a leading `-`, e.g. `"150.000 đ"` -> `150000`).
+ * Returns `NaN` when the cell is present but cannot be parsed into a finite number.
+ */
+export function readExcelNumber(
+  row: Record<string, unknown>,
+  keys: string[],
+  fallback: number
+): number {
+  let rawVal: unknown = undefined;
+  let hasValue = false;
+  for (const key of keys) {
+    const val = row?.[key];
+    if (val !== undefined && val !== null && String(val).trim() !== '') {
+      rawVal = val;
+      hasValue = true;
+      break;
+    }
+  }
+  if (!hasValue) return fallback;
+  if (typeof rawVal === 'number') {
+    return Number.isFinite(rawVal) ? rawVal : NaN;
+  }
+  const trimmed = String(rawVal).trim();
+  const isNegative = trimmed.startsWith('-');
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (!digitsOnly) return NaN;
+  const parsed = Number((isNegative ? '-' : '') + digitsOnly);
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+/**
+ * Converts an ISO timestamp (with `T`) or bare `YYYY-MM-DD` string into Vietnam local date (`YYYY-MM-DD`, UTC+7).
+ */
+export function toVietnamDateStr(isoOrDate: string | null | undefined): string {
+  if (!isoOrDate) return '';
+  const trimmed = String(isoOrDate).trim();
+  if (!trimmed) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+  if (trimmed.includes('T')) {
+    const ms = Date.parse(trimmed);
+    if (Number.isFinite(ms)) {
+      return new Date(ms + 7 * 3600 * 1000).toISOString().slice(0, 10);
+    }
+  }
+  const prefix = trimmed.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(prefix) ? prefix : '';
+}
+
+/**
+ * Checks whether an ISO timestamp or YYYY-MM-DD date string falls within [fromDate, toDate] inclusive (Vietnam UTC+7).
  */
 export function isDateWithinRange(
   isoOrDateStr: string | null | undefined,
@@ -1640,8 +1705,8 @@ export function isDateWithinRange(
   toDate?: string
 ): boolean {
   if (!isoOrDateStr) return true;
-  const datePart = isoOrDateStr.trim().slice(0, 10);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return true;
+  const datePart = toVietnamDateStr(isoOrDateStr);
+  if (!datePart) return true;
   if (fromDate && /^\d{4}-\d{2}-\d{2}$/.test(fromDate.trim().slice(0, 10))) {
     if (datePart < fromDate.trim().slice(0, 10)) return false;
   }
@@ -2537,7 +2602,8 @@ export function extractRecordYear(
   fallbackYear = 2026
 ): number {
   if (!dateOrIso) return fallbackYear;
-  const match = dateOrIso.trim().match(/^(\d{4})/);
+  const vnDate = toVietnamDateStr(dateOrIso);
+  const match = (vnDate || dateOrIso.trim()).match(/^(\d{4})/);
   if (match) {
     const parsed = Number(match[1]);
     if (parsed >= 2000 && parsed <= 2100) return parsed;
@@ -3595,21 +3661,20 @@ export function reverseCustomerReceiptVoucherAllocations(
   }
 
   const byRecordId = new Map<string, number>();
-  const byCode = new Map<string, number>();
+  const byCodeNoId = new Map<string, number>();
   for (const alloc of voucher.settledAllocations) {
     const amt = Math.max(0, Math.round(Number(alloc.allocatedAmount) || 0));
     if (amt <= 0) continue;
     if (alloc.recordId) {
       byRecordId.set(alloc.recordId, (byRecordId.get(alloc.recordId) || 0) + amt);
-    }
-    if (alloc.code) {
-      byCode.set(alloc.code, (byCode.get(alloc.code) || 0) + amt);
+    } else if (alloc.code) {
+      byCodeNoId.set(alloc.code, (byCodeNoId.get(alloc.code) || 0) + amt);
     }
   }
 
   const reversedSaleIds: string[] = [];
   const updatedSales = sales.map((s) => {
-    const reversal = byRecordId.get(s.id) || byCode.get(s.invoiceCode) || 0;
+    const reversal = byRecordId.get(s.id) ?? (byRecordId.size === 0 ? byCodeNoId.get(s.invoiceCode) : undefined) ?? 0;
     if (reversal <= 0) return s;
 
     const total = Math.max(0, Number(s.totalAmount) || 0);
@@ -3645,21 +3710,20 @@ export function reverseSupplierPaymentVoucherAllocations(
   }
 
   const byRecordId = new Map<string, number>();
-  const byCode = new Map<string, number>();
+  const byCodeNoId = new Map<string, number>();
   for (const alloc of voucher.settledAllocations) {
     const amt = Math.max(0, Math.round(Number(alloc.allocatedAmount) || 0));
     if (amt <= 0) continue;
     if (alloc.recordId) {
       byRecordId.set(alloc.recordId, (byRecordId.get(alloc.recordId) || 0) + amt);
-    }
-    if (alloc.code) {
-      byCode.set(alloc.code, (byCode.get(alloc.code) || 0) + amt);
+    } else if (alloc.code) {
+      byCodeNoId.set(alloc.code, (byCodeNoId.get(alloc.code) || 0) + amt);
     }
   }
 
   const reversedImportIds: string[] = [];
   const updatedImports = imports.map((imp) => {
-    const reversal = byRecordId.get(imp.id) || byCode.get(imp.receiptCode) || 0;
+    const reversal = byRecordId.get(imp.id) ?? (byRecordId.size === 0 ? byCodeNoId.get(imp.receiptCode) : undefined) ?? 0;
     if (reversal <= 0) return imp;
 
     const total = Math.max(0, Number(imp.totalCost) || 0);
@@ -3851,7 +3915,7 @@ export function computeProductStockMovementLedger(
   let periodExportRevenue = 0;
 
   for (const ev of eventsWithBalance) {
-    const datePart = (ev.dateIso || '').slice(0, 10);
+    const datePart = toVietnamDateStr(ev.dateIso);
     const isBeforeStart = Boolean(fromDate && /^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < fromDate);
     if (isBeforeStart) {
       openingStock = ev.balanceAfter;

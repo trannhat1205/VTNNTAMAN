@@ -30,6 +30,7 @@ import {
   evaluateStockAlert,
   executeFiscalYearCloseAndCleanup,
   executeFullApplicationDataWipe,
+  extractRecordYear,
   filterCustomers,
   filterRecordsBySelectedWarehouses,
   filterSearchableOptions,
@@ -46,10 +47,12 @@ import {
   previewCustomerFifoDebtSettlement,
   previewFiscalYearCloseAndCleanup,
   previewSupplierFifoDebtSettlement,
+  readExcelNumber,
   reconcileCustomersFromSales,
   resolveActiveWarehouses,
   reverseCustomerReceiptVoucherAllocations,
   reverseSupplierPaymentVoucherAllocations,
+  toVietnamDateStr,
   updateImportRecord,
   updateSaleRecord,
   PRIMARY_ADMIN_UID,
@@ -2874,7 +2877,128 @@ test('computeProductStockMovementLedger and normalizeIndependentWarehouseStaffMe
   assert.equal(corruptedAdmin.username, 'admin');
   assert.equal(corruptedAdmin.assignedWarehouse, 'Tất cả kho');
   assert.equal(corruptedAdmin.positionRole, 'primary_manager');
+
+  // Non-admin UID carrying spoofed admin email must NOT hijack PRIMARY_ADMIN_UID
+  const spoofedUser = normalizeIndependentWarehouseStaffMember({
+    ...corruptedUser,
+    uid: 'attacker_uid_123',
+    email: 'trannhat1205@gmail.com',
+  });
+  assert.notEqual(spoofedUser.uid, PRIMARY_ADMIN_UID);
+  assert.notEqual(spoofedUser.positionRole, 'primary_manager');
 });
+
+test('Stage 2 P0 fixes: NaN inventory guards, readExcelNumber, backup missingCollections, VN timezone, and FIFO reversal isolation', () => {
+  const prod = {
+    id: 'p_nan_test',
+    code: 'VT-T1',
+    name: 'Phân NPK',
+    category: 'Phân bón',
+    unit: 'Bao',
+    importPrice: 500000,
+    sellPrice: 600000,
+    stock: 20,
+    minStock: 5,
+    supplierName: 'NCC A',
+    warehouseName: 'TÂM AN KHO A',
+    ownerId: 'uid_a',
+    createdAt: '2026-11-26T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+
+  assert.throws(() => applySaleToInventory([prod], 'p_nan_test', Number.NaN, '2026-11-26T01:00:00Z'));
+  assert.throws(() => applyImportToInventory([prod], 'p_nan_test', Number.NaN, 100000, '2026-11-26T01:00:00Z'));
+  assert.throws(() => applyImportToInventory([prod], 'p_nan_test', 5, Number.NaN, '2026-11-26T01:00:00Z'));
+
+  // readExcelNumber keeps explicit 0, parses formatted VNĐ, returns fallback only when blank, NaN on garbage
+  assert.equal(readExcelNumber({ 'Khách Đã Trả (VNĐ)': 0 }, ['Khách Đã Trả (VNĐ)'], 500000), 0);
+  assert.equal(readExcelNumber({ 'Khách Đã Trả (VNĐ)': '0' }, ['Khách Đã Trả (VNĐ)'], 500000), 0);
+  assert.equal(readExcelNumber({ 'Khách Đã Trả (VNĐ)': '' }, ['Khách Đã Trả (VNĐ)'], 500000), 500000);
+  assert.equal(readExcelNumber({}, ['Khách Đã Trả (VNĐ)'], 10), 10);
+  assert.equal(readExcelNumber({ 'Đơn Giá': '150.000 đ' }, ['Đơn Giá'], 0), 150000);
+  assert.equal(Number.isNaN(readExcelNumber({ 'Đơn Giá': 'N/A' }, ['Đơn Giá'], 0)), true);
+
+  // Legacy backup missing optional collections marks missingCollections so restore won't wipe them
+  const legacyBackup = parseAndValidateBackupPayload(
+    JSON.stringify({
+      version: '1.0',
+      products: [],
+      customers: [],
+      sales: [],
+      imports: [],
+    })
+  );
+  assert.equal(legacyBackup.ok, true);
+  if (legacyBackup.ok) {
+    assert.deepEqual(
+      legacyBackup.payload.missingCollections?.sort(),
+      ['paymentVouchers', 'receiptVouchers', 'savedVouchers', 'suppliers']
+    );
+  }
+
+  // Vietnam UTC+7 date conversion (00:51 ICT = 17:51Z previous UTC day)
+  assert.equal(toVietnamDateStr('2026-11-25T17:51:03Z'), '2026-11-26');
+  assert.equal(isDateWithinRange('2026-11-25T17:51:03Z', '2026-11-26', '2026-11-26'), true);
+  assert.equal(extractRecordYear('2025-12-31T18:00:00Z'), 2026);
+
+  // Cross-warehouse colliding HD-2611-001 must NOT reverse another warehouse's invoice
+  const saleWhA = {
+    id: 'sale_wh_a',
+    invoiceCode: 'HD-2611-001',
+    customerId: 'c_a',
+    customerName: 'Khách A',
+    customerPhone: '0901',
+    productId: 'p_a',
+    productName: 'Thuốc A',
+    unit: 'Chai',
+    quantity: 1,
+    unitPrice: 100000,
+    totalAmount: 100000,
+    paidAmount: 100000,
+    debtAmount: 0,
+    dueDate: '2026-12-01',
+    status: 'paid' as const,
+    warehouseName: 'TÂM AN KHO A',
+    note: '',
+    staffName: 'A',
+    ownerId: 'uid_a',
+    createdAt: '2026-11-26T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+  const saleWhB = {
+    ...saleWhA,
+    id: 'sale_wh_b',
+    customerId: 'c_b',
+    customerName: 'Khách B',
+    warehouseName: 'TÂM AN KHO B',
+    ownerId: 'uid_b',
+  };
+  const reversed = reverseCustomerReceiptVoucherAllocations(
+    [saleWhA, saleWhB],
+    {
+      voucherCode: 'PT-001',
+      isDebtSettlement: true,
+      settledAllocations: [
+        {
+          recordId: 'sale_wh_a',
+          code: 'HD-2611-001',
+          date: '2026-11-26',
+          dueDate: '2026-12-01',
+          productName: 'Thuốc A',
+          previousDebt: 100000,
+          allocatedAmount: 100000,
+          remainingDebt: 0,
+        },
+      ],
+    },
+    '2026-11-26T01:00:00Z'
+  );
+  assert.deepEqual(reversed.reversedSaleIds, ['sale_wh_a']);
+  assert.equal(reversed.updatedSales[0].debtAmount, 100000);
+  assert.equal(reversed.updatedSales[1].debtAmount, 0);
+  assert.equal(reversed.updatedSales[1].status, 'paid');
+});
+
 
 
 

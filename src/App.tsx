@@ -92,6 +92,7 @@ import {
   MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
+  readExcelNumber,
   reconcileCustomersFromSales,
   resolveActiveWarehouses,
   reverseCustomerReceiptVoucherAllocations,
@@ -111,6 +112,7 @@ import {
   googleSignInWithRole,
   initAuth,
   isCurrentUserAdmin,
+  isRealtimeWorkspaceLegacyLayout,
   logoutUser,
   resendVerificationEmail,
   seedExistingStaffToChatDirectoryIfAdmin,
@@ -217,6 +219,8 @@ type ActiveTab =
 export default function App() {
   const [initialWorkspace] = useState(() => loadWorkspaceFromStorage());
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const activeTabRef = useRef<ActiveTab>(activeTab);
+  activeTabRef.current = activeTab;
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isSessionLoggedIn, setIsSessionLoggedIn] = useState<boolean>(false);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
@@ -224,6 +228,8 @@ export default function App() {
 
   // Core Data State (Empty by default for production; persisted in localStorage + Firestore)
   const [products, setProducts] = useState<ProductItem[]>(initialWorkspace.products);
+  const productsRef = useRef<ProductItem[]>(products);
+  productsRef.current = products;
   const [customers, setCustomers] = useState<CustomerProfile[]>(initialWorkspace.customers);
   const [sales, setSales] = useState<SaleTransaction[]>(initialWorkspace.sales);
   const [imports, setImports] = useState<ImportTransaction[]>(initialWorkspace.imports);
@@ -266,6 +272,7 @@ export default function App() {
   const rtdbHydratedKeyRef = useRef<string | null>(null);
   const rtdbSuppressNextWriteRef = useRef<boolean>(false);
   const rtdbLastFingerprintsRef = useRef<Record<string, string>>({});
+  const rtdbLastPayloadRef = useRef<Record<string, RtdbWorkspacePayload>>({});
   const rtdbKnownOwnerUidsRef = useRef<Set<string>>(new Set([PRIMARY_ADMIN_UID]));
   const adminWorkspacesMapRef = useRef<Record<string, unknown>>({});
   const rtdbUsersDirMapRef = useRef<Record<string, RtdbUserDirectoryProfile>>({});
@@ -792,7 +799,7 @@ export default function App() {
       }
 
       unsubRooms = subscribeToUserChatRooms(activeUid, isPrimary, (roomsList) => {
-        if (activeTab === 'internal_chat') return;
+        if (activeTabRef.current === 'internal_chat') return;
         try {
           const rawRead = localStorage.getItem(`vtnn_taman_chat_last_read_v1_${activeUid}`);
           const lastReadMap = rawRead ? (JSON.parse(rawRead) as Record<string, number>) : {};
@@ -822,7 +829,6 @@ export default function App() {
     currentStaff.positionRole,
     currentStaff.email,
     currentUserEmail,
-    activeTab,
   ]);
 
   // Keep a live reference to latest state so RTDB hydration callbacks never read stale closures
@@ -942,11 +948,19 @@ export default function App() {
 
         // Check if any remote workspace bucket changed compared to our last known fingerprint
         let hasRemoteChanges = rtdbHydratedKeyRef.current !== sessionKey;
+        let hasLegacyBucket = false;
         for (const [uid, normPayload] of Object.entries(agg.normalizedWorkspaces)) {
-          const remoteFp = computeWorkspaceFingerprint(normPayload);
-          if (rtdbLastFingerprintsRef.current[uid] !== remoteFp) {
-            rtdbLastFingerprintsRef.current[uid] = remoteFp;
+          rtdbLastPayloadRef.current[uid] = normPayload;
+          if (isRealtimeWorkspaceLegacyLayout(uid)) {
+            rtdbLastFingerprintsRef.current[uid] = '';
+            hasLegacyBucket = true;
             hasRemoteChanges = true;
+          } else {
+            const remoteFp = computeWorkspaceFingerprint(normPayload);
+            if (rtdbLastFingerprintsRef.current[uid] !== remoteFp) {
+              rtdbLastFingerprintsRef.current[uid] = remoteFp;
+              hasRemoteChanges = true;
+            }
           }
         }
 
@@ -1008,7 +1022,10 @@ export default function App() {
           setReceiptGroups(Array.from(new Set([...cur.receiptGroups, ...agg.receiptGroups])));
           setPaymentGroups(Array.from(new Set([...cur.paymentGroups, ...agg.paymentGroups])));
 
-          if (firstHydration) {
+          if (firstHydration || hasLegacyBucket) {
+            if (hasLegacyBucket) {
+              rtdbSuppressNextWriteRef.current = false;
+            }
             setRtdbWriteTrigger((n) => n + 1);
           }
         }
@@ -1033,13 +1050,17 @@ export default function App() {
     const unsubUserWs = subscribeToRealtimeWorkspace(activeUid, (remoteWs) => {
       if (!remoteWs) {
         // First time this warehouse user connects to RTDB -> push local workspace immediately
+        delete rtdbLastPayloadRef.current[activeUid];
         rtdbHydratedKeyRef.current = sessionKey;
         setRtdbWriteTrigger((n) => n + 1);
         return;
       }
 
+      rtdbLastPayloadRef.current[activeUid] = remoteWs;
+      const isLegacy = isRealtimeWorkspaceLegacyLayout(activeUid);
       const incomingFp = computeWorkspaceFingerprint(remoteWs);
       if (
+        !isLegacy &&
         rtdbHydratedKeyRef.current === sessionKey &&
         rtdbLastFingerprintsRef.current[activeUid] === incomingFp
       ) {
@@ -1048,8 +1069,8 @@ export default function App() {
 
       const firstHydration = rtdbHydratedKeyRef.current !== sessionKey;
       rtdbHydratedKeyRef.current = sessionKey;
-      rtdbLastFingerprintsRef.current[activeUid] = incomingFp;
-      rtdbSuppressNextWriteRef.current = true;
+      rtdbLastFingerprintsRef.current[activeUid] = isLegacy ? '' : incomingFp;
+      rtdbSuppressNextWriteRef.current = !isLegacy;
 
       const cur = latestWorkspaceRef.current;
       setProducts(
@@ -1127,7 +1148,7 @@ export default function App() {
         setNotificationPrefs(remoteWs.settings.notificationPrefs);
       }
 
-      if (firstHydration) {
+      if (firstHydration || isLegacy) {
         setRtdbWriteTrigger((n) => n + 1);
       }
     });
@@ -1196,7 +1217,12 @@ export default function App() {
           if (rtdbLastFingerprintsRef.current[bucketUid] !== nextFp) {
             rtdbLastFingerprintsRef.current[bucketUid] = nextFp;
             rtdbKnownOwnerUidsRef.current.add(bucketUid);
-            void writeRealtimeWorkspace(bucketUid, bucketPayload);
+            const prevSnapshot = rtdbLastPayloadRef.current[bucketUid] ?? null;
+            void writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot).then((ok) => {
+              if (ok) {
+                rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
+              }
+            });
           }
         });
       } else {
@@ -1225,7 +1251,12 @@ export default function App() {
         const nextFp = computeWorkspaceFingerprint(payload);
         if (rtdbLastFingerprintsRef.current[activeUid] !== nextFp) {
           rtdbLastFingerprintsRef.current[activeUid] = nextFp;
-          void writeRealtimeWorkspace(activeUid, payload);
+          const prevSnapshot = rtdbLastPayloadRef.current[activeUid] ?? null;
+          void writeRealtimeWorkspace(activeUid, payload, prevSnapshot).then((ok) => {
+            if (ok) {
+              rtdbLastPayloadRef.current[activeUid] = payload;
+            }
+          });
         }
       }
     }, 250);
@@ -1438,7 +1469,7 @@ export default function App() {
   }): SaleTransaction => {
     const nowIso = new Date().toISOString();
     const { updatedProducts, updatedProduct, updatedGiftProduct } = applySaleToInventory(
-      products,
+      productsRef.current,
       payload.productId,
       payload.quantity,
       nowIso,
@@ -1504,6 +1535,7 @@ export default function App() {
       updatedAt: nowIso,
     };
 
+    productsRef.current = updatedProducts;
     setProducts(updatedProducts);
     setSales((prev) => [newSale, ...prev]);
 
@@ -1596,25 +1628,40 @@ export default function App() {
     if (!existing) return;
 
     const updated = updateSaleRecord(existing, changes, nowIso);
+
+    // Validate stock availability BEFORE committing sale edit or clamping stock
+    const stockDeltas = computeSaleEditStockDeltas(existing, updated);
+    for (const [prodId, delta] of Object.entries(stockDeltas)) {
+      if (!delta || delta >= 0) continue;
+      const targetProd = productsRef.current.find((p) => p.id === prodId);
+      if (targetProd && targetProd.stock + delta < 0) {
+        showToast(
+          `Không đủ tồn kho để sửa hóa đơn: "${targetProd.name}" hiện còn ${targetProd.stock} ${targetProd.unit}.`
+        );
+        return;
+      }
+    }
+
     const nextSales = sales.map((s) => (s.id === saleId ? updated : s));
     setSales(nextSales);
 
     // Reconcile inventory stock delta for both main product and promotional gift product
-    const stockDeltas = computeSaleEditStockDeltas(existing, updated);
     if (Object.keys(stockDeltas).length > 0) {
-      setProducts((prev) =>
-        prev.map((p) => {
+      setProducts((prev) => {
+        const nextList = prev.map((p) => {
           const delta = stockDeltas[p.id];
           if (!delta) return p;
           const nextProd = {
             ...p,
-            stock: Math.max(0, p.stock + delta),
+            stock: p.stock + delta,
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
           return nextProd;
-        })
-      );
+        });
+        productsRef.current = nextList;
+        return nextList;
+      });
     }
 
     // Reconcile customer purchase & debt totals directly from linked sales
@@ -1727,7 +1774,7 @@ export default function App() {
   }): ImportTransaction => {
     const nowIso = new Date().toISOString();
     const { updatedProducts, updatedProduct } = applyImportToInventory(
-      products,
+      productsRef.current,
       payload.productId,
       payload.quantity,
       payload.unitCost,
@@ -1770,6 +1817,7 @@ export default function App() {
       updatedAt: nowIso,
     };
 
+    productsRef.current = updatedProducts;
     setProducts(updatedProducts);
     setImports((prev) => [newImport, ...prev]);
 
@@ -1825,23 +1873,36 @@ export default function App() {
     if (!existing) return;
 
     const updated = updateImportRecord(existing, changes, nowIso);
+    const qtyDelta = updated.quantity - existing.quantity;
+    if (qtyDelta < 0) {
+      const targetProd = productsRef.current.find((p) => p.id === existing.productId);
+      if (targetProd && targetProd.stock + qtyDelta < 0) {
+        const soldFromBatch = Math.abs(qtyDelta) - targetProd.stock;
+        showToast(
+          `Đã bán ${soldFromBatch} ${targetProd.unit} "${targetProd.name}", tồn còn ${targetProd.stock}, không thể giảm phiếu nhập này.`
+        );
+        return;
+      }
+    }
+
     setImports((prev) => prev.map((imp) => (imp.id === importId ? updated : imp)));
 
-    const qtyDelta = updated.quantity - existing.quantity;
     if (qtyDelta !== 0 || updated.unitCost !== existing.unitCost) {
-      setProducts((prev) =>
-        prev.map((p) => {
+      setProducts((prev) => {
+        const nextList = prev.map((p) => {
           if (p.id !== existing.productId) return p;
           const nextProd = {
             ...p,
-            stock: Math.max(0, p.stock + qtyDelta),
+            stock: p.stock + qtyDelta,
             importPrice: updated.unitCost > 0 ? updated.unitCost : p.importPrice,
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
           return nextProd;
-        })
-      );
+        });
+        productsRef.current = nextList;
+        return nextList;
+      });
     }
 
     if (isGoogleAuthenticated) {
@@ -1868,20 +1929,32 @@ export default function App() {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = imports.find((imp) => imp.id === importId);
     const nowIso = new Date().toISOString();
+    if (target) {
+      const targetProd = productsRef.current.find((p) => p.id === target.productId);
+      if (targetProd && targetProd.stock < target.quantity) {
+        const alreadySold = target.quantity - targetProd.stock;
+        showToast(
+          `Đã bán ${alreadySold} ${targetProd.unit} "${targetProd.name}", tồn còn ${targetProd.stock}, không thể xóa phiếu nhập này.`
+        );
+        return;
+      }
+    }
     setImports((prev) => prev.filter((imp) => imp.id !== importId));
     if (target) {
-      setProducts((prev) =>
-        prev.map((p) => {
+      setProducts((prev) => {
+        const nextList = prev.map((p) => {
           if (p.id !== target.productId) return p;
           const adjusted = {
             ...p,
-            stock: Math.max(0, p.stock - target.quantity),
+            stock: p.stock - target.quantity,
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(adjusted, false);
           return adjusted;
-        })
-      );
+        });
+        productsRef.current = nextList;
+        return nextList;
+      });
       if (isGoogleAuthenticated) {
         void deleteFirestoreDocIfAdmin('imports', importId);
       }
@@ -1978,6 +2051,7 @@ export default function App() {
         createdAt: nowIso,
         updatedAt: nowIso,
       };
+      productsRef.current = [created, ...productsRef.current];
       setProducts((prev) => [created, ...prev]);
       recordAuditLog({
         actionCategory: 'create',
@@ -2308,6 +2382,120 @@ export default function App() {
     });
     showToast(
       `Đã ghi nhận thu nợ +${formatVND(actualCollected)} & tự động lưu Phiếu thu ${voucherCode}!`
+    );
+  };
+
+  const handleCollectCustomerDebtBatch = (
+    items: Array<{ saleId: string; amount: number }>,
+    note: string
+  ) => {
+    if (!items || items.length === 0) return;
+    const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const cleanNote = (note || '').trim();
+    let workingSales = [...sales];
+    let existingCodes = receiptVouchers.map((r) => r.voucherCode);
+    const updatedSalesForFirestore: SaleTransaction[] = [];
+    const createdVouchers: CashReceiptVoucher[] = [];
+    let totalBatchCollected = 0;
+
+    items.forEach((item, idx) => {
+      const existing = workingSales.find((s) => s.id === item.saleId);
+      if (!existing) return;
+      const actualCollected = Math.min(
+        Math.max(0, Number(existing.debtAmount) || 0),
+        Math.max(0, Math.round(Number(item.amount) || 0))
+      );
+      if (actualCollected <= 0) return;
+
+      const noteSuffix = cleanNote
+        ? `[Thu nợ HĐ ${existing.invoiceCode}: +${actualCollected.toLocaleString('vi-VN')}đ - ${cleanNote}]`
+        : `[Thu nợ HĐ ${existing.invoiceCode}: +${actualCollected.toLocaleString('vi-VN')}đ]`;
+      const mergedNote = existing.note ? `${existing.note} | ${noteSuffix}` : noteSuffix;
+
+      const updatedSale = applyDebtPayment(
+        { ...existing, note: mergedNote },
+        actualCollected,
+        nowIso
+      );
+      workingSales = workingSales.map((s) => (s.id === existing.id ? updatedSale : s));
+      updatedSalesForFirestore.push(updatedSale);
+      totalBatchCollected += actualCollected;
+
+      const voucherCode = generateSequentialVoucherCode('PT', existingCodes);
+      existingCodes = [voucherCode, ...existingCodes];
+
+      createdVouchers.push({
+        id: `rv_direct_${Date.now()}_${idx}`,
+        voucherCode,
+        groupName: 'Thu nợ bán hàng khách hàng',
+        warehouseName:
+          existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+        partnerId: existing.customerId,
+        partnerName: existing.customerName,
+        partnerPhone: existing.customerPhone || '',
+        amount: actualCollected,
+        paymentMethod: 'Tiền mặt / Chuyển khoản',
+        isDebtSettlement: true,
+        settledAllocations: [
+          {
+            recordId: existing.id,
+            code: existing.invoiceCode,
+            date: (existing.createdAt || '').slice(0, 10),
+            dueDate: existing.dueDate || '',
+            productName: existing.productName,
+            previousDebt: existing.debtAmount,
+            allocatedAmount: actualCollected,
+            remainingDebt: updatedSale.debtAmount,
+          },
+        ],
+        totalPreviousDebt: existing.debtAmount,
+        totalRemainingDebt: updatedSale.debtAmount,
+        countsTowardOtherIncome: false,
+        note:
+          cleanNote ||
+          `Thu nợ tổng hợp hóa đơn ${existing.invoiceCode} (${existing.customerName})`,
+        staffName: currentStaff.displayName,
+        ownerId: existing.ownerId || activeUid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    });
+
+    if (createdVouchers.length === 0) {
+      showToast('Không có hóa đơn công nợ hợp lệ để thu nợ.');
+      return;
+    }
+
+    setSales(workingSales);
+    if (isGoogleAuthenticated) {
+      updatedSalesForFirestore.forEach((s) => void syncSaleToFirestore(s, false));
+    }
+
+    setCustomers((prev) => {
+      const reconciled = reconcileCustomersFromSales(prev, workingSales, nowIso);
+      if (isGoogleAuthenticated) {
+        reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+      }
+      return reconciled.customers;
+    });
+
+    setReceiptVouchers((prev) => [...createdVouchers, ...prev]);
+
+    recordAuditLog({
+      actionCategory: 'debt_payment',
+      targetEntity: 'debt',
+      targetCode: createdVouchers.map((v) => v.voucherCode).join(', '),
+      warehouseName: lockedWarehouse || currentStaff.assignedWarehouse || 'Tất cả kho',
+      summary: `Thu nợ tổng hợp ${createdVouchers.length} hóa đơn (+${formatVND(
+        totalBatchCollected
+      )})`,
+      details: `Số phiếu thu lập mới: ${createdVouchers
+        .map((v) => `${v.voucherCode} (+${formatVND(v.amount)})`)
+        .join(' · ')}`,
+    });
+    showToast(
+      `Đã thu nợ tổng hợp +${formatVND(totalBatchCollected)} cho ${createdVouchers.length} hóa đơn!`
     );
   };
 
@@ -3061,11 +3249,31 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const added: ProductItem[] = [];
+    let skippedCount = 0;
     rows.forEach((r, idx) => {
       const name = String(
         r['Tên Vật Tư Nông Nghiệp'] || r['Tên Vật Tư'] || r['name'] || ''
       ).trim();
       if (!name) return;
+
+      const importPrice = readExcelNumber(r, ['Giá Nhập (VNĐ)', 'Giá Nhập (đ)'], 0);
+      const sellPrice = readExcelNumber(r, ['Giá Bán Lẻ (VNĐ)', 'Giá Bán (đ)'], 0);
+      const stock = readExcelNumber(r, ['Tồn Kho Ban Đầu', 'Tồn Kho Hiện Tại'], 10);
+      const minStock = readExcelNumber(r, ['Mức Cảnh Báo Tối Thiểu', 'Mức Tối Thiểu'], 5);
+      if (
+        !Number.isFinite(importPrice) ||
+        importPrice < 0 ||
+        !Number.isFinite(sellPrice) ||
+        sellPrice < 0 ||
+        !Number.isFinite(stock) ||
+        stock < 0 ||
+        !Number.isFinite(minStock) ||
+        minStock < 0
+      ) {
+        skippedCount += 1;
+        return;
+      }
+
       const cat = String(r['Nhóm Vật Tư'] || r['Nhóm Hàng'] || 'Phân bón').trim();
       if (cat && !productCategories.includes(cat)) {
         setProductCategories((prev) => (prev.includes(cat) ? prev : [...prev, cat]));
@@ -3083,10 +3291,10 @@ export default function App() {
         category: cat || 'Phân bón',
         warehouseName: wh,
         unit: String(r['Đơn Vị Tính'] || r['Đơn Vị'] || 'Bao').trim(),
-        importPrice: Math.max(0, Number(r['Giá Nhập (VNĐ)'] || r['Giá Nhập (đ)'] || 0)),
-        sellPrice: Math.max(0, Number(r['Giá Bán Lẻ (VNĐ)'] || r['Giá Bán (đ)'] || 0)),
-        stock: Math.max(0, Number(r['Tồn Kho Ban Đầu'] || r['Tồn Kho Hiện Tại'] || 10)),
-        minStock: Math.max(0, Number(r['Mức Cảnh Báo Tối Thiểu'] || r['Mức Tối Thiểu'] || 5)),
+        importPrice: Math.round(importPrice),
+        sellPrice: Math.round(sellPrice),
+        stock: Math.round(stock),
+        minStock: Math.round(minStock),
         supplierName: String(r['Nhà Cung Cấp Chính'] || 'Nhà cung cấp VTNN').trim(),
         ownerId: activeUid,
         createdAt: nowIso,
@@ -3094,11 +3302,21 @@ export default function App() {
       });
     });
     if (added.length > 0) {
-      setProducts((prev) => [...added, ...prev]);
+      setProducts((prev) => {
+        const nextList = [...added, ...prev];
+        productsRef.current = nextList;
+        return nextList;
+      });
       if (isGoogleAuthenticated) {
         added.forEach((p) => void syncProductToFirestore(p, true));
       }
-      showToast(`Đã tải lên ${added.length} mặt hàng vật tư từ tệp Excel!`);
+      showToast(
+        `Đã tải lên ${added.length} mặt hàng vật tư từ tệp Excel!${
+          skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi số liệu)` : ''
+        }`
+      );
+    } else if (skippedCount > 0) {
+      showToast(`Bỏ qua ${skippedCount} dòng lỗi / số liệu âm trong tệp Excel.`);
     }
     return added.length;
   };
@@ -3107,6 +3325,7 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const added: CustomerProfile[] = [];
+    let skippedCount = 0;
     const defaultWh =
       lockedWarehouse ||
       (currentStaff.assignedWarehouse !== 'Tất cả kho'
@@ -3116,6 +3335,19 @@ export default function App() {
       const name = String(r['Họ Tên Khách Hàng'] || r['Tên Khách Hàng'] || '').trim();
       const phone = String(r['Số Điện Thoại'] || r['Số Điện Thoại KH'] || '').trim();
       if (!name) return;
+
+      const totalPurchased = readExcelNumber(r, ['Tổng Mua (VNĐ)'], 0);
+      const totalDebt = readExcelNumber(r, ['Dư Nợ Hiện Tại (VNĐ)'], 0);
+      if (
+        !Number.isFinite(totalPurchased) ||
+        totalPurchased < 0 ||
+        !Number.isFinite(totalDebt) ||
+        totalDebt < 0
+      ) {
+        skippedCount += 1;
+        return;
+      }
+
       const grp = String(r['Nhóm Khách Hàng'] || r['Nhóm KH'] || 'Nhà nông').trim();
       if (grp && !customerGroups.includes(grp)) {
         setCustomerGroups((prev) => (prev.includes(grp) ? prev : [...prev, grp]));
@@ -3130,8 +3362,8 @@ export default function App() {
         address: String(r['Địa Chỉ'] || '').trim(),
         group: grp || 'Nhà nông',
         note: String(r['Ghi Chú'] || 'Nhập từ biểu mẫu Excel').trim(),
-        totalPurchased: Math.max(0, Number(r['Tổng Mua (VNĐ)'] || 0)),
-        totalDebt: Math.max(0, Number(r['Dư Nợ Hiện Tại (VNĐ)'] || 0)),
+        totalPurchased: Math.round(totalPurchased),
+        totalDebt: Math.round(totalDebt),
         warehouseName: wh,
         ownerId: activeUid,
         createdAt: nowIso,
@@ -3143,7 +3375,13 @@ export default function App() {
       if (isGoogleAuthenticated) {
         added.forEach((c) => void syncCustomerToFirestore(c, true));
       }
-      showToast(`Đã tải lên ${added.length} hồ sơ khách hàng từ tệp Excel!`);
+      showToast(
+        `Đã tải lên ${added.length} hồ sơ khách hàng từ tệp Excel!${
+          skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi số liệu)` : ''
+        }`
+      );
+    } else if (skippedCount > 0) {
+      showToast(`Bỏ qua ${skippedCount} dòng lỗi / số liệu âm trong tệp Excel.`);
     }
     return added.length;
   };
@@ -3154,13 +3392,26 @@ export default function App() {
     const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedSales: SaleTransaction[] = [];
     const prodDeltaById = new Map<string, number>();
+    let skippedCount = 0;
 
     rows.forEach((r, idx) => {
       const custName = String(r['Tên Khách Hàng'] || '').trim();
       const prodName = String(r['Tên Vật Tư Nông Nghiệp'] || r['Sản Phẩm'] || '').trim();
-      const qty = Math.max(1, Number(r['Số Lượng Bán'] || r['Số Lượng'] || 1));
-      const price = Math.max(0, Number(r['Đơn Giá Bán (VNĐ)'] || r['Đơn Giá (đ)'] || 0));
       if (!custName || !prodName) return;
+
+      const qty = readExcelNumber(r, ['Số Lượng Bán', 'Số Lượng'], 1);
+      const price = readExcelNumber(r, ['Đơn Giá Bán (VNĐ)', 'Đơn Giá (đ)'], 0);
+      if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price < 0) {
+        skippedCount += 1;
+        return;
+      }
+
+      const paidRaw = readExcelNumber(r, ['Khách Đã Trả (VNĐ)', 'Đã Thu (đ)'], qty * price);
+      if (!Number.isFinite(paidRaw) || paidRaw < 0) {
+        skippedCount += 1;
+        return;
+      }
+
       const wh =
         lockedWarehouse ||
         String(r['Kho Xuất Bán'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim();
@@ -3171,17 +3422,21 @@ export default function App() {
           ((custPhone && c.phone && c.phone.trim() === custPhone) ||
             normalizeVietnameseSearch(c.name) === normalizeVietnameseSearch(custName))
       );
-      const matchedProd = products.find(
+      const matchedProd = productsRef.current.find(
         (p) =>
           (!p.warehouseName || !wh || p.warehouseName === wh) &&
           normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
       );
       if (matchedProd) {
+        const projectedOut = Math.abs(prodDeltaById.get(matchedProd.id) || 0) + qty;
+        if (matchedProd.stock < projectedOut) {
+          skippedCount += 1;
+          return;
+        }
         prodDeltaById.set(matchedProd.id, (prodDeltaById.get(matchedProd.id) || 0) - qty);
       }
 
-      const paid = Math.max(0, Number(r['Khách Đã Trả (VNĐ)'] || r['Đã Thu (đ)'] || qty * price));
-      const sum = calculateSaleSummary(qty, price, paid);
+      const sum = calculateSaleSummary(qty, price, paidRaw);
       addedSales.push({
         id: `sale_xl_${Date.now()}_${idx}`,
         invoiceCode: `HD-XL-${sales.length + idx + 1}`,
@@ -3210,17 +3465,23 @@ export default function App() {
       const nextSales = [...addedSales, ...sales];
       setSales(nextSales);
       if (prodDeltaById.size > 0) {
-        setProducts((prev) =>
-          prev.map((p) => {
+        setProducts((prev) => {
+          const nextList = prev.map((p) => {
             const delta = prodDeltaById.get(p.id);
-            return delta
-              ? { ...p, stock: Math.max(0, p.stock + delta), updatedAt: nowIso }
-              : p;
-          })
-        );
+            return delta ? { ...p, stock: p.stock + delta, updatedAt: nowIso } : p;
+          });
+          productsRef.current = nextList;
+          return nextList;
+        });
       }
       setCustomers((prev) => reconcileCustomersFromSales(prev, nextSales, nowIso).customers);
-      showToast(`Đã tải lên ${addedSales.length} hóa đơn bán hàng từ tệp Excel!`);
+      showToast(
+        `Đã tải lên ${addedSales.length} hóa đơn bán hàng từ tệp Excel!${
+          skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi / vượt tồn)` : ''
+        }`
+      );
+    } else if (skippedCount > 0) {
+      showToast(`Bỏ qua ${skippedCount} dòng lỗi hoặc vượt tồn kho trong tệp Excel.`);
     }
     return addedSales.length;
   };
@@ -3231,17 +3492,34 @@ export default function App() {
     const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedImports: ImportTransaction[] = [];
     const prodDeltaById = new Map<string, { qty: number; unitCost: number }>();
+    let skippedCount = 0;
 
     rows.forEach((r, idx) => {
       const prodName = String(r['Tên Vật Tư Nhập Kho'] || r['Sản Phẩm'] || '').trim();
       const supName = String(r['Nhà Cung Cấp'] || '').trim();
-      const qty = Math.max(1, Number(r['Số Lượng Nhập'] || 1));
-      const cost = Math.max(0, Number(r['Đơn Giá Nhập (VNĐ)'] || r['Giá Nhập (đ)'] || 0));
       if (!prodName || !supName) return;
+
+      const qty = readExcelNumber(r, ['Số Lượng Nhập'], 1);
+      const cost = readExcelNumber(r, ['Đơn Giá Nhập (VNĐ)', 'Giá Nhập (đ)'], 0);
+      if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(cost) || cost < 0) {
+        skippedCount += 1;
+        return;
+      }
+
+      const paidRaw = readExcelNumber(
+        r,
+        ['Đã Thanh Toán NCC (VNĐ)', 'Đã Trả NCC (đ)'],
+        qty * cost
+      );
+      if (!Number.isFinite(paidRaw) || paidRaw < 0) {
+        skippedCount += 1;
+        return;
+      }
+
       const wh =
         lockedWarehouse ||
         String(r['Kho Nhập Hàng'] || warehouses[0] || 'Tâm An Mỹ Ngãi').trim();
-      const matchedProd = products.find(
+      const matchedProd = productsRef.current.find(
         (p) =>
           (!p.warehouseName || !wh || p.warehouseName === wh) &&
           normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
@@ -3254,11 +3532,7 @@ export default function App() {
         });
       }
 
-      const paid = Math.max(
-        0,
-        Number(r['Đã Thanh Toán NCC (VNĐ)'] || r['Đã Trả NCC (đ)'] || qty * cost)
-      );
-      const sum = calculateImportSummary(qty, cost, paid);
+      const sum = calculateImportSummary(qty, cost, paidRaw);
       addedImports.push({
         id: `imp_xl_${Date.now()}_${idx}`,
         receiptCode: `PN-XL-${imports.length + idx + 1}`,
@@ -3285,8 +3559,8 @@ export default function App() {
     if (addedImports.length > 0) {
       setImports((prev) => [...addedImports, ...prev]);
       if (prodDeltaById.size > 0) {
-        setProducts((prev) =>
-          prev.map((p) => {
+        setProducts((prev) => {
+          const nextList = prev.map((p) => {
             const delta = prodDeltaById.get(p.id);
             return delta
               ? {
@@ -3296,16 +3570,25 @@ export default function App() {
                   updatedAt: nowIso,
                 }
               : p;
-          })
-        );
+          });
+          productsRef.current = nextList;
+          return nextList;
+        });
       }
-      showToast(`Đã tải lên ${addedImports.length} phiếu nhập kho từ tệp Excel!`);
+      showToast(
+        `Đã tải lên ${addedImports.length} phiếu nhập kho từ tệp Excel!${
+          skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi số liệu)` : ''
+        }`
+      );
+    } else if (skippedCount > 0) {
+      showToast(`Bỏ qua ${skippedCount} dòng lỗi / số liệu âm trong tệp Excel.`);
     }
     return addedImports.length;
   };
 
   const handleImportDebtPaymentsFromExcel = (rows: Record<string, unknown>[]): number => {
     let updatedCount = 0;
+    let skippedCount = 0;
     const nowIso = new Date().toISOString();
     let workingSales = [...sales];
     let workingImports = [...imports];
@@ -3314,9 +3597,13 @@ export default function App() {
 
     rows.forEach((r) => {
       const code = String(r['Mã Hóa Đơn / Mã Phiếu Nhập'] || '').trim();
-      const amount = Math.max(0, Number(r['Số Tiền Thanh Toán Đợt Này (VNĐ)'] || 0));
+      const amount = readExcelNumber(r, ['Số Tiền Thanh Toán Đợt Này (VNĐ)'], 0);
       const note = String(r['Ghi Chú Thanh Toán'] || 'Cập nhật từ Excel').trim();
-      if (!code || amount <= 0) return;
+      if (!code) return;
+      if (!Number.isFinite(amount) || amount <= 0) {
+        skippedCount += 1;
+        return;
+      }
 
       if (code.startsWith('HD-')) {
         workingSales = workingSales.map((s) => {
@@ -3353,7 +3640,13 @@ export default function App() {
       setImports(workingImports);
     }
     if (updatedCount > 0) {
-      showToast(`Đã cập nhật thanh toán cho ${updatedCount} chứng từ công nợ từ Excel!`);
+      showToast(
+        `Đã cập nhật thanh toán cho ${updatedCount} chứng từ công nợ từ Excel!${
+          skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi số tiền)` : ''
+        }`
+      );
+    } else if (skippedCount > 0) {
+      showToast(`Bỏ qua ${skippedCount} dòng có số tiền không hợp lệ trong tệp Excel.`);
     }
     return updatedCount;
   };
@@ -3705,7 +3998,7 @@ export default function App() {
           notificationPrefs,
           autoDailyBackupEnabled,
         },
-      });
+      }, null);
       setRtdbWriteTrigger((n) => n + 1);
 
       showToast(
@@ -3767,6 +4060,17 @@ export default function App() {
     const target = staffList.find((s) => s.uid === payload.uid);
     if (!target) {
       return { ok: false, message: 'Không tìm thấy tài khoản cần cập nhật.' };
+    }
+    const cleanNextEmail = (payload.email || '').trim().toLowerCase();
+    const cleanNextPhone = (payload.phone || '').replace(/\D+/g, '');
+    if (
+      !canAccountCreateStaff(target) &&
+      (cleanNextEmail === ADMIN_BACKUP_EMAIL.toLowerCase() || cleanNextPhone === ADMIN_PRIMARY_PHONE)
+    ) {
+      return {
+        ok: false,
+        message: 'Email hoặc SĐT này thuộc quyền Quản trị chính, không thể gán cho tài khoản khác.',
+      };
     }
     const nowIso = new Date().toISOString();
     const oldWarehouse = target.assignedWarehouse;
@@ -4310,7 +4614,8 @@ export default function App() {
         void syncCustomerToFirestore(c, true);
       });
     }
-    if (Array.isArray(payload.suppliers)) {
+    const missingSet = new Set(payload.missingCollections || []);
+    if (Array.isArray(payload.suppliers) && !missingSet.has('suppliers')) {
       setSuppliers(payload.suppliers);
     }
     if (Array.isArray(payload.sales)) {
@@ -4331,13 +4636,13 @@ export default function App() {
     if (Array.isArray(payload.paymentGroups) && payload.paymentGroups.length > 0) {
       setPaymentGroups(payload.paymentGroups);
     }
-    if (Array.isArray(payload.receiptVouchers)) {
+    if (Array.isArray(payload.receiptVouchers) && !missingSet.has('receiptVouchers')) {
       setReceiptVouchers(payload.receiptVouchers);
     }
-    if (Array.isArray(payload.paymentVouchers)) {
+    if (Array.isArray(payload.paymentVouchers) && !missingSet.has('paymentVouchers')) {
       setPaymentVouchers(payload.paymentVouchers);
     }
-    if (Array.isArray(payload.savedVouchers)) {
+    if (Array.isArray(payload.savedVouchers) && !missingSet.has('savedVouchers')) {
       setSavedVouchers(payload.savedVouchers);
     }
     if (isAdminAccount && Array.isArray(payload.staffList) && payload.staffList.length > 0) {
@@ -5950,6 +6255,7 @@ export default function App() {
               onGoogleLogin={handleGoogleLogin}
               onSwitchRolePreview={setRole}
               onCollectCustomerDebt={handleCollectCustomerDebt}
+              onCollectCustomerDebtBatch={handleCollectCustomerDebtBatch}
               onSettleCustomerTotalDebtFifo={handleSettleCustomerTotalDebtFifo}
               onExecuteFiscalYearCloseAndCleanup={handleExecuteFiscalYearCloseAndCleanup}
               onExecuteFullApplicationDataWipe={handleExecuteFullApplicationDataWipe}
