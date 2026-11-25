@@ -41,8 +41,6 @@ import {
   CommunityMarketPriceEntry,
   DEFAULT_GEMINI_MODEL,
   estimateVietnameseTokens,
-  extractGroundingSourcesFromMetadata,
-  extractVisibleTextFromGeminiParts,
   formatCommunityMarketPriceAnswer,
   GEMINI_MODEL_OPTIONS,
   GEMINI_QUERY_CACHE_TTL_MS,
@@ -869,219 +867,100 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     }
 
     if (!replyText) {
-      // Step 3A: Try same-origin backend (/api/gemini/chat) with Firebase ID Token
-      try {
-        const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (idToken) {
-          headers.Authorization = `Bearer ${idToken}`;
-        }
+      // Step 3A: Strictly require authenticated Firebase user & route through Hostinger Node backend
+      const fbUser = auth.currentUser;
+      if (!fbUser) {
+        quotaBlockedByServer = true;
+        replyText = 'Vui lòng đăng nhập tài khoản Google / Gmail để sử dụng Trợ lý A.I.';
+      } else {
+        try {
+          const idToken = await fbUser.getIdToken();
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 24000);
+          const response = await fetch('/api/gemini/chat', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              message: promptText,
+              history: previousHistory,
+              model: selectedModel,
+              queryScope: routing.queryScope,
+              systemInstruction: activeSystemInstruction,
+              internalSystemInstruction,
+              externalSystemInstruction,
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(timer);
 
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 24000);
-        const response = await fetch('/api/gemini/chat', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            message: promptText,
-            history: previousHistory,
-            model: selectedModel,
-            accountId: accountQuotaKey,
-            bonusTokens: latestQuotaCheck.normalizedQuota.bonusTokens || 0,
-            queryScope: routing.queryScope,
-            systemInstruction: activeSystemInstruction,
-            internalSystemInstruction,
-            externalSystemInstruction,
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timer);
-
-        const contentType = response.headers.get('content-type') || '';
-        if (response.status === 401 && contentType.includes('application/json')) {
-          const authErr = (await response.json()) as { error?: string; authRequired?: boolean };
-          quotaBlockedByServer = true;
-          replyText =
-            authErr.error ||
-            'Vui lòng đăng nhập tài khoản Google / Gmail để sử dụng Trợ lý A.I.';
-        } else if (response.status === 429 && contentType.includes('application/json')) {
-          const errData = (await response.json()) as {
-            error?: string;
-            quotaExceeded?: boolean;
-            quota?: AccountDailyAiQuota;
-          };
-          if (errData.quotaExceeded) {
+          const contentType = response.headers.get('content-type') || '';
+          if (response.status === 401 && contentType.includes('application/json')) {
+            const authErr = (await response.json()) as { error?: string; authRequired?: boolean };
             quotaBlockedByServer = true;
-            if (errData.quota) {
+            replyText =
+              authErr.error ||
+              'Vui lòng đăng nhập tài khoản Google / Gmail để sử dụng Trợ lý A.I.';
+          } else if (response.status === 429 && contentType.includes('application/json')) {
+            const errData = (await response.json()) as {
+              error?: string;
+              quotaExceeded?: boolean;
+              quota?: AccountDailyAiQuota;
+            };
+            if (errData.quotaExceeded) {
+              quotaBlockedByServer = true;
+              if (errData.quota) {
+                serverReturnedQuota = normalizeAccountDailyAiQuotaForToday(
+                  errData.quota,
+                  accountQuotaKey
+                );
+              }
+              replyText =
+                errData.error ||
+                'Tài khoản đã hết hạn mức câu hỏi Trợ lý A.I trong ngày hôm nay. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai.';
+            }
+          } else if (response.ok && contentType.includes('application/json')) {
+            const data = (await response.json()) as {
+              text?: string;
+              modelUsed?: GeminiConcreteModelId;
+              sources?: GeminiGroundingSource[];
+              apiConnected?: boolean;
+              verifiedWebSearch?: boolean;
+              usage?: { totalTokens?: number };
+              quota?: AccountDailyAiQuota;
+            };
+            if (typeof data.apiConnected === 'boolean') {
+              apiConnectedFlag = data.apiConnected;
+            }
+            if (Array.isArray(data.sources) && data.sources.length > 0) {
+              replySources = data.sources;
+              usedWebSearchFlag = true;
+            }
+            if (data.quota) {
               serverReturnedQuota = normalizeAccountDailyAiQuotaForToday(
-                errData.quota,
+                data.quota,
                 accountQuotaKey
               );
             }
-            replyText =
-              errData.error ||
-              'Tài khoản đã hết hạn mức câu hỏi Trợ lý A.I trong ngày hôm nay. Hạn mức sẽ tự động làm mới vào 00:00 ngày mai.';
-          }
-        } else if (response.ok && contentType.includes('application/json')) {
-          const data = (await response.json()) as {
-            text?: string;
-            modelUsed?: GeminiConcreteModelId;
-            sources?: GeminiGroundingSource[];
-            apiConnected?: boolean;
-            verifiedWebSearch?: boolean;
-            usage?: { totalTokens?: number };
-            quota?: AccountDailyAiQuota;
-          };
-          if (typeof data.apiConnected === 'boolean') {
-            apiConnectedFlag = data.apiConnected;
-          }
-          if (Array.isArray(data.sources) && data.sources.length > 0) {
-            replySources = data.sources;
-            usedWebSearchFlag = true;
-          }
-          if (data.quota) {
-            serverReturnedQuota = normalizeAccountDailyAiQuotaForToday(
-              data.quota,
-              accountQuotaKey
-            );
-          }
-          if (data.text && data.text.trim()) {
-            replyText = data.text.trim();
-            if (data.modelUsed) {
-              usedModelId = data.modelUsed;
-            }
-            if (data.verifiedWebSearch === false && routing.requireVerifiedSearch) {
-              unverifiedExternalBlocked = true;
-              tokensUsedCount = 0;
-            } else {
-              tokensUsedCount =
-                Number(data.usage?.totalTokens) ||
-                estimateVietnameseTokens(promptText + replyText);
-            }
-          }
-        }
-      } catch {
-        // Same-origin backend unavailable (e.g. static Hostinger hosting) -> try direct Gemini REST API
-      }
-
-      // Step 3B: Direct Gemini REST API fallback (for static Hostinger build)
-      if (!replyText && !quotaBlockedByServer) {
-        const viteEnv = (import.meta as { env?: Record<string, string | undefined> }).env;
-        const clientApiKey = (viteEnv?.VITE_GEMINI_API_KEY || '').trim();
-
-        if (clientApiKey) {
-          const formattedContents = [
-            ...previousHistory.map((item) => ({
-              role: item.role,
-              parts: [{ text: item.text }],
-            })),
-            {
-              role: 'user',
-              parts: [{ text: promptText }],
-            },
-          ];
-
-          for (const candidateModel of routing.fallbackModels) {
-            const allowNativeSearch =
-              routing.enableExternalSearch && candidateModel !== 'gemma-4-26b-a4b-it';
-            const searchAttempts = routing.requireVerifiedSearch
-              ? allowNativeSearch
-                ? [true]
-                : []
-              : allowNativeSearch
-              ? [true, false]
-              : [false];
-
-            for (const useGoogleSearch of searchAttempts) {
-              try {
-                const controller = new AbortController();
-                const timer = setTimeout(
-                  () => controller.abort(),
-                  useGoogleSearch ? 25000 : 16000
-                );
-
-                const thinkingLevel =
-                  candidateModel === 'gemini-4-hydrogen'
-                    ? routing.thinkingLevel === 'MEDIUM'
-                      ? 'MEDIUM'
-                      : 'LOW'
-                    : 'MINIMAL';
-                const maxOutputTokens =
-                  candidateModel === 'gemini-4-hydrogen'
-                    ? Math.max(2048, routing.maxOutputTokens)
-                    : Math.max(1400, routing.maxOutputTokens);
-
-                const directResponse = await fetch(
-                  `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${encodeURIComponent(
-                    clientApiKey
-                  )}`,
-                  {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                      systemInstruction: {
-                        parts: [{ text: activeSystemInstruction }],
-                      },
-                      contents: formattedContents,
-                      generationConfig: {
-                        maxOutputTokens,
-                        thinkingConfig: { thinkingLevel },
-                      },
-                      ...(useGoogleSearch ? { tools: [{ google_search: {} }] } : {}),
-                    }),
-                    signal: controller.signal,
-                  }
-                );
-                clearTimeout(timer);
-
-                if (!directResponse.ok) {
-                  continue;
-                }
-
-                const json = (await directResponse.json()) as {
-                  candidates?: Array<{
-                    content?: { parts?: Array<{ text?: string; thought?: boolean }> };
-                    groundingMetadata?: unknown;
-                  }>;
-                  usageMetadata?: { totalTokenCount?: number };
-                };
-
-                const visibleText = extractVisibleTextFromGeminiParts(
-                  json.candidates?.[0]?.content?.parts
-                );
-
-                if (
-                  visibleText &&
-                  !visibleText.startsWith('google:search{') &&
-                  !visibleText.startsWith('call:google:search')
-                ) {
-                  const groundingLinks = extractGroundingSourcesFromMetadata(
-                    json.candidates?.[0]?.groundingMetadata
-                  );
-
-                  // Reject ungrounded guesses when verified search is required; escalate to next model
-                  if (routing.requireVerifiedSearch && groundingLinks.length === 0) {
-                    continue;
-                  }
-
-                  replyText = visibleText;
-                  usedModelId = candidateModel;
-                  apiConnectedFlag = true;
-                  if (groundingLinks.length > 0) {
-                    replySources = groundingLinks;
-                    usedWebSearchFlag = true;
-                  }
-                  tokensUsedCount =
-                    Number(json.usageMetadata?.totalTokenCount) ||
-                    estimateVietnameseTokens(promptText + visibleText);
-                  break;
-                }
-              } catch {
-                // try next attempt / model
+            if (data.text && data.text.trim()) {
+              replyText = data.text.trim();
+              if (data.modelUsed) {
+                usedModelId = data.modelUsed;
+              }
+              if (data.verifiedWebSearch === false && routing.requireVerifiedSearch) {
+                unverifiedExternalBlocked = true;
+                tokensUsedCount = 0;
+              } else {
+                tokensUsedCount =
+                  Number(data.usage?.totalTokens) ||
+                  estimateVietnameseTokens(promptText + replyText);
               }
             }
-            if (replyText) break;
           }
+        } catch {
+          // Backend unreachable or network error -> fall back safely to Step 3C offline report
         }
       }
 
