@@ -28,7 +28,7 @@
         },
         "sales": {
           "$recKey": {
-            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('quantity') || newData.child('quantity').isNumber()) && (!newData.hasChild('totalAmount') || newData.child('totalAmount').isNumber()) && (!newData.hasChild('paidAmount') || newData.child('paidAmount').isNumber()) && (!newData.hasChild('debtAmount') || newData.child('debtAmount').isNumber())"
+            ".validate": "newData.hasChild('id') && newData.child('id').isString() && newData.child('id').val().length <= 200 && (!newData.hasChild('quantity') || newData.child('quantity').isNumber()) && (!newData.hasChild('unitCost') || newData.child('unitCost').isNumber()) && (!newData.hasChild('totalAmount') || newData.child('totalAmount').isNumber()) && (!newData.hasChild('paidAmount') || newData.child('paidAmount').isNumber()) && (!newData.hasChild('debtAmount') || newData.child('debtAmount').isNumber())"
           }
         },
         "imports": {

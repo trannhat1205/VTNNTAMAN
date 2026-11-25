@@ -68,6 +68,8 @@ import {
   normalizeVietnameseSearch,
   parseAndValidateBackupPayload,
   previewFiscalYearCloseAndCleanup,
+  resolveSaleGiftUnitCost,
+  resolveSaleUnitCost,
   TaxFinancialDrillDownCode,
 } from '../utils/businessLogic';
 import {
@@ -488,10 +490,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
   const totalGiftItemsCount = salesInRange.reduce((sum, s) => sum + (s.giftQuantity || 0), 0);
   const totalGiftCost = salesInRange.reduce((sum, s) => {
     if (!s.giftQuantity || s.giftQuantity <= 0) return sum;
-    const giftProd = s.giftProductId ? products.find((p) => p.id === s.giftProductId) : undefined;
-    const giftUnitCost =
-      s.giftUnitCost !== undefined ? s.giftUnitCost : giftProd ? giftProd.importPrice : 0;
-    return sum + giftUnitCost * s.giftQuantity;
+    return sum + Math.round(resolveSaleGiftUnitCost(s, products) * s.giftQuantity);
   }, 0);
   const totalCollected = salesInRange.reduce((sum, s) => sum + s.paidAmount, 0);
   const totalCustomerDebt = salesInRange.reduce((sum, s) => sum + s.debtAmount, 0);
@@ -507,18 +506,10 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
 
   const estimatedGrossProfit = useMemo(() => {
     return salesInRange.reduce((sum, sale) => {
-      const prod = products.find((p) => p.id === sale.productId);
-      const cost = (prod ? prod.importPrice : sale.unitPrice * 0.85) * sale.quantity;
-      const giftProd = sale.giftProductId
-        ? products.find((p) => p.id === sale.giftProductId)
-        : undefined;
+      const cost = Math.round(resolveSaleUnitCost(sale, products) * sale.quantity);
       const giftCost =
         sale.giftQuantity && sale.giftQuantity > 0
-          ? (sale.giftUnitCost !== undefined
-              ? sale.giftUnitCost
-              : giftProd
-              ? giftProd.importPrice
-              : 0) * sale.giftQuantity
+          ? Math.round(resolveSaleGiftUnitCost(sale, products) * sale.giftQuantity)
           : 0;
       return sum + (sale.totalAmount - cost - giftCost);
     }, 0);

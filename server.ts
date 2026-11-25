@@ -21,6 +21,11 @@ import {
   recordAccountDailyAiUsage,
   shouldEnableExternalWebSearch,
 } from './src/utils/geminiReportAssistant';
+import {
+  applyGeminiCors,
+  fetchVerifiedBonusTokens,
+  verifyFirebaseIdToken,
+} from './serverAuth.mjs';
 
 const PORT = 3000;
 const HOST = '0.0.0.0';
@@ -95,6 +100,7 @@ function getCandidateApiKeys(): string[] {
     if (fs.existsSync(envLocalPath)) {
       const parsed = dotenv.parse(fs.readFileSync(envLocalPath, 'utf8'));
       pushKey(parsed.GEMINI_API_KEY);
+      pushKey(parsed.GOOGLE_API_KEY);
       pushKey(parsed.VITE_GEMINI_API_KEY);
     }
   } catch {
@@ -102,6 +108,7 @@ function getCandidateApiKeys(): string[] {
   }
 
   pushKey(process.env.GEMINI_API_KEY);
+  pushKey(process.env.GOOGLE_API_KEY);
   pushKey(process.env.VITE_GEMINI_API_KEY);
   pushKey(process.env.API_KEY);
   return keys;
@@ -246,12 +253,9 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
 
-  // Enable CORS on /api/gemini/* so deployed frontends (e.g. https://vtnntaman.com on Hostinger)
-  // can securely reach the live Gemini backend endpoint.
+  // Restrict CORS on /api/gemini/* to trusted origins with Firebase ID token authorization.
   app.use('/api/gemini', (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    applyGeminiCors(req, res);
     if (req.method === 'OPTIONS') {
       res.status(204).end();
       return;
@@ -259,54 +263,28 @@ async function startServer() {
     next();
   });
 
-  app.get('/api/gemini/status', async (_req: express.Request, res: express.Response) => {
-    const candidateKeys = getCandidateApiKeys();
-    if (candidateKeys.length === 0) {
-      res.json({
-        configured: false,
-        keyState: 'not_configured' as GeminiKeyStatusState,
-        maskedKey: 'Chưa cấu hình',
-      });
+  app.get('/api/gemini/status', async (req: express.Request, res: express.Response) => {
+    const authCheck = await verifyFirebaseIdToken(req.headers.authorization);
+    if (!authCheck.ok) {
+      res.status(401).json({ error: authCheck.error, authRequired: true });
       return;
     }
-
-    for (const candidateKey of candidateKeys) {
-      try {
-        const ai = new GoogleGenAI({
-          apiKey: candidateKey,
-          httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
-        });
-        await withTimeout(
-          ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite',
-            contents: 'ping',
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-              maxOutputTokens: 16,
-            },
-          }),
-          6000
-        );
-        res.json({
-          configured: true,
-          keyState: 'connected' as GeminiKeyStatusState,
-          maskedKey: maskApiKey(candidateKey),
-        });
-        return;
-      } catch {
-        // try next key
-      }
-    }
-
+    const candidateKeys = getCandidateApiKeys();
+    const configured = candidateKeys.length > 0;
     res.json({
-      configured: true,
-      keyState: 'quota_depleted' as GeminiKeyStatusState,
-      maskedKey: maskApiKey(candidateKeys[0]),
+      configured,
+      keyState: (configured ? 'connected' : 'not_configured') as GeminiKeyStatusState,
     });
   });
 
   app.post('/api/gemini/chat', async (req: express.Request, res: express.Response) => {
     try {
+      const authCheck = await verifyFirebaseIdToken(req.headers.authorization);
+      if (!authCheck.ok) {
+        res.status(401).json({ error: authCheck.error, authRequired: true });
+        return;
+      }
+
       const {
         message,
         history,
@@ -314,8 +292,6 @@ async function startServer() {
         systemInstruction,
         internalSystemInstruction,
         externalSystemInstruction,
-        accountId,
-        bonusTokens,
       } = req.body as {
         message?: string;
         history?: ChatHistoryTurn[];
@@ -323,8 +299,6 @@ async function startServer() {
         systemInstruction?: string;
         internalSystemInstruction?: string;
         externalSystemInstruction?: string;
-        accountId?: string;
-        bonusTokens?: number;
       };
 
       const normalizedMessage = typeof message === 'string' ? message.normalize('NFC').trim() : '';
@@ -333,10 +307,13 @@ async function startServer() {
         return;
       }
 
-      const effectiveAccountId =
-        typeof accountId === 'string' && accountId.trim() ? accountId.trim() : 'guest';
+      const effectiveAccountId = authCheck.effectiveAccountId;
       const baseQuota = getOrResetServerAccountQuota(effectiveAccountId);
-      const safeBonusTokens = Math.max(0, Math.round(Number(bonusTokens) || 0));
+      const safeBonusTokens = await fetchVerifiedBonusTokens(
+        effectiveAccountId,
+        authCheck.idToken,
+        baseQuota.date
+      );
       const currentQuota =
         safeBonusTokens > 0
           ? applyAdminTokenGrantToQuota(baseQuota, {
@@ -399,7 +376,6 @@ async function startServer() {
           apiConnected: true,
           cached: true,
           keyState: 'connected' as GeminiKeyStatusState,
-          maskedKey: maskApiKey(candidateKeys[0]),
           sources: cachedResponse.sources,
           usage: { totalTokens: 0 },
           quota: updatedQuota,
@@ -559,7 +535,6 @@ async function startServer() {
                   apiConnected: true,
                   verifiedWebSearch: groundingSources.length > 0,
                   keyState: 'connected' as GeminiKeyStatusState,
-                  maskedKey: maskApiKey(apiKey),
                   sources: combinedSources,
                   usage: { totalTokens },
                   quota: updatedQuota,

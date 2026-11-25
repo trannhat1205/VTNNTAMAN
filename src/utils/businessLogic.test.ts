@@ -23,6 +23,7 @@ import {
   computeSaleEditStockDeltas,
   computeSupplierOldDebtSummary,
   computeTaxAuthorityFinancialStatement,
+  computeWeightedAverageImportPrice,
   createAuditLogEntry,
   DEBT_TERM_DAY_OPTIONS,
   evaluateDebtUrgency,
@@ -34,6 +35,8 @@ import {
   filterCustomers,
   filterRecordsBySelectedWarehouses,
   filterSearchableOptions,
+  findLinkedPaymentVouchersForImport,
+  findLinkedReceiptVouchersForSale,
   formatSelectedWarehousesBadge,
   generateFiscalYearOptions,
   generateSmartNotifications,
@@ -48,6 +51,7 @@ import {
   previewFiscalYearCloseAndCleanup,
   previewSupplierFifoDebtSettlement,
   readExcelNumber,
+  recalculateImportPriceOnImportMutation,
   reconcileCustomersFromSales,
   resolveActiveWarehouses,
   reverseCustomerReceiptVoucherAllocations,
@@ -118,6 +122,8 @@ import {
   toRtdbUserDirectoryProfile,
 } from './rtdbSyncLogic';
 import {
+  CashPaymentVoucher,
+  CashReceiptVoucher,
   CustomerProfile,
   ImportTransaction,
   NotificationPrefs,
@@ -197,7 +203,7 @@ test('applySaleToInventory decrements stock and throws when insufficient stock',
   }, /Tồn kho không đủ/);
 });
 
-test('applyImportToInventory increments stock and updates importPrice', () => {
+test('applyImportToInventory increments stock and computes weighted average importPrice', () => {
   const { updatedProduct } = applyImportToInventory(
     mockProducts,
     'prod_2',
@@ -206,7 +212,8 @@ test('applyImportToInventory increments stock and updates importPrice', () => {
     '2026-11-16T02:00:00Z'
   );
   assert.equal(updatedProduct.stock, 30);
-  assert.equal(updatedProduct.importPrice, 148000);
+  // Weighted average: (6 * 145000 + 24 * 148000) / (6 + 24) = 147400
+  assert.equal(updatedProduct.importPrice, 147400);
   assert.equal(evaluateStockAlert(updatedProduct), 'normal');
 });
 
@@ -2998,6 +3005,135 @@ test('Stage 2 P0 fixes: NaN inventory guards, readExcelNumber, backup missingCol
   assert.equal(reversed.updatedSales[1].debtAmount, 0);
   assert.equal(reversed.updatedSales[1].status, 'paid');
 });
+
+test('Weighted average cost, SaleTransaction unitCost snapshot immutability, import reversal, and settled voucher guards', () => {
+  // 1. Weighted average import price across batches
+  assert.equal(computeWeightedAverageImportPrice(6, 145000, 24, 148000), 147400);
+  assert.equal(computeWeightedAverageImportPrice(0, 0, 10, 200000), 200000);
+
+  // 2. Old sale with snapshotted unitCost keeps exact historical profit even when product.importPrice later rises to 200,000
+  const prodAfterExpensiveImport = {
+    ...mockProducts[1],
+    stock: 40,
+    importPrice: 200000,
+  };
+  const historicalSale: SaleTransaction = {
+    id: 'sale_hist_1',
+    invoiceCode: 'HD-HIST-001',
+    customerId: 'cust_1',
+    customerName: 'Anh Tư',
+    customerPhone: '0901',
+    productId: 'prod_2',
+    productName: mockProducts[1].name,
+    unit: 'Chai',
+    quantity: 10,
+    unitPrice: 175000,
+    unitCost: 147400,
+    totalAmount: 1750000,
+    paidAmount: 1750000,
+    debtAmount: 0,
+    dueDate: '2026-11-26',
+    status: 'paid',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-18T05:00:00Z',
+    updatedAt: '2026-11-18T05:00:00Z',
+  };
+  const report = computeCashflowAndFinancialReport({
+    sales: [historicalSale],
+    imports: [],
+    products: [prodAfterExpensiveImport],
+  });
+  assert.equal(report.totalCogs, 1474000);
+  assert.equal(report.grossProfit, 1750000 - 1474000);
+
+  // 3. Deleting the 24 @ 148,000 import reverts weighted average importPrice back to 145,000
+  const revertedCost = recalculateImportPriceOnImportMutation({
+    product: { id: 'prod_2', stock: 30, importPrice: 147400 },
+    oldQty: 24,
+    oldUnitCost: 148000,
+    newQty: 0,
+    newUnitCost: 0,
+    remainingImports: [],
+  });
+  assert.equal(revertedCost, 145000);
+
+  // 4. Linked debt settlement voucher detection blocks editing/deleting settled sales & imports without matching other warehouses
+  const receipts: CashReceiptVoucher[] = [
+    {
+      id: 'rv_1',
+      voucherCode: 'PT-001',
+      groupName: 'Thu nợ',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      partnerName: 'Anh Tư',
+      partnerPhone: '0901',
+      amount: 500000,
+      paymentMethod: 'Tiền mặt',
+      isDebtSettlement: true,
+      settledAllocations: [
+        {
+          recordId: 'sale_hist_1',
+          code: 'HD-HIST-001',
+          date: '2026-11-18',
+          dueDate: '2026-11-26',
+          productName: 'Radiant',
+          previousDebt: 500000,
+          allocatedAmount: 500000,
+          remainingDebt: 0,
+        },
+      ],
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-19T05:00:00Z',
+      updatedAt: '2026-11-19T05:00:00Z',
+    },
+  ];
+  assert.equal(findLinkedReceiptVouchersForSale(historicalSale, receipts).length, 1);
+  assert.equal(
+    findLinkedReceiptVouchersForSale({ id: 'sale_other_wh', invoiceCode: 'HD-HIST-001' }, receipts).length,
+    0
+  );
+
+  const payments: CashPaymentVoucher[] = [
+    {
+      id: 'pv_1',
+      voucherCode: 'PC-001',
+      groupName: 'Trả nợ NCC',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      partnerName: 'NCC A',
+      partnerPhone: '0902',
+      amount: 1000000,
+      paymentMethod: 'Chuyển khoản',
+      isDebtSettlement: true,
+      settledAllocations: [
+        {
+          recordId: 'imp_1',
+          code: 'PN-001',
+          date: '2026-11-18',
+          dueDate: '2026-11-26',
+          productName: 'Radiant',
+          previousDebt: 1000000,
+          allocatedAmount: 1000000,
+          remainingDebt: 0,
+        },
+      ],
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-19T05:00:00Z',
+      updatedAt: '2026-11-19T05:00:00Z',
+    },
+  ];
+  assert.equal(findLinkedPaymentVouchersForImport({ id: 'imp_1', receiptCode: 'PN-001' }, payments).length, 1);
+  assert.equal(
+    findLinkedPaymentVouchersForImport({ id: 'imp_other', receiptCode: 'PN-001' }, payments).length,
+    0
+  );
+});
+
 
 
 

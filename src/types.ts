@@ -77,6 +77,7 @@ export interface SaleTransaction {
   unit: string;
   quantity: number;
   unitPrice: number;
+  unitCost?: number;
   totalAmount: number;
   paidAmount: number;
   debtAmount: number;

@@ -7,10 +7,10 @@
     "dev": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview --port=3000 --host=0.0.0.0",
-    "start": "node server.ts",
+    "start": "node server.js",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/utils/businessLogic.test.ts src/utils/rtdbSyncLogic.test.ts firestore.rules.test.ts",
+    "test": "tsx --test src/utils/businessLogic.test.ts src/utils/rtdbSyncLogic.test.ts firestore.rules.test.ts serverAuth.test.ts",
     "verify": "npm run lint && npm test && npm run build"
   },
   "engines": {

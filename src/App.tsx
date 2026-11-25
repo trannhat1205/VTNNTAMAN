@@ -71,6 +71,7 @@ import {
   canViewAuditHistory,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
+  computeWeightedAverageImportPrice,
   createAuditLogEntry,
   evaluateDebtUrgency,
   evaluateStaffAccessScope,
@@ -79,6 +80,8 @@ import {
   executeFullApplicationDataWipe,
   extractCustomWarehouseSuffix,
   filterRecordsBySelectedWarehouses,
+  findLinkedPaymentVouchersForImport,
+  findLinkedReceiptVouchersForSale,
   formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
   formatVND,
@@ -93,6 +96,7 @@ import {
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
   readExcelNumber,
+  recalculateImportPriceOnImportMutation,
   reconcileCustomersFromSales,
   resolveActiveWarehouses,
   reverseCustomerReceiptVoucherAllocations,
@@ -1508,6 +1512,7 @@ export default function App() {
       unit: updatedProduct.unit,
       quantity: payload.quantity,
       unitPrice: payload.unitPrice,
+      unitCost: Math.max(0, Math.round(updatedProduct.importPrice || 0)),
       totalAmount: summary.totalAmount,
       paidAmount: summary.paidAmount,
       debtAmount: summary.debtAmount,
@@ -1627,6 +1632,15 @@ export default function App() {
     const nowIso = new Date().toISOString();
     if (!existing) return;
 
+    const linkedReceipts = findLinkedReceiptVouchersForSale(existing, receiptVouchers);
+    if (linkedReceipts.length > 0) {
+      const codes = linkedReceipts.map((r) => r.voucherCode).join(', ');
+      showToast(
+        `Đơn bán ${existing.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi sửa hoặc xóa đơn!`
+      );
+      return;
+    }
+
     const updated = updateSaleRecord(existing, changes, nowIso);
 
     // Validate stock availability BEFORE committing sale edit or clamping stock
@@ -1696,12 +1710,22 @@ export default function App() {
   const handleDeleteSale = (saleId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = sales.find((s) => s.id === saleId);
+    if (target) {
+      const linkedReceipts = findLinkedReceiptVouchersForSale(target, receiptVouchers);
+      if (linkedReceipts.length > 0) {
+        const codes = linkedReceipts.map((r) => r.voucherCode).join(', ');
+        showToast(
+          `Đơn bán ${target.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi sửa hoặc xóa đơn!`
+        );
+        return;
+      }
+    }
     const nowIso = new Date().toISOString();
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     if (target) {
       // Restore sold & gift inventory stock
-      setProducts((prev) =>
-        prev.map((p) => {
+      setProducts((prev) => {
+        const nextList = prev.map((p) => {
           let restoreQty = 0;
           if (p.id === target.productId) restoreQty += target.quantity;
           if (target.giftProductId && p.id === target.giftProductId) {
@@ -1711,8 +1735,10 @@ export default function App() {
           const restored = { ...p, stock: p.stock + restoreQty, updatedAt: nowIso };
           if (isGoogleAuthenticated) void syncProductToFirestore(restored, false);
           return restored;
-        })
-      );
+        });
+        productsRef.current = nextList;
+        return nextList;
+      });
 
       // Reconcile customer purchase & debt totals
       const nextSales = sales.filter((s) => s.id !== saleId);
@@ -1872,6 +1898,15 @@ export default function App() {
     const nowIso = new Date().toISOString();
     if (!existing) return;
 
+    const linkedPayments = findLinkedPaymentVouchersForImport(existing, paymentVouchers);
+    if (linkedPayments.length > 0) {
+      const codes = linkedPayments.map((p) => p.voucherCode).join(', ');
+      showToast(
+        `Phiếu nhập ${existing.receiptCode} đã có phiếu chi trả nợ (${codes}). Vui lòng hủy/xóa phiếu chi trước khi sửa hoặc xóa phiếu nhập!`
+      );
+      return;
+    }
+
     const updated = updateImportRecord(existing, changes, nowIso);
     const qtyDelta = updated.quantity - existing.quantity;
     if (qtyDelta < 0) {
@@ -1885,16 +1920,25 @@ export default function App() {
       }
     }
 
-    setImports((prev) => prev.map((imp) => (imp.id === importId ? updated : imp)));
+    const nextImports = imports.map((imp) => (imp.id === importId ? updated : imp));
+    setImports(nextImports);
 
     if (qtyDelta !== 0 || updated.unitCost !== existing.unitCost) {
       setProducts((prev) => {
         const nextList = prev.map((p) => {
           if (p.id !== existing.productId) return p;
+          const nextAvgPrice = recalculateImportPriceOnImportMutation({
+            product: p,
+            oldQty: existing.quantity,
+            oldUnitCost: existing.unitCost,
+            newQty: updated.quantity,
+            newUnitCost: updated.unitCost,
+            remainingImports: nextImports,
+          });
           const nextProd = {
             ...p,
             stock: p.stock + qtyDelta,
-            importPrice: updated.unitCost > 0 ? updated.unitCost : p.importPrice,
+            importPrice: nextAvgPrice,
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
@@ -1930,6 +1974,14 @@ export default function App() {
     const target = imports.find((imp) => imp.id === importId);
     const nowIso = new Date().toISOString();
     if (target) {
+      const linkedPayments = findLinkedPaymentVouchersForImport(target, paymentVouchers);
+      if (linkedPayments.length > 0) {
+        const codes = linkedPayments.map((p) => p.voucherCode).join(', ');
+        showToast(
+          `Phiếu nhập ${target.receiptCode} đã có phiếu chi trả nợ (${codes}). Vui lòng hủy/xóa phiếu chi trước khi sửa hoặc xóa phiếu nhập!`
+        );
+        return;
+      }
       const targetProd = productsRef.current.find((p) => p.id === target.productId);
       if (targetProd && targetProd.stock < target.quantity) {
         const alreadySold = target.quantity - targetProd.stock;
@@ -1939,14 +1991,24 @@ export default function App() {
         return;
       }
     }
-    setImports((prev) => prev.filter((imp) => imp.id !== importId));
+    const nextImports = imports.filter((imp) => imp.id !== importId);
+    setImports(nextImports);
     if (target) {
       setProducts((prev) => {
         const nextList = prev.map((p) => {
           if (p.id !== target.productId) return p;
+          const nextAvgPrice = recalculateImportPriceOnImportMutation({
+            product: p,
+            oldQty: target.quantity,
+            oldUnitCost: target.unitCost,
+            newQty: 0,
+            newUnitCost: 0,
+            remainingImports: nextImports,
+          });
           const adjusted = {
             ...p,
             stock: p.stock - target.quantity,
+            importPrice: nextAvgPrice,
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(adjusted, false);
@@ -3448,6 +3510,7 @@ export default function App() {
         unit: matchedProd?.unit || String(r['Đơn Vị'] || 'Bao').trim(),
         quantity: qty,
         unitPrice: price,
+        unitCost: matchedProd ? Math.max(0, Math.round(matchedProd.importPrice || 0)) : Math.round(price * 0.85),
         totalAmount: sum.totalAmount,
         paidAmount: sum.paidAmount,
         debtAmount: sum.debtAmount,
@@ -3491,7 +3554,7 @@ export default function App() {
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const defaultDueDate = computeDueDateAfterDays(7, getTodayVietnamDateStr());
     const addedImports: ImportTransaction[] = [];
-    const prodDeltaById = new Map<string, { qty: number; unitCost: number }>();
+    const prodDeltaById = new Map<string, { qty: number; avgCost: number }>();
     let skippedCount = 0;
 
     rows.forEach((r, idx) => {
@@ -3525,10 +3588,20 @@ export default function App() {
           normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
       );
       if (matchedProd) {
-        const prevD = prodDeltaById.get(matchedProd.id) || { qty: 0, unitCost: cost };
+        const prevD = prodDeltaById.get(matchedProd.id) || {
+          qty: 0,
+          avgCost: Math.max(0, Math.round(matchedProd.importPrice || 0)),
+        };
+        const currentRunningStock = Math.max(0, matchedProd.stock + prevD.qty);
+        const nextAvgCost = computeWeightedAverageImportPrice(
+          currentRunningStock,
+          prevD.avgCost,
+          qty,
+          cost
+        );
         prodDeltaById.set(matchedProd.id, {
           qty: prevD.qty + qty,
-          unitCost: cost > 0 ? cost : prevD.unitCost,
+          avgCost: nextAvgCost,
         });
       }
 
@@ -3566,7 +3639,7 @@ export default function App() {
               ? {
                   ...p,
                   stock: p.stock + delta.qty,
-                  importPrice: delta.unitCost > 0 ? delta.unitCost : p.importPrice,
+                  importPrice: delta.avgCost > 0 ? delta.avgCost : p.importPrice,
                   updatedAt: nowIso,
                 }
               : p;
@@ -5540,14 +5613,14 @@ export default function App() {
         {toastBanner && (
           <div
             role="status"
-            className="mx-4 sm:mx-6 mt-4 px-4 py-3 bg-slate-900 text-white text-xs font-medium rounded-lg flex items-center justify-between gap-4"
+            className="fixed bottom-4 right-4 left-4 sm:left-auto sm:max-w-md z-50 px-4 py-3 bg-slate-900 text-white text-xs font-medium rounded-xl shadow-xl border border-slate-700 flex items-center justify-between gap-4"
           >
             <span>{toastBanner}</span>
             <button
               type="button"
               onClick={() => setToastBanner(null)}
               aria-label="Đóng thông báo nhanh"
-              className="text-slate-400 hover:text-white"
+              className="text-slate-400 hover:text-white shrink-0"
             >
               <X className="w-3.5 h-3.5" />
             </button>

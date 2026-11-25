@@ -184,6 +184,110 @@ export function applySaleToInventory(
   return { updatedProducts, updatedProduct, updatedGiftProduct };
 }
 
+export function computeWeightedAverageImportPrice(
+  currentStock: number,
+  currentImportPrice: number,
+  importedQty: number,
+  importedUnitCost: number
+): number {
+  const safeCurCost = Math.max(0, Math.round(Number(currentImportPrice) || 0));
+  if (!Number.isFinite(importedUnitCost) || importedUnitCost <= 0) {
+    return safeCurCost;
+  }
+  const safeCurStock = Math.max(0, Number(currentStock) || 0);
+  const safeInQty = Math.max(0, Number(importedQty) || 0);
+  if (safeInQty <= 0) {
+    return safeCurCost;
+  }
+  if (safeCurStock <= 0 || safeCurCost <= 0) {
+    return Math.round(importedUnitCost);
+  }
+  return Math.round(
+    (safeCurStock * safeCurCost + safeInQty * importedUnitCost) / (safeCurStock + safeInQty)
+  );
+}
+
+export function recalculateImportPriceOnImportMutation(params: {
+  product: Pick<ProductItem, 'id' | 'stock' | 'importPrice'>;
+  oldQty: number;
+  oldUnitCost: number;
+  newQty: number;
+  newUnitCost: number;
+  remainingImports: ImportTransaction[];
+}): number {
+  const curStock = Math.max(0, Number(params.product.stock) || 0);
+  const curCost = Math.max(0, Math.round(Number(params.product.importPrice) || 0));
+  const oldQty = Math.max(0, Number(params.oldQty) || 0);
+  const oldCost = Math.max(0, Number(params.oldUnitCost) || 0);
+  const newQty = Math.max(0, Number(params.newQty) || 0);
+  const newCost = Math.max(0, Number(params.newUnitCost) || 0);
+
+  const nextStock = curStock - oldQty + newQty;
+  const nextValue = curStock * curCost - oldQty * oldCost + newQty * newCost;
+  if (nextStock > 0 && nextValue > 0) {
+    return Math.round(nextValue / nextStock);
+  }
+
+  const validImports = (params.remainingImports || []).filter(
+    (imp) => imp.productId === params.product.id && (Number(imp.quantity) || 0) > 0 && (Number(imp.unitCost) || 0) > 0
+  );
+  if (validImports.length > 0) {
+    let sumQty = 0;
+    let sumVal = 0;
+    for (const imp of validImports) {
+      const q = Number(imp.quantity) || 0;
+      const c = Number(imp.unitCost) || 0;
+      sumQty += q;
+      sumVal += q * c;
+    }
+    if (sumQty > 0 && sumVal > 0) {
+      return Math.round(sumVal / sumQty);
+    }
+  }
+
+  return newCost > 0 ? Math.round(newCost) : curCost;
+}
+
+export function resolveSaleUnitCost(
+  sale: Pick<SaleTransaction, 'unitCost' | 'unitPrice' | 'productId'>,
+  products: ProductItem[]
+): number {
+  if (
+    sale.unitCost !== undefined &&
+    sale.unitCost !== null &&
+    Number.isFinite(Number(sale.unitCost)) &&
+    Number(sale.unitCost) >= 0
+  ) {
+    return Math.round(Number(sale.unitCost));
+  }
+  const prod = products.find((p) => p.id === sale.productId);
+  if (prod && Number.isFinite(Number(prod.importPrice)) && Number(prod.importPrice) >= 0) {
+    return Math.round(Number(prod.importPrice));
+  }
+  return Math.round((Number(sale.unitPrice) || 0) * 0.85);
+}
+
+export function resolveSaleGiftUnitCost(
+  sale: Pick<SaleTransaction, 'giftUnitCost' | 'giftProductId'>,
+  products: ProductItem[]
+): number {
+  if (
+    sale.giftUnitCost !== undefined &&
+    sale.giftUnitCost !== null &&
+    Number.isFinite(Number(sale.giftUnitCost)) &&
+    Number(sale.giftUnitCost) >= 0
+  ) {
+    return Math.round(Number(sale.giftUnitCost));
+  }
+  if (sale.giftProductId) {
+    const giftProd = products.find((p) => p.id === sale.giftProductId);
+    if (giftProd && Number.isFinite(Number(giftProd.importPrice)) && Number(giftProd.importPrice) >= 0) {
+      return Math.round(Number(giftProd.importPrice));
+    }
+  }
+  return 0;
+}
+
 export function applyImportToInventory(
   products: ProductItem[],
   productId: string,
@@ -202,10 +306,17 @@ export function applyImportToInventory(
     throw new Error('Đơn giá nhập phải là số không âm hợp lệ.');
   }
 
+  const nextImportPrice = computeWeightedAverageImportPrice(
+    target.stock,
+    target.importPrice,
+    quantityImported,
+    unitCost
+  );
+
   const updatedProduct: ProductItem = {
     ...target,
     stock: target.stock + quantityImported,
-    importPrice: unitCost > 0 ? unitCost : target.importPrice,
+    importPrice: nextImportPrice,
     updatedAt: nowIso,
   };
 
@@ -951,6 +1062,7 @@ export function updateSaleRecord(
     unit?: string;
     quantity: number;
     unitPrice: number;
+    unitCost?: number;
     paidAmount: number;
     dueDate: string;
     note: string;
@@ -983,6 +1095,10 @@ export function updateSaleRecord(
     unit: changes.unit?.trim() || existing.unit,
     quantity: Math.max(1, Math.round(Number(changes.quantity) || 1)),
     unitPrice: Math.max(0, Math.round(Number(changes.unitPrice) || 0)),
+    unitCost:
+      changes.unitCost !== undefined
+        ? Math.max(0, Math.round(Number(changes.unitCost) || 0))
+        : existing.unitCost,
     totalAmount: summary.totalAmount,
     paidAmount: summary.paidAmount,
     debtAmount: summary.debtAmount,
@@ -2059,13 +2175,8 @@ export function generateSmartReportRecommendations(params: {
   // 6. Exclusive Primary Manager Financial & Gross Profit Recommendation
   if (allowed.includes('financial_profit')) {
     const estimatedGrossProfit = rangeSales.reduce((sum, sale) => {
-      const prod = products.find((p) => p.id === sale.productId);
-      const cost = (prod ? prod.importPrice : sale.unitPrice * 0.85) * sale.quantity;
-      const giftProd = sale.giftProductId
-        ? products.find((p) => p.id === sale.giftProductId)
-        : undefined;
-      const giftUnitCost = sale.giftUnitCost ?? giftProd?.importPrice ?? 0;
-      const giftCost = giftUnitCost * (sale.giftQuantity || 0);
+      const cost = Math.round(resolveSaleUnitCost(sale, products) * sale.quantity);
+      const giftCost = Math.round(resolveSaleGiftUnitCost(sale, products) * (sale.giftQuantity || 0));
       return sum + (sale.totalAmount - cost - giftCost);
     }, 0);
     const marginPct =
@@ -2532,15 +2643,11 @@ export function computeCashflowAndFinancialReport(params: {
   let totalGiftPromoCost = 0;
 
   for (const sale of filteredSales) {
-    const prod = products.find((p) => p.id === sale.productId);
-    const unitImportCost = prod ? prod.importPrice : Math.round(sale.unitPrice * 0.85);
-    totalProductCogs += unitImportCost * sale.quantity;
+    const unitImportCost = resolveSaleUnitCost(sale, products);
+    totalProductCogs += Math.round(unitImportCost * sale.quantity);
 
-    const giftProd = sale.giftProductId
-      ? products.find((p) => p.id === sale.giftProductId)
-      : undefined;
-    const giftUnitCost = sale.giftUnitCost ?? giftProd?.importPrice ?? 0;
-    totalGiftPromoCost += giftUnitCost * (sale.giftQuantity || 0);
+    const giftUnitCost = resolveSaleGiftUnitCost(sale, products);
+    totalGiftPromoCost += Math.round(giftUnitCost * (sale.giftQuantity || 0));
   }
 
   const totalCogs = totalProductCogs + totalGiftPromoCost;
@@ -3087,15 +3194,11 @@ export function computeTaxAuthorityFinancialStatement(params: {
     const netRevenueAmount = Math.max(0, Math.round(sale.totalAmount || 0));
     const grossAmountBeforeDiscount = netRevenueAmount + discountAmount;
 
-    const prod = (params.products || []).find((p) => p.id === sale.productId);
-    const unitImportCost = prod ? prod.importPrice : Math.round(sale.unitPrice * 0.85);
-    const productCogsAmount = unitImportCost * sale.quantity;
+    const unitImportCost = resolveSaleUnitCost(sale, params.products || []);
+    const productCogsAmount = Math.round(unitImportCost * sale.quantity);
 
-    const giftProd = sale.giftProductId
-      ? (params.products || []).find((p) => p.id === sale.giftProductId)
-      : undefined;
-    const giftUnitCost = sale.giftUnitCost ?? giftProd?.importPrice ?? 0;
-    const giftCogsAmount = giftUnitCost * (sale.giftQuantity || 0);
+    const giftUnitCost = resolveSaleGiftUnitCost(sale, params.products || []);
+    const giftCogsAmount = Math.round(giftUnitCost * (sale.giftQuantity || 0));
 
     const totalCogsAmount = productCogsAmount + giftCogsAmount;
     const grossProfitAmount = netRevenueAmount - totalCogsAmount;
@@ -3744,6 +3847,44 @@ export function reverseSupplierPaymentVoucherAllocations(
   });
 
   return { updatedImports, reversedImportIds };
+}
+
+/**
+ * Finds debt-settlement receipt vouchers (`isDebtSettlement`) allocated to a sale invoice.
+ * Used to block deleting/editing sales until linked debt receipts are cancelled first.
+ */
+export function findLinkedReceiptVouchersForSale(
+  sale: Pick<SaleTransaction, 'id' | 'invoiceCode'>,
+  receiptVouchers: CashReceiptVoucher[]
+): CashReceiptVoucher[] {
+  return (receiptVouchers || []).filter(
+    (rv) =>
+      rv.isDebtSettlement &&
+      rv.settledAllocations?.some(
+        (a) =>
+          (Number(a.allocatedAmount) || 0) > 0 &&
+          (a.recordId ? a.recordId === sale.id : a.code === sale.invoiceCode)
+      )
+  );
+}
+
+/**
+ * Finds debt-settlement payment vouchers (`isDebtSettlement`) allocated to an import receipt.
+ * Used to block deleting/editing imports until linked supplier payments are cancelled first.
+ */
+export function findLinkedPaymentVouchersForImport(
+  imp: Pick<ImportTransaction, 'id' | 'receiptCode'>,
+  paymentVouchers: CashPaymentVoucher[]
+): CashPaymentVoucher[] {
+  return (paymentVouchers || []).filter(
+    (pv) =>
+      pv.isDebtSettlement &&
+      pv.settledAllocations?.some(
+        (a) =>
+          (Number(a.allocatedAmount) || 0) > 0 &&
+          (a.recordId ? a.recordId === imp.id : a.code === imp.receiptCode)
+      )
+  );
 }
 
 export interface StockMovementRecord {

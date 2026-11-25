@@ -8,7 +8,12 @@ import {
   StaffMember,
   SupplierProfile,
 } from '../types';
-import { formatVND, getTodayVietnamDateStr } from './businessLogic';
+import {
+  formatVND,
+  getTodayVietnamDateStr,
+  resolveSaleGiftUnitCost,
+  resolveSaleUnitCost,
+} from './businessLogic';
 
 export const DAILY_AI_QUESTION_LIMIT = 30;
 export const DAILY_AI_TOKEN_LIMIT = 10000;
@@ -748,17 +753,10 @@ export function buildWarehouseReportSnapshot(params: {
     totalSalesCollected += paid;
     totalSalesNewDebt += debt;
 
-    const prod = productById.get(s.productId);
-    const unitImportCost = prod ? Number(prod.importPrice) || 0 : (Number(s.unitPrice) || 0) * 0.85;
-    const giftProd = s.giftProductId ? productById.get(s.giftProductId) : undefined;
-    const giftUnitCost =
-      s.giftUnitCost !== undefined
-        ? Number(s.giftUnitCost) || 0
-        : giftProd
-        ? Number(giftProd.importPrice) || 0
-        : 0;
-    const giftCost = (Number(s.giftQuantity) || 0) * giftUnitCost;
-    estimatedCogs += (Number(s.quantity) || 0) * unitImportCost + giftCost;
+    const unitImportCost = resolveSaleUnitCost(s, products);
+    const giftUnitCost = resolveSaleGiftUnitCost(s, products);
+    const giftCost = Math.round((Number(s.giftQuantity) || 0) * giftUnitCost);
+    estimatedCogs += Math.round((Number(s.quantity) || 0) * unitImportCost) + giftCost;
 
     const existing = productSalesMap.get(s.productName) || {
       name: s.productName,

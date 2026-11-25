@@ -2,12 +2,17 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import {
+  applyGeminiCors,
+  fetchVerifiedBonusTokens,
+  loadDotEnvIntoProcess,
+  verifyFirebaseIdToken,
+} from './serverAuth.mjs';
 
 const BASE_DIR = import.meta.dirname;
+loadDotEnvIntoProcess(BASE_DIR);
 const DIST_SUBDIR = path.join(BASE_DIR, 'dist');
-const STATIC_ROOT = fs.existsSync(path.join(BASE_DIR, 'index.html'))
-  ? BASE_DIR
-  : fs.existsSync(path.join(DIST_SUBDIR, 'index.html'))
+const STATIC_ROOT = fs.existsSync(path.join(DIST_SUBDIR, 'index.html'))
   ? DIST_SUBDIR
   : BASE_DIR;
 
@@ -16,7 +21,9 @@ const HOST = '0.0.0.0';
 
 const DAILY_AI_QUESTION_LIMIT = 30;
 const DAILY_AI_TOKEN_LIMIT = 10000;
+const RESPONSE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const ACCOUNT_QUOTAS = new Map();
+const SERVER_RESPONSE_CACHE = new Map();
 
 function getTodayVietnamDateStr() {
   const vnTime = new Date(Date.now() + 7 * 60 * 60 * 1000);
@@ -69,6 +76,7 @@ function isExternalQuerySimple(rawQuery) {
 function resolveApiKey() {
   return (
     process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
     process.env.VITE_GEMINI_API_KEY ||
     process.env.API_KEY ||
     ''
@@ -170,15 +178,19 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname.startsWith('/api/gemini/')) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    applyGeminiCors(req, res);
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
     }
     if (pathname === '/api/gemini/status' && req.method === 'GET') {
+      const authCheck = await verifyFirebaseIdToken(req.headers.authorization);
+      if (!authCheck.ok) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: authCheck.error, authRequired: true }));
+        return;
+      }
       const apiKey = resolveApiKey();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(
@@ -190,6 +202,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (pathname === '/api/gemini/chat' && req.method === 'POST') {
+      const authCheck = await verifyFirebaseIdToken(req.headers.authorization);
+      if (!authCheck.ok) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: authCheck.error, authRequired: true }));
+        return;
+      }
+
       let rawBody = '';
       req.on('data', (chunk) => {
         rawBody += chunk;
@@ -198,18 +217,62 @@ const server = http.createServer(async (req, res) => {
         try {
           const parsed = JSON.parse(rawBody || '{}');
           const message = String(parsed.message || '').normalize('NFC').trim();
-          const accountId = String(parsed.accountId || 'guest').trim() || 'guest';
+          if (!message) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Vui lòng nhập nội dung câu hỏi.' }));
+            return;
+          }
+
+          const accountId = authCheck.effectiveAccountId;
           const quota = getOrResetQuota(accountId);
-          const bonusTokens = Math.max(0, Math.round(Number(parsed.bonusTokens) || 0));
+          const bonusTokens = await fetchVerifiedBonusTokens(
+            accountId,
+            authCheck.idToken,
+            quota.date
+          );
           const effectiveTokenLimit = DAILY_AI_TOKEN_LIMIT + bonusTokens;
           quota.bonusTokens = bonusTokens;
           quota.tokenLimit = effectiveTokenLimit;
-          if (quota.tokensUsed >= effectiveTokenLimit) {
+          if (quota.questionsUsed >= DAILY_AI_QUESTION_LIMIT || quota.tokensUsed >= effectiveTokenLimit) {
             res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
             res.end(
               JSON.stringify({
-                error: `Tài khoản đã sử dụng hết hạn mức ${effectiveTokenLimit.toLocaleString('vi-VN')} token Trợ lý A.I trong ngày ${quota.date}. Hãy nhắn tin cho Admin quản trị chính trong mục Chat nội bộ để xin cấp thêm token, hoặc chờ tự động làm mới vào 00:00 ngày mai.`,
+                error:
+                  quota.questionsUsed >= DAILY_AI_QUESTION_LIMIT
+                    ? `Tài khoản đã đạt giới hạn ${DAILY_AI_QUESTION_LIMIT} câu hỏi Trợ lý A.I trong ngày ${quota.date}. Vui lòng chờ làm mới vào 00:00 ngày mai.`
+                    : `Tài khoản đã sử dụng hết hạn mức ${effectiveTokenLimit.toLocaleString('vi-VN')} token Trợ lý A.I trong ngày ${quota.date}. Hãy nhắn tin cho Admin quản trị chính trong mục Chat nội bộ để xin cấp thêm token, hoặc chờ tự động làm mới vào 00:00 ngày mai.`,
                 quotaExceeded: true,
+                quota,
+              })
+            );
+            return;
+          }
+
+          const requested = String(parsed.model || 'auto');
+          const isExternal =
+            parsed.queryScope === 'external' ||
+            (parsed.queryScope !== 'internal' && isExternalQuerySimple(message));
+          const activeSys = isExternal
+            ? String(parsed.externalSystemInstruction || parsed.systemInstruction || '')
+            : String(parsed.internalSystemInstruction || parsed.systemInstruction || '');
+          const sysHash = `${isExternal ? 'external' : 'internal'}:${activeSys.slice(0, 160)}:${activeSys.length}`;
+          const cacheKey = `${requested}::${sysHash}::${message.toLowerCase()}`;
+          const cached = SERVER_RESPONSE_CACHE.get(cacheKey);
+          if (cached && Date.now() - cached.cachedAt < RESPONSE_CACHE_TTL_MS) {
+            quota.questionsUsed += 1;
+            quota.updatedAt = new Date().toISOString();
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(
+              JSON.stringify({
+                text: cached.text,
+                modelUsed: cached.modelUsed,
+                queryScope: isExternal ? 'external' : 'internal',
+                apiConnected: true,
+                cached: true,
+                verifiedWebSearch: cached.sources.length > 0,
+                keyState: 'connected',
+                sources: cached.sources,
+                usage: { totalTokens: 0 },
                 quota,
               })
             );
@@ -218,10 +281,6 @@ const server = http.createServer(async (req, res) => {
 
           const apiKey = resolveApiKey();
           if (apiKey && message) {
-            const requested = String(parsed.model || 'auto');
-            const isExternal =
-              parsed.queryScope === 'external' ||
-              (parsed.queryScope !== 'internal' && isExternalQuerySimple(message));
             const fallbackModels =
               requested === 'auto'
                 ? isExternal
@@ -247,8 +306,8 @@ const server = http.createServer(async (req, res) => {
             for (const candidateModel of fallbackModels) {
               const useSearch = isExternal && candidateModel !== 'gemma-4-26b-a4b-it';
               const body = {
-                ...(parsed.systemInstruction
-                  ? { systemInstruction: { parts: [{ text: String(parsed.systemInstruction) }] } }
+                ...(activeSys
+                  ? { systemInstruction: { parts: [{ text: activeSys }] } }
                   : {}),
                 contents: [...historyContents, { role: 'user', parts: [{ text: message }] }],
                 generationConfig: {
@@ -289,6 +348,17 @@ const server = http.createServer(async (req, res) => {
                 if (candidateModel === 'gemini-4-hydrogen') quota.deepModelQuestions += 1;
                 else quota.freeModelQuestions += 1;
                 quota.updatedAt = new Date().toISOString();
+
+                if (SERVER_RESPONSE_CACHE.size > 150) {
+                  const oldestKey = SERVER_RESPONSE_CACHE.keys().next().value;
+                  if (oldestKey) SERVER_RESPONSE_CACHE.delete(oldestKey);
+                }
+                SERVER_RESPONSE_CACHE.set(cacheKey, {
+                  text,
+                  modelUsed: candidateModel,
+                  sources,
+                  cachedAt: Date.now(),
+                });
 
                 res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
                 res.end(

@@ -11,10 +11,11 @@
 
   # Block direct web access to source directories and config files if deployed from repo root
   RewriteRule ^(src|flutter_mobile|node_modules|\.git|\.github)(/|$) - [F,L]
-  RewriteRule ^(package\.json|package-lock\.json|bun\.lock|tsconfig\.json|vite\.config\.ts|eslint\.config\.mjs|firestore\.rules|firestore\.rules\.test\.ts|security_spec\.md|firebase-blueprint\.json|firebase-applet-config\.json|metadata\.json|\.env.*|\.gitignore)$ - [F,L]
+  RewriteRule ^(package\.json|package-lock\.json|bun\.lock|tsconfig\.json|vite\.config\.ts|eslint\.config\.mjs|firestore\.rules|firestore\.rules\.test\.ts|security_spec\.md|firebase-blueprint\.json|firebase-applet-config\.json|metadata\.json|\.env.*|\.gitignore|server\.js|server\.ts|serverAuth\..*)$ - [F,L]
 
-  # Allow ACME/SSL challenge
+  # Allow ACME/SSL challenge and backend /api/* routes
   RewriteRule ^\.well-known/ - [L]
+  RewriteRule ^api(/|$) - [L]
 
   # Do not rewrite requests that already point to dist/
   RewriteRule ^dist/ - [L]

@@ -58,6 +58,7 @@ import {
   shouldEnableExternalWebSearch,
 } from '../utils/geminiReportAssistant';
 import {
+  auth,
   contributeCommunityMarketPriceToFirebaseStorage,
   readCommunityMarketPricesFromFirebaseStorage,
   readSharedAiCacheFromFirebaseStorage,
@@ -868,13 +869,19 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     }
 
     if (!replyText) {
-      // Step 3A: Try same-origin backend (/api/gemini/chat)
+      // Step 3A: Try same-origin backend (/api/gemini/chat) with Firebase ID Token
       try {
+        const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (idToken) {
+          headers.Authorization = `Bearer ${idToken}`;
+        }
+
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 24000);
         const response = await fetch('/api/gemini/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             message: promptText,
             history: previousHistory,
@@ -891,7 +898,13 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
         clearTimeout(timer);
 
         const contentType = response.headers.get('content-type') || '';
-        if (response.status === 429 && contentType.includes('application/json')) {
+        if (response.status === 401 && contentType.includes('application/json')) {
+          const authErr = (await response.json()) as { error?: string; authRequired?: boolean };
+          quotaBlockedByServer = true;
+          replyText =
+            authErr.error ||
+            'Vui lòng đăng nhập tài khoản Google / Gmail để sử dụng Trợ lý A.I.';
+        } else if (response.status === 429 && contentType.includes('application/json')) {
           const errData = (await response.json()) as {
             error?: string;
             quotaExceeded?: boolean;

@@ -17,6 +17,8 @@ import {
   getTodayVietnamDateStr,
   ProductStockMovementLedger,
   ReceivedItemReportRow,
+  resolveSaleGiftUnitCost,
+  resolveSaleUnitCost,
   SmartReportRecommendation,
   TaxAuthorityFinancialStatementResult,
 } from './businessLogic';
@@ -1562,14 +1564,10 @@ export function exportComprehensiveDateRangeReportExcel(params: {
 
   const canSeeProfit = params.allowedCategories.includes('financial_profit');
   const estimatedGrossProfit = params.sales.reduce((sum, sale) => {
-    const prod = params.products.find((p) => p.id === sale.productId);
-    const cost = (prod ? prod.importPrice : sale.unitPrice * 0.85) * sale.quantity;
-    const giftProd = sale.giftProductId
-      ? params.products.find((p) => p.id === sale.giftProductId)
-      : undefined;
+    const cost = Math.round(resolveSaleUnitCost(sale, params.products) * sale.quantity);
     const giftCost =
       sale.giftQuantity && sale.giftQuantity > 0
-        ? (sale.giftUnitCost ?? giftProd?.importPrice ?? 0) * sale.giftQuantity
+        ? Math.round(resolveSaleGiftUnitCost(sale, params.products) * sale.giftQuantity)
         : 0;
     return sum + (sale.totalAmount - cost - giftCost);
   }, 0);
@@ -1820,16 +1818,12 @@ export function exportComprehensiveDateRangeReportExcel(params: {
   // Sheet 8: Báo cáo tài chính & Lợi nhuận (Chỉ Quản lý chính)
   if (canSeeProfit) {
     const finRows = params.sales.map((s, idx) => {
-      const prod = params.products.find((p) => p.id === s.productId);
-      const unitCost = prod ? prod.importPrice : Math.round(s.unitPrice * 0.85);
-      const giftProd = s.giftProductId
-        ? params.products.find((p) => p.id === s.giftProductId)
-        : undefined;
+      const unitCost = resolveSaleUnitCost(s, params.products);
       const giftCost =
         s.giftQuantity && s.giftQuantity > 0
-          ? (s.giftUnitCost ?? giftProd?.importPrice ?? 0) * s.giftQuantity
+          ? Math.round(resolveSaleGiftUnitCost(s, params.products) * s.giftQuantity)
           : 0;
-      const totalCost = unitCost * s.quantity + giftCost;
+      const totalCost = Math.round(unitCost * s.quantity) + giftCost;
       const profit = s.totalAmount - totalCost;
       return {
         STT: idx + 1,
