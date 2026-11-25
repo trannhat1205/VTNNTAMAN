@@ -34,6 +34,7 @@ import {
   onValue,
   ref as rtdbRef,
   set as rtdbSet,
+  update as rtdbUpdate,
 } from 'firebase/database';
 import {
   deleteObject,
@@ -82,6 +83,9 @@ import {
   sanitizeChatStorageFileName,
 } from '../utils/internalChatLogic';
 import {
+  buildFullKeyedWorkspace,
+  buildWorkspaceDiffUpdates,
+  isLegacyArrayWorkspaceLayout,
   normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   RtdbUserDirectoryProfile,
@@ -1920,9 +1924,16 @@ export function subscribeToRtdbConnectionState(
   };
 }
 
+const legacyLayoutOwnerUids = new Set<string>();
+
+export function isRealtimeWorkspaceLegacyLayout(uid: string): boolean {
+  return legacyLayoutOwnerUids.has(sanitizeFirestoreId(uid));
+}
+
 export async function writeRealtimeWorkspace(
   ownerUid: string,
-  payload: RtdbWorkspacePayload
+  payload: RtdbWorkspacePayload,
+  prevPayload: RtdbWorkspacePayload | null = null
 ): Promise<boolean> {
   const user = auth.currentUser;
   if (!user || !ownerUid) return false;
@@ -1932,12 +1943,22 @@ export async function writeRealtimeWorkspace(
   }
 
   try {
-    const cleanPayload = sanitizeForRealtimeDb({
+    const normalizedPayload: RtdbWorkspacePayload = {
       ...payload,
       auditLogs: (payload.auditLogs || []).slice(0, 500),
       backups: (payload.backups || []).map((b) => ({ ...b, snapshotPayload: undefined })),
-    });
-    await rtdbSet(rtdbRef(rtdb, `workspaces/${safeUid}`), cleanPayload);
+    };
+    const wsRef = rtdbRef(rtdb, `workspaces/${safeUid}`);
+
+    if (!prevPayload || legacyLayoutOwnerUids.has(safeUid)) {
+      const fullKeyed = buildFullKeyedWorkspace(normalizedPayload);
+      await rtdbSet(wsRef, fullKeyed);
+      legacyLayoutOwnerUids.delete(safeUid);
+      return true;
+    }
+
+    const diffUpdates = buildWorkspaceDiffUpdates(prevPayload, normalizedPayload);
+    await rtdbUpdate(wsRef, diffUpdates);
     return true;
   } catch (err) {
     console.warn('writeRealtimeWorkspace warning:', err instanceof Error ? err.message : err);
@@ -1959,10 +1980,17 @@ export function subscribeToRealtimeWorkspace(
     wsRef,
     (snap) => {
       if (!snap.exists()) {
+        legacyLayoutOwnerUids.delete(safeUid);
         onSnapshotData(null);
         return;
       }
-      onSnapshotData(normalizeWorkspaceFromRtdb(snap.val(), safeUid));
+      const rawVal = snap.val();
+      if (isLegacyArrayWorkspaceLayout(rawVal)) {
+        legacyLayoutOwnerUids.add(safeUid);
+      } else {
+        legacyLayoutOwnerUids.delete(safeUid);
+      }
+      onSnapshotData(normalizeWorkspaceFromRtdb(rawVal, safeUid));
     },
     (err) => {
       console.warn('subscribeToRealtimeWorkspace warning:', err.message);
@@ -1991,7 +2019,16 @@ export function subscribeToAllRealtimeWorkspacesForAdmin(
         onWorkspacesMap({});
         return;
       }
-      onWorkspacesMap(val as Record<string, unknown>);
+      const mapVal = val as Record<string, unknown>;
+      for (const [uid, rawWs] of Object.entries(mapVal)) {
+        const safeUid = sanitizeFirestoreId(uid);
+        if (isLegacyArrayWorkspaceLayout(rawWs)) {
+          legacyLayoutOwnerUids.add(safeUid);
+        } else {
+          legacyLayoutOwnerUids.delete(safeUid);
+        }
+      }
+      onWorkspacesMap(mapVal);
     },
     (err) => {
       console.warn('subscribeToAllRealtimeWorkspacesForAdmin warning:', err.message);

@@ -168,10 +168,7 @@ export function ensureArrayFromRtdb<T>(raw: unknown): T[] {
  */
 export function normalizeIndependentWarehouseStaffMember(staff: StaffMember): StaffMember {
   if (!staff || !staff.uid) return staff;
-  if (
-    staff.uid === PRIMARY_ADMIN_UID ||
-    staff.email?.toLowerCase() === ADMIN_BACKUP_EMAIL.toLowerCase()
-  ) {
+  if (staff.uid === PRIMARY_ADMIN_UID) {
     const wasOverwrittenByPreview = Boolean(staff.username && staff.username !== 'admin');
     return {
       ...PRODUCTION_PRIMARY_ADMIN,
@@ -380,6 +377,111 @@ export function computeWorkspaceFingerprint(payload: RtdbWorkspacePayload): stri
     settings: payload.settings,
   };
   return JSON.stringify(sanitizeForRealtimeDb(comparable));
+}
+
+/**
+ * Collections stored per-record under `/workspaces/{ownerUid}/{collection}/{recordKey}` so that
+ * concurrent writes from multiple devices (or Admin + warehouse owner) merge per record
+ * instead of overwriting the whole workspace (last-write-wins on the entire node).
+ */
+export const RTDB_RECORD_COLLECTIONS = [
+  'products',
+  'customers',
+  'suppliers',
+  'sales',
+  'imports',
+  'receiptVouchers',
+  'paymentVouchers',
+  'savedVouchers',
+  'auditLogs',
+  'backups',
+] as const;
+
+export type RtdbRecordCollection = (typeof RTDB_RECORD_COLLECTIONS)[number];
+
+/** Deterministic RTDB-safe record key. `k_` prefix guarantees RTDB never returns the node as an array. */
+export function toRtdbRecordKey(id: string): string {
+  return 'k_' + String(id || '').replace(/[.#$\[\]\/]/g, '_');
+}
+
+function prepareCollectionRecords(
+  payload: RtdbWorkspacePayload,
+  col: RtdbRecordCollection
+): Array<{ id: string }> {
+  const raw = (payload[col] || []) as unknown as Array<{ id: string }>;
+  if (col === 'auditLogs') return raw.slice(0, 500);
+  if (col === 'backups') {
+    return (raw as unknown as BackupEntry[]).map((b) => ({ ...b, snapshotPayload: undefined }));
+  }
+  return raw;
+}
+
+export function toKeyedRecordMap<T extends { id: string }>(records: T[]): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const r of records || []) {
+    if (!r || !r.id) continue;
+    out[toRtdbRecordKey(r.id)] = sanitizeForRealtimeDb(r);
+  }
+  return out;
+}
+
+/** True when the raw RTDB workspace node still uses the legacy array layout for any collection. */
+export function isLegacyArrayWorkspaceLayout(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const obj = raw as Record<string, unknown>;
+  return RTDB_RECORD_COLLECTIONS.some((col) => Array.isArray(obj[col]));
+}
+
+/** Full keyed layout of a workspace (used for first write / one-time legacy array migration). */
+export function buildFullKeyedWorkspace(payload: RtdbWorkspacePayload): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    meta: sanitizeForRealtimeDb(payload.meta),
+    settings: sanitizeForRealtimeDb(payload.settings),
+  };
+  for (const col of RTDB_RECORD_COLLECTIONS) {
+    out[col] = toKeyedRecordMap(prepareCollectionRecords(payload, col));
+  }
+  return out;
+}
+
+/**
+ * Builds a multi-path update map (relative to `/workspaces/{ownerUid}`) containing ONLY the records
+ * that were added, modified (`record`) or removed (`null`) between `prev` (last known server state)
+ * and `next` (local state). `meta` is always written. Returns the full keyed layout when `prev` is null.
+ */
+export function buildWorkspaceDiffUpdates(
+  prev: RtdbWorkspacePayload | null,
+  next: RtdbWorkspacePayload
+): Record<string, unknown> {
+  if (!prev) return buildFullKeyedWorkspace(next);
+
+  const updates: Record<string, unknown> = {
+    meta: sanitizeForRealtimeDb(next.meta),
+  };
+
+  for (const col of RTDB_RECORD_COLLECTIONS) {
+    const prevMap = toKeyedRecordMap(prepareCollectionRecords(prev, col));
+    const nextMap = toKeyedRecordMap(prepareCollectionRecords(next, col));
+    for (const [key, rec] of Object.entries(nextMap)) {
+      const before = prevMap[key];
+      if (!before || JSON.stringify(before) !== JSON.stringify(rec)) {
+        updates[`${col}/${key}`] = rec;
+      }
+    }
+    for (const key of Object.keys(prevMap)) {
+      if (!(key in nextMap)) {
+        updates[`${col}/${key}`] = null;
+      }
+    }
+  }
+
+  const prevSettings = JSON.stringify(sanitizeForRealtimeDb(prev.settings));
+  const nextSettings = sanitizeForRealtimeDb(next.settings);
+  if (prevSettings !== JSON.stringify(nextSettings)) {
+    updates.settings = nextSettings;
+  }
+
+  return updates;
 }
 
 export function dedupeRecordsById<T extends { id: string; updatedAt?: string; createdAt?: string }>(
