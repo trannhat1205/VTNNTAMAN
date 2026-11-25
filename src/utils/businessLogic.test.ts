@@ -2864,6 +2864,16 @@ test('computeProductStockMovementLedger and normalizeIndependentWarehouseStaffMe
     assignedWarehouse: 'TÂM AN BA SAO',
   });
   assert.equal(renamedUser.assignedWarehouse, 'TÂM AN BA SAO');
+
+  // Primary Admin accidentally overwritten during account preview heals back cleanly
+  const corruptedAdmin = normalizeIndependentWarehouseStaffMember({
+    ...corruptedUser,
+    uid: PRIMARY_ADMIN_UID,
+    email: 'trannhat1205@gmail.com',
+  });
+  assert.equal(corruptedAdmin.username, 'admin');
+  assert.equal(corruptedAdmin.assignedWarehouse, 'Tất cả kho');
+  assert.equal(corruptedAdmin.positionRole, 'primary_manager');
 });
 
 

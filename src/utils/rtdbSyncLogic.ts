@@ -13,12 +13,15 @@ import {
   SupplierProfile,
 } from '../types';
 import {
+  ADMIN_BACKUP_EMAIL,
+  ADMIN_PRIMARY_PHONE,
   INITIAL_CUSTOMER_GROUPS,
   INITIAL_PAYMENT_GROUPS,
   INITIAL_PRODUCT_CATEGORIES,
   INITIAL_RECEIPT_GROUPS,
   INITIAL_WAREHOUSES,
   PRIMARY_ADMIN_UID,
+  PRODUCTION_PRIMARY_ADMIN,
 } from '../data/seedData';
 import {
   canAccountCreateStaff,
@@ -165,6 +168,28 @@ export function ensureArrayFromRtdb<T>(raw: unknown): T[] {
  */
 export function normalizeIndependentWarehouseStaffMember(staff: StaffMember): StaffMember {
   if (!staff || !staff.uid) return staff;
+  if (
+    staff.uid === PRIMARY_ADMIN_UID ||
+    staff.email?.toLowerCase() === ADMIN_BACKUP_EMAIL.toLowerCase()
+  ) {
+    const wasOverwrittenByPreview = Boolean(staff.username && staff.username !== 'admin');
+    return {
+      ...PRODUCTION_PRIMARY_ADMIN,
+      ...staff,
+      uid: PRIMARY_ADMIN_UID,
+      username: 'admin',
+      displayName: wasOverwrittenByPreview
+        ? PRODUCTION_PRIMARY_ADMIN.displayName
+        : staff.displayName || PRODUCTION_PRIMARY_ADMIN.displayName,
+      email: ADMIN_BACKUP_EMAIL,
+      phone: staff.phone || ADMIN_PRIMARY_PHONE,
+      role: 'manager',
+      positionRole: 'primary_manager',
+      permissions: getDefaultPermissionsForPosition('primary_manager'),
+      assignedWarehouse: 'Tất cả kho',
+      active: true,
+    };
+  }
   if (canAccountCreateStaff(staff)) {
     return staff;
   }

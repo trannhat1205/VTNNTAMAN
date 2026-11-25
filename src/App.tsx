@@ -776,13 +776,17 @@ export default function App() {
 
     let unsubRooms = () => {};
     if (isGoogleAuthenticated && auth.currentUser) {
-      void upsertChatUserDirectoryProfile({
-        uid: activeUid,
-        displayName: currentStaff.displayName,
-        warehouseName: currentStaff.assignedWarehouse || 'VTNN Tâm An',
-        isPrimaryAdmin: isPrimary,
-        roleLabel: getPositionRoleLabel(currentStaff.positionRole),
-      });
+      const fbUser = auth.currentUser;
+      const isAuthAdmin = isCurrentUserAdmin(fbUser);
+      if (!isAuthAdmin || currentStaff.uid === PRIMARY_ADMIN_UID) {
+        void upsertChatUserDirectoryProfile({
+          uid: isAuthAdmin ? PRIMARY_ADMIN_UID : activeUid,
+          displayName: currentStaff.displayName,
+          warehouseName: currentStaff.assignedWarehouse || 'VTNN Tâm An',
+          isPrimaryAdmin: isAuthAdmin || isPrimary,
+          roleLabel: getPositionRoleLabel(currentStaff.positionRole),
+        });
+      }
       if (isPrimary) {
         void seedExistingStaffToChatDirectoryIfAdmin();
       }
@@ -886,18 +890,29 @@ export default function App() {
       return;
     }
 
-    const isPrimary = isCurrentUserAdmin(fbUser) || canAccountCreateStaff(currentStaff);
+    const isPrimary = isCurrentUserAdmin(fbUser);
     const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
     const sessionKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
 
     rtdbHydratedKeyRef.current = null;
 
-    // Publish user directory profile to RTDB /users_directory/{uid}
-    void upsertRealtimeUserDirectoryProfile({
-      ...currentStaff,
-      uid: activeUid,
-      email: currentStaff.email || fbUser.email || '',
-    });
+    // Publish ONLY the authenticated Firebase Auth user's own profile (never a previewed staff account)
+    const realAuthStaff =
+      latestWorkspaceRef.current.staffList.find((s) => s.uid === activeUid) ||
+      (isPrimary
+        ? PRODUCTION_PRIMARY_ADMIN
+        : normalizeIndependentWarehouseStaffMember({
+            ...currentStaff,
+            uid: activeUid,
+            email: fbUser.email || currentStaff.email || '',
+          }));
+    void upsertRealtimeUserDirectoryProfile(
+      normalizeIndependentWarehouseStaffMember({
+        ...realAuthStaff,
+        uid: activeUid,
+        email: fbUser.email || realAuthStaff.email || '',
+      })
+    );
 
     if (isPrimary) {
       void seedExistingStaffToRealtimeDirectoryIfAdmin(latestWorkspaceRef.current.staffList);
@@ -1128,14 +1143,14 @@ export default function App() {
       unsubUserWs();
       unsubUserDir();
     };
-  }, [isSessionLoggedIn, isGoogleAuthenticated, currentStaff.uid]);
+  }, [isSessionLoggedIn, isGoogleAuthenticated, currentUserEmail]);
 
   // Debounced auto-sync to Firebase Realtime Database on every state mutation
   useEffect(() => {
     const fbUser = auth.currentUser;
     if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) return;
 
-    const isPrimary = isCurrentUserAdmin(fbUser) || canAccountCreateStaff(currentStaff);
+    const isPrimary = isCurrentUserAdmin(fbUser);
     const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
     const expectedKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
 
