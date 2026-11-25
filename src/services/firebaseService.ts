@@ -28,6 +28,7 @@ import {
   where,
 } from 'firebase/firestore';
 import {
+  get as rtdbGet,
   getDatabase,
   off,
   onValue,
@@ -54,7 +55,11 @@ import {
   UserRole,
 } from '../types';
 import { ADMIN_BACKUP_EMAIL, PRIMARY_ADMIN_UID } from '../data/seedData';
-import { getTodayVietnamDateStr } from '../utils/businessLogic';
+import {
+  formatDefaultWarehouseNameFromGmail,
+  getIndependentWarehouseFullPermissions,
+  getTodayVietnamDateStr,
+} from '../utils/businessLogic';
 import {
   AiTokenGrantRecord,
   COMMUNITY_MARKET_PRICES_FILE,
@@ -77,6 +82,7 @@ import {
   sanitizeChatStorageFileName,
 } from '../utils/internalChatLogic';
 import {
+  normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   RtdbUserDirectoryProfile,
   RtdbWorkspacePayload,
@@ -2069,31 +2075,109 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
   if (!user || !isCurrentUserAdmin(user)) return;
 
   try {
-    const staffSnap = await getDocs(collection(db, 'staff'));
+    const [staffSnap, staffPrivateSnap, existingDirSnap] = await Promise.all([
+      getDocs(collection(db, 'staff')),
+      getDocs(collection(db, 'staff_private')),
+      rtdbGet(rtdbRef(rtdb, 'users_directory')),
+    ]);
+
+    const privateByUid = new Map<string, { email: string; phone: string }>();
+    for (const pDoc of staffPrivateSnap.docs) {
+      const pd = pDoc.data();
+      privateByUid.set(pDoc.id, {
+        email: String(pd.email || ''),
+        phone: String(pd.phone || ''),
+      });
+    }
+
+    const existingRtdbDir =
+      existingDirSnap.exists() && typeof existingDirSnap.val() === 'object'
+        ? (existingDirSnap.val() as Record<string, RtdbUserDirectoryProfile>)
+        : {};
+
     const byUid = new Map<string, StaffMember>();
     for (const st of localStaffList) {
-      if (st.uid) byUid.set(st.uid, st);
+      if (st.uid) byUid.set(st.uid, normalizeIndependentWarehouseStaffMember(st));
     }
+
+    // Preserve valid RTDB directory entries (especially user-renamed TÂM AN ... warehouses)
+    for (const [uid, dir] of Object.entries(existingRtdbDir)) {
+      if (!dir || !uid) continue;
+      const prev = byUid.get(uid);
+      const priv = privateByUid.get(uid);
+      const resolvedEmail = dir.email || priv?.email || prev?.email || '';
+      const rawWh = (dir.assignedWarehouse || '').trim();
+      const validExistingWh =
+        rawWh && rawWh !== 'Kho VTNN Tâm An' && rawWh !== 'VTNN Tâm An' ? rawWh : prev?.assignedWarehouse || '';
+
+      byUid.set(
+        uid,
+        normalizeIndependentWarehouseStaffMember({
+          uid,
+          username: dir.username || prev?.username || resolvedEmail.split('@')[0] || `user_${uid.slice(0, 6)}`,
+          password: '',
+          displayName: dir.displayName || prev?.displayName || 'Thành viên VTNN Tâm An',
+          phone: dir.phone || priv?.phone || prev?.phone || '',
+          email: resolvedEmail,
+          role: dir.role || prev?.role || 'manager',
+          positionRole: dir.positionRole || prev?.positionRole || 'warehouse_manager',
+          permissions: dir.permissions || prev?.permissions,
+          assignedWarehouse: validExistingWh,
+          active: dir.active !== false,
+          createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
+          updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
+        })
+      );
+    }
+
     for (const sDoc of staffSnap.docs) {
       const uid = sDoc.id;
       const d = sDoc.data();
+      const priv = privateByUid.get(uid);
       const existing = byUid.get(uid);
+      const isPrimary = uid === PRIMARY_ADMIN_UID;
+      const resolvedEmail = String(d.email || priv?.email || existing?.email || '');
+      const resolvedUsername =
+        existing?.username ||
+        String(d.username || '') ||
+        (resolvedEmail.includes('@') ? resolvedEmail.split('@')[0] : `user_${uid.slice(0, 6)}`);
+
       if (!existing) {
-        const isPrimary = uid === PRIMARY_ADMIN_UID;
-        byUid.set(uid, {
+        const autoWh = isPrimary
+          ? 'Tất cả kho'
+          : d.assignedWarehouse && d.assignedWarehouse !== 'Kho VTNN Tâm An'
+          ? String(d.assignedWarehouse)
+          : formatDefaultWarehouseNameFromGmail(resolvedEmail || resolvedUsername);
+
+        byUid.set(
           uid,
-          username: String(d.username || `user_${uid.slice(0, 6)}`),
-          password: '',
-          displayName: String(d.displayName || 'Thành viên VTNN Tâm An'),
-          phone: String(d.phone || ''),
-          email: String(d.email || ''),
-          role: d.role === 'manager' ? 'manager' : 'staff',
-          positionRole: isPrimary ? 'primary_manager' : d.role === 'manager' ? 'warehouse_manager' : 'sales_warehouse_staff',
-          assignedWarehouse: isPrimary ? 'Tất cả kho' : String(d.assignedWarehouse || 'Kho VTNN Tâm An'),
-          active: d.active !== false,
-          createdAt: normalizeTimestamp(d.createdAt),
-          updatedAt: normalizeTimestamp(d.updatedAt),
-        });
+          normalizeIndependentWarehouseStaffMember({
+            uid,
+            username: isPrimary ? 'admin' : resolvedUsername,
+            password: '',
+            displayName: String(d.displayName || resolvedUsername || 'Thành viên VTNN Tâm An'),
+            phone: String(d.phone || priv?.phone || ''),
+            email: resolvedEmail,
+            role: 'manager',
+            positionRole: isPrimary ? 'primary_manager' : 'warehouse_manager',
+            permissions: isPrimary ? undefined : getIndependentWarehouseFullPermissions(),
+            assignedWarehouse: autoWh,
+            active: d.active !== false,
+            createdAt: normalizeTimestamp(d.createdAt),
+            updatedAt: normalizeTimestamp(d.updatedAt),
+          })
+        );
+      } else {
+        // Fill missing email/phone from staff_private if directory didn't have it
+        byUid.set(
+          uid,
+          normalizeIndependentWarehouseStaffMember({
+            ...existing,
+            email: existing.email || resolvedEmail,
+            phone: existing.phone || priv?.phone || '',
+            displayName: existing.displayName || String(d.displayName || ''),
+          })
+        );
       }
     }
 

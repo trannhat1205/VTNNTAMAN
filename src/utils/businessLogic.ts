@@ -3682,5 +3682,222 @@ export function reverseSupplierPaymentVoucherAllocations(
   return { updatedImports, reversedImportIds };
 }
 
+export interface StockMovementRecord {
+  id: string;
+  dateIso: string;
+  type: 'import' | 'sale' | 'gift_export';
+  voucherCode: string;
+  partnerName: string;
+  partnerPhone: string;
+  warehouseName: string;
+  unitPriceOrCost: number;
+  qtyIn: number;
+  qtyOut: number;
+  balanceAfter: number;
+  totalValue: number;
+  note: string;
+  staffName: string;
+}
+
+export interface ProductStockMovementLedger {
+  product: ProductItem;
+  openingStock: number;
+  periodImportCount: number;
+  periodImportQty: number;
+  periodImportValue: number;
+  periodExportCount: number;
+  periodExportSaleQty: number;
+  periodExportGiftQty: number;
+  periodExportTotalQty: number;
+  periodExportRevenue: number;
+  closingStock: number;
+  allTimeImportQty: number;
+  allTimeExportQty: number;
+  movementsInPeriod: StockMovementRecord[];
+}
+
+/**
+ * Computes the complete Stock Movement Ledger (Thẻ kho Xuất - Nhập - Tồn) for a single product,
+ * reconciling opening balance, chronological imports, retail sales, promotional gift exports,
+ * running stock balance after every document, and closing balance matching `product.stock`.
+ */
+export function computeProductStockMovementLedger(
+  product: ProductItem,
+  sales: SaleTransaction[],
+  imports: ImportTransaction[],
+  options?: { fromDate?: string; toDate?: string }
+): ProductStockMovementLedger {
+  const prodWh = product.warehouseName || '';
+  const normProdName = normalizeVietnameseSearch(product.name);
+  const matchesProduct = (recProdId: string | undefined, recProdName: string | undefined, recWh?: string) => {
+    if (recProdId && recProdId === product.id) return true;
+    if (recProdId && recProdId.startsWith('prod_xl_') && recProdName) {
+      if (prodWh && recWh && prodWh !== recWh) return false;
+      return normalizeVietnameseSearch(recProdName) === normProdName;
+    }
+    return false;
+  };
+
+  type RawEvent = Omit<StockMovementRecord, 'balanceAfter'>;
+  const rawEvents: RawEvent[] = [];
+  let allTimeImportQty = 0;
+  let allTimeExportQty = 0;
+
+  for (const imp of imports) {
+    if (!matchesProduct(imp.productId, imp.productName, imp.warehouseName)) continue;
+    const qty = Math.max(0, Number(imp.quantity) || 0);
+    if (qty <= 0) continue;
+    allTimeImportQty += qty;
+    rawEvents.push({
+      id: `imp_${imp.id}`,
+      dateIso: imp.createdAt || '',
+      type: 'import',
+      voucherCode: imp.receiptCode,
+      partnerName: imp.supplierName || 'Nhà cung cấp',
+      partnerPhone: imp.supplierPhone || '',
+      warehouseName: imp.warehouseName || prodWh || 'Tâm An Mỹ Ngãi',
+      unitPriceOrCost: Math.max(0, Number(imp.unitCost) || 0),
+      qtyIn: qty,
+      qtyOut: 0,
+      totalValue: Math.max(0, Number(imp.totalCost) || 0),
+      note: imp.note || '',
+      staffName: imp.staffName || '',
+    });
+  }
+
+  for (const s of sales) {
+    if (matchesProduct(s.productId, s.productName, s.warehouseName)) {
+      const qty = Math.max(0, Number(s.quantity) || 0);
+      if (qty > 0) {
+        allTimeExportQty += qty;
+        rawEvents.push({
+          id: `sale_${s.id}`,
+          dateIso: s.createdAt || '',
+          type: 'sale',
+          voucherCode: s.invoiceCode,
+          partnerName: s.customerName || 'Khách hàng',
+          partnerPhone: s.customerPhone || '',
+          warehouseName: s.warehouseName || prodWh || 'Tâm An Mỹ Ngãi',
+          unitPriceOrCost: Math.max(0, Number(s.unitPrice) || 0),
+          qtyIn: 0,
+          qtyOut: qty,
+          totalValue: Math.max(0, Number(s.totalAmount) || 0),
+          note: s.note || '',
+          staffName: s.staffName || '',
+        });
+      }
+    }
+
+    if (
+      s.giftProductId &&
+      (Number(s.giftQuantity) || 0) > 0 &&
+      matchesProduct(s.giftProductId, s.giftProductName, s.warehouseName)
+    ) {
+      const giftQty = Math.max(0, Number(s.giftQuantity) || 0);
+      if (giftQty > 0) {
+        allTimeExportQty += giftQty;
+        const unitCost =
+          s.giftUnitCost !== undefined ? Number(s.giftUnitCost) || 0 : Number(product.importPrice) || 0;
+        rawEvents.push({
+          id: `gift_${s.id}`,
+          dateIso: s.createdAt || '',
+          type: 'gift_export',
+          voucherCode: s.invoiceCode,
+          partnerName: `${s.customerName || 'Khách hàng'} (Quà KM)`,
+          partnerPhone: s.customerPhone || '',
+          warehouseName: s.warehouseName || prodWh || 'Tâm An Mỹ Ngãi',
+          unitPriceOrCost: unitCost,
+          qtyIn: 0,
+          qtyOut: giftQty,
+          totalValue: Math.round(unitCost * giftQty),
+          note: `Quà tặng KM kèm HĐ ${s.invoiceCode}`,
+          staffName: s.staffName || '',
+        });
+      }
+    }
+  }
+
+  rawEvents.sort((a, b) => {
+    const cmp = (a.dateIso || '').localeCompare(b.dateIso || '');
+    if (cmp !== 0) return cmp;
+    if (a.type === 'import' && b.type !== 'import') return -1;
+    if (a.type !== 'import' && b.type === 'import') return 1;
+    return (a.voucherCode || '').localeCompare(b.voucherCode || '');
+  });
+
+  const currentStock = Math.max(0, Number(product.stock) || 0);
+  const initialBaseStock = currentStock - (allTimeImportQty - allTimeExportQty);
+  let running = initialBaseStock;
+
+  const eventsWithBalance: StockMovementRecord[] = rawEvents.map((ev) => {
+    running = running + ev.qtyIn - ev.qtyOut;
+    return {
+      ...ev,
+      balanceAfter: running,
+    };
+  });
+
+  const fromDate = options?.fromDate?.trim() || '';
+  const toDate = options?.toDate?.trim() || '';
+
+  let openingStock = initialBaseStock;
+  const movementsInPeriodAsc: StockMovementRecord[] = [];
+  let periodImportCount = 0;
+  let periodImportQty = 0;
+  let periodImportValue = 0;
+  let periodExportCount = 0;
+  let periodExportSaleQty = 0;
+  let periodExportGiftQty = 0;
+  let periodExportRevenue = 0;
+
+  for (const ev of eventsWithBalance) {
+    const datePart = (ev.dateIso || '').slice(0, 10);
+    const isBeforeStart = Boolean(fromDate && /^\d{4}-\d{2}-\d{2}$/.test(datePart) && datePart < fromDate);
+    if (isBeforeStart) {
+      openingStock = ev.balanceAfter;
+      continue;
+    }
+    if (!isDateWithinRange(ev.dateIso, fromDate, toDate)) {
+      continue;
+    }
+    movementsInPeriodAsc.push(ev);
+    if (ev.type === 'import') {
+      periodImportCount += 1;
+      periodImportQty += ev.qtyIn;
+      periodImportValue += ev.totalValue;
+    } else if (ev.type === 'sale') {
+      periodExportCount += 1;
+      periodExportSaleQty += ev.qtyOut;
+      periodExportRevenue += ev.totalValue;
+    } else {
+      periodExportCount += 1;
+      periodExportGiftQty += ev.qtyOut;
+    }
+  }
+
+  const periodExportTotalQty = periodExportSaleQty + periodExportGiftQty;
+  const closingStock =
+    movementsInPeriodAsc.length > 0
+      ? movementsInPeriodAsc[movementsInPeriodAsc.length - 1].balanceAfter
+      : openingStock;
+
+  return {
+    product,
+    openingStock,
+    periodImportCount,
+    periodImportQty,
+    periodImportValue,
+    periodExportCount,
+    periodExportSaleQty,
+    periodExportGiftQty,
+    periodExportTotalQty,
+    periodExportRevenue,
+    closingStock,
+    allTimeImportQty,
+    allTimeExportQty,
+    movementsInPeriod: [...movementsInPeriodAsc].reverse(),
+  };
+}
+
 
 

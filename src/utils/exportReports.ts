@@ -15,6 +15,7 @@ import {
   evaluateStockAlert,
   formatVND,
   getTodayVietnamDateStr,
+  ProductStockMovementLedger,
   ReceivedItemReportRow,
   SmartReportRecommendation,
   TaxAuthorityFinancialStatementResult,
@@ -2467,5 +2468,71 @@ export function exportTaxAuthorityFinancialReportExcel(params: {
   XLSX.writeFile(wb, fileName);
   return fileName;
 }
+
+// 11. Xuất Thẻ Kho Chi Tiết Xuất - Nhập - Tồn Theo Vật Tư — Excel
+export function exportProductStockCardExcel(
+  ledger: ProductStockMovementLedger,
+  periodLabel = 'Toàn thời gian'
+): string {
+  const wb = XLSX.utils.book_new();
+  const { product } = ledger;
+  const safeCode = (product.code || 'VT').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const summarySheet: (string | number)[][] = [
+    ['CỬA HÀNG VẬT TƯ NÔNG NGHIỆP TÂM AN — THẺ KHO XUẤT NHẬP TỒN'],
+    [`Vật tư: [${product.code}] ${product.name} (${product.unit})`],
+    [`Kho lưu trữ: ${product.warehouseName || 'Tâm An Mỹ Ngãi'} · Kỳ xem: ${periodLabel}`],
+    [],
+    ['CHỈ TIÊU CÂN ĐỐI KHO', 'SỐ LƯỢNG', 'ĐƠN VỊ / GIÁ TRỊ'],
+    ['Tồn đầu kỳ', ledger.openingStock, product.unit],
+    ['Tổng nhập kho trong kỳ (+)', ledger.periodImportQty, `${ledger.periodImportValue.toLocaleString('vi-VN')} VNĐ`],
+    ['Tổng xuất bán trong kỳ (-)', ledger.periodExportSaleQty, `${ledger.periodExportRevenue.toLocaleString('vi-VN')} VNĐ`],
+    ['Tổng xuất quà tặng KM (-)', ledger.periodExportGiftQty, product.unit],
+    ['Tồn cuối kỳ', ledger.closingStock, product.unit],
+    ['Tồn kho thực tế hiện tại', product.stock, product.unit],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summarySheet), 'Can_Doi_XNT');
+
+  const detailRows = ledger.movementsInPeriod.map((m, idx) => ({
+    STT: idx + 1,
+    'Ngày Giao Dịch': (m.dateIso || '').slice(0, 16).replace('T', ' '),
+    'Loại Nghiệp Vụ':
+      m.type === 'import'
+        ? 'Nhập kho (+)'
+        : m.type === 'gift_export'
+        ? 'Xuất quà tặng KM (-)'
+        : 'Xuất bán hàng (-)',
+    'Mã Chứng Từ': m.voucherCode,
+    'Đối Tác (NCC / Khách hàng)': m.partnerName,
+    SĐT: m.partnerPhone,
+    'Kho Hàng': m.warehouseName,
+    [`Nhập (+ ${product.unit})`]: m.qtyIn,
+    [`Xuất (- ${product.unit})`]: m.qtyOut,
+    [`Tồn Sau Giao Dịch (${product.unit})`]: m.balanceAfter,
+    'Đơn Giá (VNĐ)': m.unitPriceOrCost,
+    'Thành Tiền (VNĐ)': m.totalValue,
+    'Người Thực Hiện': m.staffName,
+    'Ghi Chú': m.note,
+  }));
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(
+      detailRows.length > 0
+        ? detailRows
+        : [
+            {
+              'Thông báo': 'Chưa có phát sinh nhập/xuất nào trong khoảng thời gian đã chọn.',
+            },
+          ]
+    ),
+    'Chi_Tiet_Xuat_Nhap_Ton'
+  );
+
+  const today = getTodayVietnamDateStr();
+  const fileName = `TheKho_XuatNhapTon_${safeCode}_${today}.xlsx`;
+  XLSX.writeFile(wb, fileName);
+  return fileName;
+}
+
 
 

@@ -112,11 +112,14 @@ interface InitialLoginScreenPortalProps {
   currentStaff: StaffMember;
   isGoogleAuthenticated: boolean;
   currentUserEmail: string | null;
-  onGoogleManagerLogin: () => Promise<{ ok: boolean; message: string } | void> | void;
+  onGoogleManagerLogin: (
+    customWarehouseName?: string
+  ) => Promise<{ ok: boolean; message: string } | void> | void;
   onGoogleLoginByEmail?: (
     email: string,
     googleDisplayName?: string,
-    googleUid?: string
+    googleUid?: string,
+    preferredWarehouseName?: string
   ) => { ok: boolean; message: string };
   onLoginStaff: (
     usernameOrEmail: string,
@@ -128,6 +131,7 @@ interface InitialLoginScreenPortalProps {
     username?: string;
     password: string;
     provider: 'email_password' | 'phone' | 'google';
+    customWarehouseName?: string;
   }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onUpdateStaffProfile: (payload: {
     uid: string;
@@ -173,12 +177,16 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
   const [signUpEmail, setSignUpEmail] = useState('');
   const [signUpPassword, setSignUpPassword] = useState('');
   const [signUpConfirmPassword, setSignUpConfirmPassword] = useState('');
+  const [signUpWarehouseSuffix, setSignUpWarehouseSuffix] = useState('');
+  const [hasEditedSignupWarehouse, setHasEditedSignupWarehouse] = useState(false);
 
-  // Live preview of default warehouse name generated from Gmail during Sign-Up
-  const previewDefaultWarehouseName = useMemo(
-    () => formatDefaultWarehouseNameFromGmail(signUpEmail || 'vtnntaman@gmail.com'),
-    [signUpEmail]
-  );
+  // Live preview of default / custom warehouse name during Sign-Up (TÂM AN + TÊN SỬA ĐỔI)
+  const previewDefaultWarehouseName = useMemo(() => {
+    if (hasEditedSignupWarehouse && signUpWarehouseSuffix.trim()) {
+      return normalizeCustomTamAnWarehouseName(signUpWarehouseSuffix, signUpEmail);
+    }
+    return formatDefaultWarehouseNameFromGmail(signUpEmail || 'vtnntaman@gmail.com');
+  }, [signUpEmail, signUpWarehouseSuffix, hasEditedSignupWarehouse]);
 
   // 3. Forgot password (Firebase Password Reset Email only — no local enumeration or overwrite)
   const [forgotGmailInput, setForgotGmailInput] = useState<string>('');
@@ -257,6 +265,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
           emailOrPhone: trimmedEmail,
           password: signUpPassword,
           provider: 'email_password',
+          customWarehouseName: previewDefaultWarehouseName,
         });
         setLoginFeedback({
           type: res.ok ? 'success' : 'error',
@@ -282,7 +291,11 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
       text: 'Đang mở cửa sổ chọn tài khoản Google — Vui lòng chọn một tài khoản Gmail trong cửa sổ bật lên để đăng nhập...',
     });
     try {
-      const res = await onGoogleManagerLogin();
+      const preferredWh =
+        authMode === 'signup' && hasEditedSignupWarehouse && signUpWarehouseSuffix.trim()
+          ? normalizeCustomTamAnWarehouseName(signUpWarehouseSuffix)
+          : undefined;
+      const res = await onGoogleManagerLogin(preferredWh);
       if (res && typeof res === 'object' && 'ok' in res) {
         setLoginFeedback({
           type: res.ok ? 'success' : 'error',
@@ -484,30 +497,60 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                     type="email"
                     required
                     value={signUpEmail}
-                    onChange={(e) => setSignUpEmail(e.target.value)}
+                    onChange={(e) => {
+                      const nextEmail = e.target.value;
+                      setSignUpEmail(nextEmail);
+                      if (!hasEditedSignupWarehouse) {
+                        setSignUpWarehouseSuffix(
+                          extractCustomWarehouseSuffix(
+                            formatDefaultWarehouseNameFromGmail(nextEmail || 'vtnntaman@gmail.com')
+                          )
+                        );
+                      }
+                    }}
                     placeholder="Địa chỉ Gmail đăng ký (VD: vtnntaman@gmail.com) *"
                     className="w-full px-3.5 py-2.5 text-sm bg-white border border-slate-300 rounded-xl focus:outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-600/15 transition-all"
                   />
                 </div>
 
-                {/* Live Auto-Created Independent Warehouse Preview Box */}
-                <div className="p-3 rounded-xl bg-emerald-50/90 border border-emerald-200 space-y-1 text-xs">
+                {/* Self-Service Independent Warehouse Creator & Name Editor (TÂM AN + TÊN SỬA ĐỔI) */}
+                <div className="p-3 rounded-xl bg-emerald-50/90 border border-emerald-200 space-y-2 text-xs">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-semibold text-emerald-900 flex items-center gap-1.5">
                       <Warehouse className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                      <span>Kho tự động tạo khi đăng ký:</span>
+                      <span>Tên kho tự tạo &amp; tự sửa đổi:</span>
                     </span>
                     <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded-md">
                       Quản lý 1 kho độc lập
                     </span>
                   </div>
-                  <div className="font-mono font-extrabold text-sm text-emerald-950 tracking-tight">
-                    {previewDefaultWarehouseName}
+                  <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
+                    <span className="px-2.5 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                      {MANDATORY_WAREHOUSE_PREFIX}
+                    </span>
+                    <input
+                      id="portal-signup-warehouse-suffix"
+                      type="text"
+                      value={
+                        hasEditedSignupWarehouse
+                          ? signUpWarehouseSuffix
+                          : extractCustomWarehouseSuffix(previewDefaultWarehouseName)
+                      }
+                      onChange={(e) => {
+                        setHasEditedSignupWarehouse(true);
+                        setSignUpWarehouseSuffix(e.target.value);
+                      }}
+                      placeholder="NHẬP TÊN KHO (VD: BA SAO)"
+                      aria-label="Tên kho sửa đổi sau TÂM AN"
+                      className="flex-1 min-w-0 px-2.5 py-2 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                    />
+                  </div>
+                  <div className="font-mono font-extrabold text-xs text-emerald-950 tracking-tight">
+                    Tên kho hiển thị: {previewDefaultWarehouseName}
                   </div>
                   <p className="text-[11px] text-emerald-800 leading-snug">
-                    Đầy đủ tất cả chức năng quản trị trên kho riêng. Có thể đổi tên hiển thị kho trong{' '}
-                    <strong>Hồ sơ cá nhân</strong> (giữ nguyên tiền tố mặc định{' '}
-                    <strong>&quot;TÂM AN&quot;</strong>, VD: <strong>TÂM AN BA SAO</strong>).
+                    Hệ thống tự cấp kho riêng và đồng bộ thời gian thực — bạn tự đặt/đổi tên theo chuẩn{' '}
+                    <strong>&quot;TÂM AN + TÊN SỬA ĐỔI&quot;</strong> không cần Admin cấp.
                   </p>
                 </div>
 
@@ -1147,6 +1190,76 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
           )}
         </div>
       </div>
+
+      {/* Quick Self-Service Warehouse Rename Card for Independent Single-Warehouse Owners */}
+      {!canCreateAndAssignRoles && currentStaff.assignedWarehouse !== 'Tất cả kho' && (
+        <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-xs">
+          <div className="px-5 py-3.5 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
+              <h3 className="text-sm font-bold text-slate-900">
+                Tên Kho Riêng Của Bạn ({MANDATORY_WAREHOUSE_PREFIX} + TÊN SỬA ĐỔI)
+              </h3>
+            </div>
+            <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded">
+              Tự quản lý · Không cần Admin cấp
+            </span>
+          </div>
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const normalizedWh = normalizeCustomTamAnWarehouseName(
+                personalWarehouseSuffix,
+                currentStaff.email
+              );
+              const res = await onUpdateStaffProfile({
+                uid: currentStaff.uid,
+                displayName: personalDisplayName.trim() || currentStaff.displayName,
+                phone: personalPhone.trim(),
+                email: personalEmail.trim() || currentStaff.email || '',
+                customWarehouseName: normalizedWh,
+              });
+              setRealtimeBanner(res.message);
+            }}
+            className="p-4 sm:p-5 flex flex-col md:flex-row md:items-end gap-3"
+          >
+            <div className="flex-1 min-w-0 space-y-1">
+              <label
+                htmlFor="quick-self-warehouse-suffix"
+                className="block text-xs font-semibold text-slate-700"
+              >
+                Chỉnh sửa nhanh tên kho (tự động giữ tiền tố <strong>{MANDATORY_WAREHOUSE_PREFIX}</strong>):
+              </label>
+              <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
+                <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                  {MANDATORY_WAREHOUSE_PREFIX}
+                </span>
+                <input
+                  id="quick-self-warehouse-suffix"
+                  type="text"
+                  required
+                  value={personalWarehouseSuffix}
+                  onChange={(e) => setPersonalWarehouseSuffix(e.target.value)}
+                  placeholder="VD: BA SAO, MỸ AN..."
+                  className="flex-1 min-w-0 px-3 py-2 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                />
+              </div>
+              <div className="text-[11px] text-emerald-800">
+                Tên hiển thị &amp; đồng bộ RTDB:{' '}
+                <strong>
+                  {normalizeCustomTamAnWarehouseName(personalWarehouseSuffix, currentStaff.email)}
+                </strong>
+              </div>
+            </div>
+            <button
+              type="submit"
+              className="px-4 py-2.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg whitespace-nowrap shrink-0"
+            >
+              Lưu tên kho mới ngay
+            </button>
+          </form>
+        </div>
+      )}
 
       {/* Quick Warehouse Assignment Panel for Primary Manager (Gu6OYdsdiWbRvbEINqaWZXj3LV83) */}
       {canCreateAndAssignRoles && (

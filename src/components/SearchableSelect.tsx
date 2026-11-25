@@ -68,6 +68,11 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
     return () => document.removeEventListener('mousedown', handleOutsideClick);
   }, []);
 
+  const cleanCreateLabel = useMemo(
+    () => (createActionLabel ? createActionLabel.replace(/^\+\s*/, '') : ''),
+    [createActionLabel]
+  );
+
   const filteredOptions = useMemo(() => {
     // When user just opened the dropdown and hasn't changed the selected label yet, show all options
     if (selectedOption && searchQuery === selectedOption.label) {
@@ -196,7 +201,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
               <span className="flex items-center gap-1.5">
                 <Plus className="w-3.5 h-3.5 shrink-0" />
                 <span>
-                  {createActionLabel}
+                  {cleanCreateLabel}
                   {searchQuery.trim() ? ` ("${searchQuery.trim()}")` : ''}
                 </span>
               </span>
@@ -221,7 +226,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>{createActionLabel}</span>
+                  <span>{cleanCreateLabel}</span>
                 </button>
               )}
             </div>

@@ -118,6 +118,7 @@ interface SalesLogViewProps {
   ) => void;
   onDeleteSale: (saleId: string) => void;
   onOpenDebtRecord?: (recordId: string) => void;
+  onRequestAddNewProductInImports?: (initialKeyword?: string) => void;
 }
 
 export const SalesLogView: React.FC<SalesLogViewProps> = ({
@@ -140,6 +141,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   onUpdateSale,
   onDeleteSale,
   onOpenDebtRecord,
+  onRequestAddNewProductInImports,
 }) => {
   // Blank initial form state per user requirement
   const [selectedWarehouse, setSelectedWarehouse] = useState<string>(lockedWarehouse || '');
@@ -343,6 +345,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
   const handleProductSelectChange = (prodId: string) => {
     if (prodId === '__new_product__') {
+      if (onRequestAddNewProductInImports) {
+        onRequestAddNewProductInImports('');
+        return;
+      }
       setSelectedProductId('__new_product__');
       setShowNewProductBox(true);
       return;
@@ -1034,6 +1040,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 <button
                   type="button"
                   onClick={() => {
+                    if (onRequestAddNewProductInImports) {
+                      onRequestAddNewProductInImports('');
+                      return;
+                    }
                     const nextState = !showNewProductBox;
                     setShowNewProductBox(nextState);
                     setSelectedProductId(nextState ? '__new_product__' : '');
@@ -1053,6 +1063,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 emptyOptionLabel="-- Chưa chọn vật tư --"
                 createActionLabel="+ Thêm vật tư nông nghiệp mới trực tiếp tại đây..."
                 onCreateAction={(kw) => {
+                  if (onRequestAddNewProductInImports) {
+                    onRequestAddNewProductInImports(kw || '');
+                    return;
+                  }
                   setSelectedProductId('__new_product__');
                   setShowNewProductBox(true);
                   if (kw) setNewProdName(kw);
@@ -2438,6 +2452,8 @@ interface ImportLogViewProps {
   ) => void;
   onDeleteImport: (importId: string) => void;
   onOpenDebtRecord?: (recordId: string) => void;
+  newProductRedirectTrigger?: { key: number; initialName: string } | null;
+  onConsumeNewProductRedirect?: () => void;
 }
 
 export const ImportLogView: React.FC<ImportLogViewProps> = ({
@@ -2458,6 +2474,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   onUpdateImport,
   onDeleteImport,
   onOpenDebtRecord,
+  newProductRedirectTrigger,
+  onConsumeNewProductRedirect,
 }) => {
   // Blank-by-default state so fields are empty on open and reset after save/export
   const [selectedWarehouse, setSelectedWarehouse] = useState<string>(lockedWarehouse || '');
@@ -2556,6 +2574,21 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       onClearPreselectedProduct();
     }
   }, [preselectedProductId, products, suppliers, lockedWarehouse, onClearPreselectedProduct]);
+
+  useEffect(() => {
+    if (newProductRedirectTrigger) {
+      setSelectedProductId('__new_product__');
+      setShowNewProductBox(true);
+      if (newProductRedirectTrigger.initialName) {
+        setNewProdName(newProductRedirectTrigger.initialName);
+      }
+      setFeedback({
+        type: 'success',
+        text: 'Đã mở sẵn khung Thêm vật tư nhập kho mới — Vui lòng điền thông tin vật tư và phiếu nhập hàng bên dưới.',
+      });
+      onConsumeNewProductRedirect?.();
+    }
+  }, [newProductRedirectTrigger, onConsumeNewProductRedirect]);
 
   const handleConfirmInlineWarehouseInImport = (): string | null => {
     const trimmed = newWarehouseName.trim();

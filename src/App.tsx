@@ -77,6 +77,7 @@ import {
   evaluateStockAlert,
   executeFiscalYearCloseAndCleanup,
   executeFullApplicationDataWipe,
+  extractCustomWarehouseSuffix,
   filterRecordsBySelectedWarehouses,
   formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
@@ -88,6 +89,7 @@ import {
   getIndependentWarehouseFullPermissions,
   getPositionRoleLabel,
   getTodayVietnamDateStr,
+  MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
   reconcileCustomersFromSales,
@@ -137,6 +139,7 @@ import {
   computeWorkspaceFingerprint,
   dedupeRecordsById,
   mergeDirectoryIntoStaffList,
+  normalizeIndependentWarehouseStaffMember,
   partitionAdminStateByWorkspace,
   RtdbUserDirectoryProfile,
   RtdbWorkspacePayload,
@@ -531,6 +534,17 @@ export default function App() {
   const [preselectedProductId, setPreselectedProductId] = useState<string | null>(null);
   const [focusedDebtRecordId, setFocusedDebtRecordId] = useState<string | null>(null);
   const [focusedProductId, setFocusedProductId] = useState<string | null>(null);
+  const [importNewProductTrigger, setImportNewProductTrigger] = useState<{
+    key: number;
+    initialName: string;
+  } | null>(null);
+  const [quickRenameWarehouseOpen, setQuickRenameWarehouseOpen] = useState<boolean>(false);
+  const [quickRenameSuffix, setQuickRenameSuffix] = useState<string>('');
+  const pendingRegistrationRef = useRef<{
+    email: string;
+    displayName: string;
+    customWarehouseName?: string;
+  } | null>(null);
 
   const scrollToTopOfPage = () => {
     if (typeof window !== 'undefined') {
@@ -559,35 +573,83 @@ export default function App() {
       canWriteToFirestore(user as Parameters<typeof canWriteToFirestore>[0]) ? 'synced' : 'unverified'
     );
 
-    setStaffList((prev) => {
-      const existing = prev.find(
-        (s) =>
-          s.uid === user.uid ||
-          (emailLower && s.email && s.email.toLowerCase() === emailLower)
-      );
-      if (existing) {
-        setCurrentStaffId(existing.uid);
-        setRole(existing.role);
-        return prev;
+    const curStaffList = latestWorkspaceRef.current.staffList;
+    const matchedExisting = curStaffList.find(
+      (s) =>
+        s.uid === user.uid ||
+        (emailLower && s.email && s.email.toLowerCase() === emailLower)
+    );
+
+    const pendingReg =
+      pendingRegistrationRef.current &&
+      pendingRegistrationRef.current.email.toLowerCase() === emailLower
+        ? pendingRegistrationRef.current
+        : null;
+    if (pendingReg) {
+      pendingRegistrationRef.current = null;
+    }
+
+    let resolvedStaff: StaffMember;
+    const nowIso = new Date().toISOString();
+
+    if (matchedExisting) {
+      const targetUid = isRemoteAdmin ? PRIMARY_ADMIN_UID : user.uid;
+      const migrated = normalizeIndependentWarehouseStaffMember({
+        ...matchedExisting,
+        uid: targetUid,
+        displayName:
+          pendingReg?.displayName || matchedExisting.displayName || user.displayName || matchedExisting.username,
+        assignedWarehouse:
+          pendingReg?.customWarehouseName || matchedExisting.assignedWarehouse,
+        updatedAt: nowIso,
+      });
+      resolvedStaff = migrated;
+
+      // Heal legacy records previously created under 'Kho VTNN Tâm An'
+      if (
+        !isRemoteAdmin &&
+        matchedExisting.assignedWarehouse === 'Kho VTNN Tâm An' &&
+        migrated.assignedWarehouse !== 'Kho VTNN Tâm An'
+      ) {
+        const healedWh = migrated.assignedWarehouse;
+        setProducts((p) =>
+          p.map((x) => (x.warehouseName === 'Kho VTNN Tâm An' ? { ...x, warehouseName: healedWh } : x))
+        );
+        setSales((p) =>
+          p.map((x) => (x.warehouseName === 'Kho VTNN Tâm An' ? { ...x, warehouseName: healedWh } : x))
+        );
+        setImports((p) =>
+          p.map((x) => (x.warehouseName === 'Kho VTNN Tâm An' ? { ...x, warehouseName: healedWh } : x))
+        );
+        setCustomers((p) =>
+          p.map((x) => (x.warehouseName === 'Kho VTNN Tâm An' ? { ...x, warehouseName: healedWh } : x))
+        );
       }
 
+      setStaffList((prev) => {
+        const filtered = prev.filter(
+          (s) => s.uid !== matchedExisting.uid && s.uid !== resolvedStaff.uid
+        );
+        return [...filtered, resolvedStaff];
+      });
+    } else {
       const baseUser =
         emailLower.split('@')[0]?.replace(/[^a-zA-Z0-9._-]/g, '') ||
         `user_${user.uid.slice(0, 6)}`;
       const autoWarehouseName = isRemoteAdmin
         ? 'Tất cả kho'
+        : pendingReg?.customWarehouseName
+        ? normalizeCustomTamAnWarehouseName(pendingReg.customWarehouseName, emailLower)
         : formatDefaultWarehouseNameFromGmail(emailLower || `${baseUser}@gmail.com`);
-      if (!isRemoteAdmin) {
-        setWarehouses((wh) =>
-          wh.includes(autoWarehouseName) ? wh : [...wh, autoWarehouseName]
-        );
-      }
-      const nowIso = new Date().toISOString();
-      const created: StaffMember = {
+
+      resolvedStaff = {
         uid: isRemoteAdmin ? PRIMARY_ADMIN_UID : user.uid,
         username: isRemoteAdmin ? 'admin' : baseUser,
         password: '',
-        displayName: (user.displayName && user.displayName.trim()) || baseUser,
+        displayName:
+          pendingReg?.displayName ||
+          (user.displayName && user.displayName.trim()) ||
+          baseUser,
         phone: isRemoteAdmin ? ADMIN_PRIMARY_PHONE : '',
         email: emailLower || ADMIN_BACKUP_EMAIL,
         role: 'manager',
@@ -600,10 +662,24 @@ export default function App() {
         createdAt: nowIso,
         updatedAt: nowIso,
       };
-      setCurrentStaffId(created.uid);
-      setRole(created.role);
-      return [...prev, created];
-    });
+
+      setStaffList((prev) =>
+        prev.some((s) => s.uid === resolvedStaff.uid)
+          ? prev.map((s) => (s.uid === resolvedStaff.uid ? resolvedStaff : s))
+          : [...prev, resolvedStaff]
+      );
+    }
+
+    if (!isRemoteAdmin && resolvedStaff.assignedWarehouse) {
+      const ownWh = resolvedStaff.assignedWarehouse;
+      setWarehouses((wh) => {
+        const cleaned = wh.filter((w) => w !== 'Kho VTNN Tâm An');
+        return cleaned.includes(ownWh) ? cleaned : [...cleaned, ownWh];
+      });
+    }
+
+    setCurrentStaffId(resolvedStaff.uid);
+    setRole(resolvedStaff.role);
     setIsSessionLoggedIn(true);
   };
 
@@ -3374,17 +3450,43 @@ export default function App() {
   const handleGoogleLoginByEmail = (
     email: string,
     googleDisplayName?: string,
-    googleUid?: string
+    googleUid?: string,
+    preferredWarehouseName?: string
   ) => {
     const trimmedEmail = email.trim().toLowerCase();
+    const isAdminEmail =
+      trimmedEmail === ADMIN_BACKUP_EMAIL.toLowerCase() ||
+      googleUid === PRIMARY_ADMIN_UID;
+    const nowIso = new Date().toISOString();
     const authRes = authenticateStaffByGoogleEmail(staffList, trimmedEmail);
+
     if (authRes.ok && authRes.staff) {
-      const matched = authRes.staff;
+      const matchedRaw = authRes.staff;
+      const targetUid = isAdminEmail ? PRIMARY_ADMIN_UID : googleUid || matchedRaw.uid;
+      const matched = normalizeIndependentWarehouseStaffMember({
+        ...matchedRaw,
+        uid: targetUid,
+        updatedAt: nowIso,
+      });
+
+      if (matched.uid !== matchedRaw.uid || matched.assignedWarehouse !== matchedRaw.assignedWarehouse) {
+        setStaffList((prev) => [
+          ...prev.filter((s) => s.uid !== matchedRaw.uid && s.uid !== matched.uid),
+          matched,
+        ]);
+      }
+      if (!isAdminEmail && matched.assignedWarehouse) {
+        setWarehouses((prev) =>
+          prev.includes(matched.assignedWarehouse) ? prev : [...prev, matched.assignedWarehouse]
+        );
+      }
+
       setCurrentStaffId(matched.uid);
       setRole(matched.role);
       setCurrentUserEmail(matched.email || ADMIN_BACKUP_EMAIL);
       setIsGoogleAuthenticated(true);
       setIsSessionLoggedIn(true);
+      void upsertRealtimeUserDirectoryProfile(matched);
       showToast(
         `Đã đăng nhập bằng Google (${matched.email}): ${matched.displayName} — Kho: ${matched.assignedWarehouse}`
       );
@@ -3394,22 +3496,28 @@ export default function App() {
       };
     }
 
-    // If a new Google Gmail signs up for the first time, auto-create default warehouse "TÂM AN " + Gmail name
-    const nowIso = new Date().toISOString();
-    const isAdminEmail =
-      trimmedEmail === ADMIN_BACKUP_EMAIL.toLowerCase() ||
-      googleUid === PRIMARY_ADMIN_UID;
+    // First-time Google sign-up -> auto-create independent warehouse TÂM AN + Gmail (or custom suffix) & isolate data
     const baseUser =
       trimmedEmail.split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') ||
       `user_${Date.now().toString().slice(-4)}`;
     const autoWarehouseName = isAdminEmail
       ? 'Tất cả kho'
+      : preferredWarehouseName
+      ? normalizeCustomTamAnWarehouseName(preferredWarehouseName, trimmedEmail)
       : formatDefaultWarehouseNameFromGmail(trimmedEmail);
 
     if (!isAdminEmail) {
-      setWarehouses((prev) =>
-        prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
-      );
+      // Clear any previous local account's non-matching workspace records before hydrating from RTDB
+      setProducts([]);
+      setCustomers([]);
+      setSuppliers([]);
+      setSales([]);
+      setImports([]);
+      setReceiptVouchers([]);
+      setPaymentVouchers([]);
+      setSavedVouchers([]);
+      setAuditLogs([]);
+      setWarehouses([autoWarehouseName]);
     }
 
     const newStaff: StaffMember = {
@@ -3429,12 +3537,20 @@ export default function App() {
       createdAt: nowIso,
       updatedAt: nowIso,
     };
-    setStaffList((prev) => (prev.some((s) => s.uid === newStaff.uid) ? prev : [...prev, newStaff]));
+    setStaffList((prev) => [
+      ...prev.filter((s) => s.uid !== newStaff.uid),
+      newStaff,
+    ]);
     setCurrentStaffId(newStaff.uid);
     setRole(newStaff.role);
     setCurrentUserEmail(newStaff.email);
     setIsGoogleAuthenticated(true);
     setIsSessionLoggedIn(true);
+    void upsertRealtimeUserDirectoryProfile(newStaff);
+    if (!isAdminEmail && !preferredWarehouseName) {
+      setQuickRenameSuffix(extractCustomWarehouseSuffix(autoWarehouseName));
+      setQuickRenameWarehouseOpen(true);
+    }
     showToast(
       `Đã đăng ký & đăng nhập bằng Gmail (${newStaff.email}) — Tự động tạo kho độc lập: ${newStaff.assignedWarehouse}`
     );
@@ -3450,6 +3566,7 @@ export default function App() {
     username?: string;
     password: string;
     provider: 'email_password' | 'phone' | 'google';
+    customWarehouseName?: string;
   }): Promise<{ ok: boolean; message: string }> => {
     const query = payload.emailOrPhone.trim().toLowerCase();
     if (!query || !query.endsWith('@gmail.com')) {
@@ -3468,6 +3585,12 @@ export default function App() {
         message: `Địa chỉ Gmail "${query}" đã được đăng ký trước đó. Vui lòng chuyển sang tab Đăng nhập hoặc dùng Quên mật khẩu.`,
       };
     }
+
+    pendingRegistrationRef.current = {
+      email: query,
+      displayName: payload.displayName.trim(),
+      customWarehouseName: payload.customWarehouseName,
+    };
 
     try {
       const fbSignUp = await firebaseSignUpWithEmailPassword({
@@ -3488,12 +3611,22 @@ export default function App() {
       const posRole: StaffPositionRole = isPrimary ? 'primary_manager' : 'warehouse_manager';
       const autoWarehouseName = isPrimary
         ? 'Tất cả kho'
+        : payload.customWarehouseName
+        ? normalizeCustomTamAnWarehouseName(payload.customWarehouseName, query)
         : formatDefaultWarehouseNameFromGmail(query);
 
       if (!isPrimary) {
-        setWarehouses((prev) =>
-          prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
-        );
+        // Brand-new independent warehouse account starts with an isolated clean warehouse
+        setProducts([]);
+        setCustomers([]);
+        setSuppliers([]);
+        setSales([]);
+        setImports([]);
+        setReceiptVouchers([]);
+        setPaymentVouchers([]);
+        setSavedVouchers([]);
+        setAuditLogs([]);
+        setWarehouses([autoWarehouseName]);
       }
 
       const newUid = isPrimary ? PRIMARY_ADMIN_UID : fbSignUp.user.uid;
@@ -3517,30 +3650,62 @@ export default function App() {
         updatedAt: nowIso,
       };
 
-      setStaffList((prev) => [...prev, created]);
-    if (isGoogleAuthenticated) {
-      void upsertRealtimeUserDirectoryProfile(created);
-    }
+      pendingRegistrationRef.current = null;
+      setStaffList((prev) => [...prev.filter((s) => s.uid !== created.uid), created]);
       setCurrentStaffId(created.uid);
       setRole(created.role);
       setCurrentUserEmail(created.email);
       setIsGoogleAuthenticated(true);
       setCloudSyncStatus(fbSignUp.user.emailVerified ? 'synced' : 'unverified');
       setIsSessionLoggedIn(true);
+
+      // Immediately persist user directory & isolated workspace to Firebase RTDB
+      void upsertRealtimeUserDirectoryProfile(created);
+      void writeRealtimeWorkspace(created.uid, {
+        meta: {
+          ownerUid: created.uid,
+          ownerEmail: created.email,
+          ownerDisplayName: created.displayName,
+          assignedWarehouse: created.assignedWarehouse,
+          updatedAt: nowIso,
+          updatedByUid: created.uid,
+          schemaVersion: 1,
+        },
+        products: [],
+        customers: [],
+        suppliers: [],
+        sales: [],
+        imports: [],
+        receiptVouchers: [],
+        paymentVouchers: [],
+        savedVouchers: [],
+        auditLogs: [],
+        backups: [],
+        settings: {
+          warehouses: [created.assignedWarehouse],
+          customerGroups,
+          productCategories,
+          receiptGroups,
+          paymentGroups,
+          notificationPrefs,
+          autoDailyBackupEnabled,
+        },
+      });
+      setRtdbWriteTrigger((n) => n + 1);
+
       showToast(
-        `Đã đăng ký Gmail @${created.username} — Kho độc lập: ${created.assignedWarehouse}${
-          fbSignUp.verificationSent ? ' · Đã gửi email xác minh Cloud' : ''
-        }`
+        `Đã đăng ký Gmail @${created.username} — Tự động tạo kho: ${created.assignedWarehouse} & đồng bộ Realtime DB!`
       );
       return {
         ok: true,
-        message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tạo kho riêng "${created.assignedWarehouse}".${
+        message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tạo kho riêng "${created.assignedWarehouse}" và đồng bộ trực tiếp lên hệ thống.${
           fbSignUp.verificationSent
-            ? ' Vui lòng kiểm tra hộp thư Gmail để xác minh email và bật đồng bộ Cloud.'
+            ? ' Vui lòng kiểm tra hộp thư Gmail để xác minh email và bật thêm sao lưu Cloud.'
             : ''
         }`,
       };
     } catch (err) {
+      pendingRegistrationRef.current = null;
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/email-already-in-use') {
         return {
@@ -4487,8 +4652,16 @@ export default function App() {
   };
 
   const handleGoogleLogin = async (
-    requestedRole: UserRole
+    requestedRole: UserRole,
+    preferredWarehouseName?: string
   ): Promise<{ ok: boolean; message: string }> => {
+    if (preferredWarehouseName) {
+      pendingRegistrationRef.current = {
+        email: '',
+        displayName: '',
+        customWarehouseName: preferredWarehouseName,
+      };
+    }
     try {
       const result = await googleSignInWithRole(requestedRole);
       if (result && result.user && result.user.email) {
@@ -4497,9 +4670,11 @@ export default function App() {
         return handleGoogleLoginByEmail(
           result.user.email,
           result.user.displayName || undefined,
-          result.user.uid
+          result.user.uid,
+          preferredWarehouseName
         );
       }
+      pendingRegistrationRef.current = null;
       return {
         ok: false,
         message:
@@ -4632,7 +4807,7 @@ export default function App() {
           currentStaff={currentStaff}
           isGoogleAuthenticated={isGoogleAuthenticated}
           currentUserEmail={currentUserEmail}
-          onGoogleManagerLogin={() => handleGoogleLogin('manager')}
+          onGoogleManagerLogin={(customWh) => handleGoogleLogin('manager', customWh)}
           onGoogleLoginByEmail={handleGoogleLoginByEmail}
           onLoginStaff={handleLoginStaff}
           onSignUpStaff={handleSignUpStaff}
@@ -5092,7 +5267,16 @@ export default function App() {
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => setActiveTab('staff_accounts')}
+                    onClick={() => {
+                      if (isAdminAccount) {
+                        setActiveTab('staff_accounts');
+                      } else {
+                        setQuickRenameSuffix(
+                          extractCustomWarehouseSuffix(currentStaff.assignedWarehouse)
+                        );
+                        setQuickRenameWarehouseOpen(true);
+                      }
+                    }}
                     className="w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-bold rounded-lg border transition-colors flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-300"
                   >
                     <ShieldCheck className="w-4 h-4 shrink-0" />
@@ -5509,6 +5693,15 @@ export default function App() {
                 setFocusedDebtRecordId(recId);
                 setActiveTab('debts');
               }}
+              onRequestAddNewProductInImports={(keyword) => {
+                setImportNewProductTrigger({
+                  key: Date.now(),
+                  initialName: (keyword || '').trim(),
+                });
+                setActiveTab('imports');
+                scrollToTopOfPage();
+                showToast('Đã chuyển sang Nhật ký Nhập hàng để thêm vật tư & lập phiếu nhập!');
+              }}
             />
           )}
 
@@ -5534,6 +5727,8 @@ export default function App() {
                 setFocusedDebtRecordId(recId);
                 setActiveTab('debts');
               }}
+              newProductRedirectTrigger={importNewProductTrigger}
+              onConsumeNewProductRedirect={() => setImportNewProductTrigger(null)}
             />
           )}
 
@@ -5555,6 +5750,11 @@ export default function App() {
               onQuickRestock={(prodId) => {
                 setPreselectedProductId(prodId);
                 setActiveTab('imports');
+              }}
+              onRequestAddNewProductInImports={() => {
+                setImportNewProductTrigger({ key: Date.now(), initialName: '' });
+                setActiveTab('imports');
+                scrollToTopOfPage();
               }}
               focusedProductId={focusedProductId}
               onClearFocusedProduct={() => setFocusedProductId(null)}
@@ -5828,6 +6028,96 @@ export default function App() {
           );
         }}
       />
+
+      {/* Quick Self-Service Warehouse Naming Modal for Independent Warehouse Owners */}
+      {quickRenameWarehouseOpen && !isAdminAccount && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Tự đặt tên kho hiển thị riêng"
+        >
+          <div className="bg-white rounded-2xl border border-emerald-200 shadow-xl w-full max-w-md overflow-hidden">
+            <div className="px-5 py-4 bg-emerald-50/80 border-b border-emerald-200 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Đặt Tên Kho Riêng Của Bạn ({MANDATORY_WAREHOUSE_PREFIX} + TÊN SỬA ĐỔI)
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuickRenameWarehouseOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+                aria-label="Đóng"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                const fullWh = normalizeCustomTamAnWarehouseName(
+                  quickRenameSuffix,
+                  currentStaff.email
+                );
+                await handleUpdateStaffProfile({
+                  uid: currentStaff.uid,
+                  displayName: currentStaff.displayName,
+                  phone: currentStaff.phone || '',
+                  email: currentStaff.email || '',
+                  customWarehouseName: fullWh,
+                });
+                setQuickRenameWarehouseOpen(false);
+              }}
+              className="p-5 space-y-4"
+            >
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Tài khoản đăng ký mới tự động có kho độc lập và tự đổi tên kho không cần Admin cấp. Hệ thống giữ nguyên tiền tố mặc định <strong>{MANDATORY_WAREHOUSE_PREFIX}</strong> ở phía trước:
+              </p>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Tên kho hiển thị (gõ phần tên sửa đổi bên phải) *
+                </label>
+                <div className="flex items-stretch rounded-xl overflow-hidden border border-emerald-400 bg-white">
+                  <span className="px-3.5 py-2.5 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                    {MANDATORY_WAREHOUSE_PREFIX}
+                  </span>
+                  <input
+                    type="text"
+                    required
+                    value={quickRenameSuffix}
+                    onChange={(e) => setQuickRenameSuffix(e.target.value)}
+                    placeholder="VD: BA SAO, MỸ AN..."
+                    className="flex-1 min-w-0 px-3 py-2.5 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                  />
+                </div>
+                <div className="text-[11px] text-emerald-800 mt-1.5">
+                  Tên kho sẽ lưu &amp; đồng bộ:{' '}
+                  <strong>
+                    {normalizeCustomTamAnWarehouseName(quickRenameSuffix, currentStaff.email)}
+                  </strong>
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setQuickRenameWarehouseOpen(false)}
+                  className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50"
+                >
+                  Giữ nguyên hiện tại
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                >
+                  Lưu &amp; Đồng bộ tên kho
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

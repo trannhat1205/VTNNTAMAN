@@ -18,6 +18,7 @@ import {
   computeCustomerLedger,
   computeCustomerOldDebtSummary,
   computeDueDateAfterDays,
+  computeProductStockMovementLedger,
   computeReceivedItemsAndDebtReport,
   computeSaleEditStockDeltas,
   computeSupplierOldDebtSummary,
@@ -107,6 +108,7 @@ import {
   aggregateAdminWorkspacesFromRtdb,
   computeWorkspaceFingerprint,
   mergeDirectoryIntoStaffList,
+  normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   partitionAdminStateByWorkspace,
   sanitizeForRealtimeDb,
@@ -2714,6 +2716,156 @@ test('Firebase Realtime Database sync helpers sanitize undefined/NaN, protect pa
   assert.equal(partitioned['user_warehouse_1'].sales.length, 1);
   assert.equal(partitioned[PRIMARY_ADMIN_UID].sales.length, 0);
 });
+
+test('computeProductStockMovementLedger and normalizeIndependentWarehouseStaffMember reconcile XNT stock movements and self-registered warehouse profiles', () => {
+  const prod: ProductItem = {
+    id: 'prod_xnt_1',
+    code: 'VT-001',
+    name: 'Phân Đạm Phú Mỹ',
+    category: 'Phân bón',
+    warehouseName: 'TÂM AN VTNNTAMAN99',
+    unit: 'Bao 50kg',
+    importPrice: 540000,
+    sellPrice: 610000,
+    stock: 22, // Starting 5 + import 20 - sale 2 - gift 1 = 22
+    minStock: 10,
+    supplierName: 'Đạm Phú Mỹ',
+    ownerId: 'u_99',
+    createdAt: '2026-11-01T00:00:00Z',
+    updatedAt: '2026-11-20T00:00:00Z',
+  };
+
+  const imps: ImportTransaction[] = [
+    {
+      id: 'imp_xnt_1',
+      receiptCode: 'PN-001',
+      supplierName: 'NCC Đạm Phú Mỹ',
+      supplierPhone: '0901',
+      productId: 'prod_xnt_1',
+      productName: 'Phân Đạm Phú Mỹ',
+      unit: 'Bao 50kg',
+      quantity: 20,
+      unitCost: 540000,
+      totalCost: 10800000,
+      paidAmount: 10800000,
+      debtAmount: 0,
+      dueDate: '2026-11-10',
+      status: 'paid',
+      warehouseName: 'TÂM AN VTNNTAMAN99',
+      note: '',
+      staffName: 'An Tâm',
+      ownerId: 'u_99',
+      createdAt: '2026-11-10T08:00:00Z',
+      updatedAt: '2026-11-10T08:00:00Z',
+    },
+  ];
+
+  const sls: SaleTransaction[] = [
+    {
+      id: 'sale_xnt_1',
+      invoiceCode: 'HD-001',
+      customerId: 'c1',
+      customerName: 'Anh Hai',
+      customerPhone: '0902',
+      productId: 'prod_xnt_1',
+      productName: 'Phân Đạm Phú Mỹ',
+      unit: 'Bao 50kg',
+      quantity: 2,
+      unitPrice: 610000,
+      totalAmount: 1220000,
+      paidAmount: 1220000,
+      debtAmount: 0,
+      dueDate: '2026-11-12',
+      status: 'paid',
+      warehouseName: 'TÂM AN VTNNTAMAN99',
+      note: '',
+      staffName: 'An Tâm',
+      ownerId: 'u_99',
+      createdAt: '2026-11-12T09:00:00Z',
+      updatedAt: '2026-11-12T09:00:00Z',
+    },
+    {
+      id: 'sale_xnt_2',
+      invoiceCode: 'HD-002',
+      customerId: 'c1',
+      customerName: 'Anh Hai',
+      customerPhone: '0902',
+      productId: 'other_prod',
+      productName: 'Thuốc BVTV',
+      unit: 'Chai',
+      quantity: 1,
+      unitPrice: 200000,
+      totalAmount: 200000,
+      paidAmount: 200000,
+      debtAmount: 0,
+      dueDate: '2026-11-15',
+      status: 'paid',
+      giftProductId: 'prod_xnt_1',
+      giftProductName: 'Phân Đạm Phú Mỹ',
+      giftUnit: 'Bao 50kg',
+      giftQuantity: 1,
+      giftUnitCost: 540000,
+      warehouseName: 'TÂM AN VTNNTAMAN99',
+      note: '',
+      staffName: 'An Tâm',
+      ownerId: 'u_99',
+      createdAt: '2026-11-15T10:00:00Z',
+      updatedAt: '2026-11-15T10:00:00Z',
+    },
+  ];
+
+  const ledger = computeProductStockMovementLedger(prod, sls, imps);
+  assert.equal(ledger.openingStock, 5);
+  assert.equal(ledger.periodImportQty, 20);
+  assert.equal(ledger.periodExportSaleQty, 2);
+  assert.equal(ledger.periodExportGiftQty, 1);
+  assert.equal(ledger.periodExportTotalQty, 3);
+  assert.equal(ledger.closingStock, 22);
+  assert.equal(ledger.openingStock + ledger.periodImportQty - ledger.periodExportTotalQty, ledger.closingStock);
+  assert.equal(ledger.movementsInPeriod.length, 3);
+  assert.equal(ledger.movementsInPeriod[0].balanceAfter, 22);
+
+  // Date-range sub-period (after 2026-11-12 includes sale_xnt_1 & sale_xnt_2 only, opening = 5 + 20 = 25)
+  const midLedger = computeProductStockMovementLedger(prod, sls, imps, {
+    fromDate: '2026-11-12',
+    toDate: '2026-11-30',
+  });
+  assert.equal(midLedger.openingStock, 25);
+  assert.equal(midLedger.periodImportQty, 0);
+  assert.equal(midLedger.periodExportTotalQty, 3);
+  assert.equal(midLedger.closingStock, 22);
+
+  // Corrupted legacy Firestore seed profile heals back to full independent warehouse manager + TÂM AN <GMAIL>
+  const corruptedUser: StaffMember = {
+    uid: 'AkkSJD5bXHQ7SIlONn9sMIicNB02',
+    username: 'vtnntaman99',
+    password: '',
+    displayName: 'An Tâm',
+    phone: '',
+    email: 'vtnntaman99@gmail.com',
+    role: 'staff',
+    positionRole: 'sales_warehouse_staff',
+    permissions: ['sales_and_invoicing'],
+    assignedWarehouse: 'Kho VTNN Tâm An',
+    active: true,
+    createdAt: '2026-11-25T15:13:59Z',
+    updatedAt: '2026-11-25T16:23:38Z',
+  };
+  const healed = normalizeIndependentWarehouseStaffMember(corruptedUser);
+  assert.equal(healed.role, 'manager');
+  assert.equal(healed.positionRole, 'warehouse_manager');
+  assert.equal(healed.assignedWarehouse, 'TÂM AN VTNNTAMAN99');
+  assert.equal(healed.permissions?.includes('manage_single_warehouse'), true);
+  assert.equal(evaluateStaffAccessScope(healed).allowedTabs.includes('inventory'), true);
+
+  // User-renamed warehouse TÂM AN BA SAO is preserved
+  const renamedUser = normalizeIndependentWarehouseStaffMember({
+    ...healed,
+    assignedWarehouse: 'TÂM AN BA SAO',
+  });
+  assert.equal(renamedUser.assignedWarehouse, 'TÂM AN BA SAO');
+});
+
 
 
 

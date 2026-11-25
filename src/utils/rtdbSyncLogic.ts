@@ -20,7 +20,12 @@ import {
   INITIAL_WAREHOUSES,
   PRIMARY_ADMIN_UID,
 } from '../data/seedData';
-import { canAccountCreateStaff, getDefaultPermissionsForPosition } from './businessLogic';
+import {
+  canAccountCreateStaff,
+  formatDefaultWarehouseNameFromGmail,
+  getDefaultPermissionsForPosition,
+  getIndependentWarehouseFullPermissions,
+} from './businessLogic';
 
 export interface RtdbWorkspaceMeta {
   ownerUid: string;
@@ -153,26 +158,72 @@ export function ensureArrayFromRtdb<T>(raw: unknown): T[] {
   return [];
 }
 
+/**
+ * Ensures any self-registered independent Gmail/Google warehouse account always retains
+ * full single-warehouse permissions (including Inventory & Warehouse management) and a valid
+ * `TÂM AN ...` warehouse name — recovering cleanly even if legacy Firestore seeding overwrote it.
+ */
+export function normalizeIndependentWarehouseStaffMember(staff: StaffMember): StaffMember {
+  if (!staff || !staff.uid) return staff;
+  if (canAccountCreateStaff(staff)) {
+    return staff;
+  }
+
+  const isInternalAdminCreated = staff.uid.startsWith('staff_');
+  const rawWh = (staff.assignedWarehouse || '').trim();
+  const hasInvalidLegacyWh =
+    !rawWh ||
+    rawWh === 'Kho VTNN Tâm An' ||
+    rawWh === 'VTNN Tâm An' ||
+    rawWh === 'Tất cả kho';
+
+  if (isInternalAdminCreated) {
+    return staff;
+  }
+
+  const fixedWarehouse = hasInvalidLegacyWh
+    ? formatDefaultWarehouseNameFromGmail(staff.email || staff.username || '')
+    : rawWh;
+
+  const existingPerms = staff.permissions || [];
+  const hasFullWarehousePerms =
+    existingPerms.includes('manage_single_warehouse') &&
+    existingPerms.includes('warehouse_accounting') &&
+    existingPerms.includes('edit_delete_vouchers');
+
+  return {
+    ...staff,
+    role: 'manager',
+    positionRole: 'warehouse_manager',
+    permissions: hasFullWarehousePerms
+      ? existingPerms
+      : getIndependentWarehouseFullPermissions(),
+    assignedWarehouse: fixedWarehouse,
+  };
+}
+
 export function toRtdbUserDirectoryProfile(
   staff: StaffMember,
   nowIso = new Date().toISOString()
 ): RtdbUserDirectoryProfile {
+  const normalized = normalizeIndependentWarehouseStaffMember(staff);
   return sanitizeForRealtimeDb({
-    uid: staff.uid,
-    username: staff.username || '',
-    displayName: staff.displayName || staff.username || 'Thành viên VTNN Tâm An',
-    phone: staff.phone || '',
-    email: (staff.email || '').toLowerCase(),
-    role: staff.role || 'staff',
+    uid: normalized.uid,
+    username: normalized.username || '',
+    displayName: normalized.displayName || normalized.username || 'Thành viên VTNN Tâm An',
+    phone: normalized.phone || '',
+    email: (normalized.email || '').toLowerCase(),
+    role: normalized.role || 'staff',
     positionRole:
-      staff.positionRole || (canAccountCreateStaff(staff) ? 'primary_manager' : 'warehouse_manager'),
+      normalized.positionRole ||
+      (canAccountCreateStaff(normalized) ? 'primary_manager' : 'warehouse_manager'),
     permissions:
-      staff.permissions ||
-      getDefaultPermissionsForPosition(staff.positionRole || 'warehouse_manager'),
-    assignedWarehouse: staff.assignedWarehouse || 'Tâm An Mỹ Ngãi',
-    active: staff.active !== false,
-    createdAt: staff.createdAt || nowIso,
-    updatedAt: staff.updatedAt || nowIso,
+      normalized.permissions ||
+      getDefaultPermissionsForPosition(normalized.positionRole || 'warehouse_manager'),
+    assignedWarehouse: normalized.assignedWarehouse || 'Tâm An Mỹ Ngãi',
+    active: normalized.active !== false,
+    createdAt: normalized.createdAt || nowIso,
+    updatedAt: normalized.updatedAt || nowIso,
     lastSyncedAt: nowIso,
   });
 }
@@ -183,13 +234,13 @@ export function mergeDirectoryIntoStaffList(
 ): StaffMember[] {
   const byUid = new Map<string, StaffMember>();
   for (const st of localStaff) {
-    byUid.set(st.uid, st);
+    byUid.set(st.uid, normalizeIndependentWarehouseStaffMember(st));
   }
 
   for (const dir of directoryUsers) {
     if (!dir || !dir.uid) continue;
     const prev = byUid.get(dir.uid);
-    byUid.set(dir.uid, {
+    const merged = normalizeIndependentWarehouseStaffMember({
       uid: dir.uid,
       username: dir.username || prev?.username || `user_${dir.uid.slice(0, 6)}`,
       password: prev?.password || '', // Preserve local hash only; never overwrite from directory
@@ -204,6 +255,7 @@ export function mergeDirectoryIntoStaffList(
       createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
       updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
     });
+    byUid.set(dir.uid, merged);
   }
 
   return Array.from(byUid.values());

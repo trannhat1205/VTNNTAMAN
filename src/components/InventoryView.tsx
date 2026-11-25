@@ -1,14 +1,22 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowDownLeft,
   ArrowDownToLine,
+  ArrowUpRight,
+  Boxes,
+  Calendar,
   CheckCircle2,
+  Eye,
+  FileSpreadsheet,
   FolderPlus,
+  History,
   Lock,
   PackagePlus,
   Pencil,
   Search,
   Trash2,
+  TrendingUp,
   Warehouse,
   X,
 } from 'lucide-react';
@@ -20,8 +28,16 @@ import {
   SaleTransaction,
   UserRole,
 } from '../types';
-import { canPerformRoleAction, evaluateStockAlert, formatVND } from '../utils/businessLogic';
-import { exportModuleDataExcel } from '../utils/exportReports';
+import {
+  canPerformRoleAction,
+  computeProductStockMovementLedger,
+  evaluateStockAlert,
+  formatVND,
+  getCurrentMonthRangeVietnam,
+  getRecentDaysRangeVietnam,
+  normalizeVietnameseSearch,
+} from '../utils/businessLogic';
+import { exportModuleDataExcel, exportProductStockCardExcel } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 
@@ -43,6 +59,7 @@ interface InventoryViewProps {
   onDeleteProduct: (productId: string) => void;
   onImportProductsFromExcel: (rows: Record<string, unknown>[]) => number;
   onQuickRestock: (productId: string) => void;
+  onRequestAddNewProductInImports?: () => void;
   focusedProductId?: string | null;
   onClearFocusedProduct?: () => void;
 }
@@ -62,13 +79,26 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onDeleteProduct,
   onImportProductsFromExcel,
   onQuickRestock,
+  onRequestAddNewProductInImports,
   focusedProductId,
   onClearFocusedProduct,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
   const [categoryFilter, setCategoryFilter] = useState<ProductCategory | 'all'>('all');
-  const [stockFilter, setStockFilter] = useState<'all' | 'low_or_out'>('all');
+  const [stockFilter, setStockFilter] = useState<'all' | 'low_or_out' | 'out_of_stock' | 'normal'>('all');
+
+  // Detailed Stock Movement Ledger Modal (Chi tiết Xuất - Nhập - Tồn kho) when clicking any item
+  const [detailProductId, setDetailProductId] = useState<string | null>(null);
+  const [ledgerFromDate, setLedgerFromDate] = useState<string>('');
+  const [ledgerToDate, setLedgerToDate] = useState<string>('');
+  const [ledgerTypeFilter, setLedgerTypeFilter] = useState<'all' | 'import' | 'export'>('all');
+
+  useEffect(() => {
+    if (focusedProductId) {
+      setDetailProductId(focusedProductId);
+    }
+  }, [focusedProductId]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<ProductItem | null>(null);
@@ -93,6 +123,108 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   const lowStockCount = products.filter((p) => evaluateStockAlert(p) !== 'normal').length;
 
+  const scopedBaseProducts = useMemo(
+    () =>
+      products.filter((p) => {
+        const pWarehouse = p.warehouseName || 'Tâm An Mỹ Ngãi';
+        if (lockedWarehouse && pWarehouse !== lockedWarehouse) return false;
+        if (!lockedWarehouse && warehouseFilter !== 'all' && pWarehouse !== warehouseFilter) {
+          return false;
+        }
+        return true;
+      }),
+    [products, lockedWarehouse, warehouseFilter]
+  );
+
+  const inventorySummaryKpis = useMemo(() => {
+    let totalUnits = 0;
+    let totalCostValue = 0;
+    let totalRetailValue = 0;
+    let outCount = 0;
+    let lowCount = 0;
+    let totalInUnits = 0;
+    let totalOutUnits = 0;
+
+    for (const p of scopedBaseProducts) {
+      const stk = Math.max(0, Number(p.stock) || 0);
+      totalUnits += stk;
+      totalCostValue += stk * (Number(p.importPrice) || 0);
+      totalRetailValue += stk * (Number(p.sellPrice) || 0);
+      const alert = evaluateStockAlert(p);
+      if (alert === 'out_of_stock') outCount += 1;
+      else if (alert === 'low_stock') lowCount += 1;
+    }
+
+    const baseIds = new Set(scopedBaseProducts.map((p) => p.id));
+    for (const imp of imports) {
+      if (baseIds.has(imp.productId)) {
+        totalInUnits += Math.max(0, Number(imp.quantity) || 0);
+      }
+    }
+    for (const s of sales) {
+      if (baseIds.has(s.productId)) {
+        totalOutUnits += Math.max(0, Number(s.quantity) || 0);
+      }
+      if (s.giftProductId && baseIds.has(s.giftProductId)) {
+        totalOutUnits += Math.max(0, Number(s.giftQuantity) || 0);
+      }
+    }
+
+    return {
+      productCount: scopedBaseProducts.length,
+      totalUnits,
+      totalCostValue,
+      totalRetailValue,
+      outCount,
+      lowCount,
+      alertTotal: outCount + lowCount,
+      totalInUnits,
+      totalOutUnits,
+    };
+  }, [scopedBaseProducts, imports, sales]);
+
+  const productMovementCounts = useMemo(() => {
+    const map = new Map<string, { qtyIn: number; qtyOut: number }>();
+    for (const imp of imports) {
+      const prev = map.get(imp.productId) || { qtyIn: 0, qtyOut: 0 };
+      prev.qtyIn += Math.max(0, Number(imp.quantity) || 0);
+      map.set(imp.productId, prev);
+    }
+    for (const s of sales) {
+      const prev = map.get(s.productId) || { qtyIn: 0, qtyOut: 0 };
+      prev.qtyOut += Math.max(0, Number(s.quantity) || 0);
+      map.set(s.productId, prev);
+      if (s.giftProductId && (Number(s.giftQuantity) || 0) > 0) {
+        const gPrev = map.get(s.giftProductId) || { qtyIn: 0, qtyOut: 0 };
+        gPrev.qtyOut += Math.max(0, Number(s.giftQuantity) || 0);
+        map.set(s.giftProductId, gPrev);
+      }
+    }
+    return map;
+  }, [imports, sales]);
+
+  const detailProduct = useMemo(
+    () => (detailProductId ? products.find((p) => p.id === detailProductId) || null : null),
+    [detailProductId, products]
+  );
+
+  const detailLedger = useMemo(() => {
+    if (!detailProduct) return null;
+    return computeProductStockMovementLedger(detailProduct, sales, imports, {
+      fromDate: ledgerFromDate || undefined,
+      toDate: ledgerToDate || undefined,
+    });
+  }, [detailProduct, sales, imports, ledgerFromDate, ledgerToDate]);
+
+  const filteredDetailMovements = useMemo(() => {
+    if (!detailLedger) return [];
+    if (ledgerTypeFilter === 'all') return detailLedger.movementsInPeriod;
+    if (ledgerTypeFilter === 'import') {
+      return detailLedger.movementsInPeriod.filter((m) => m.type === 'import');
+    }
+    return detailLedger.movementsInPeriod.filter((m) => m.type !== 'import');
+  }, [detailLedger, ledgerTypeFilter]);
+
   const filteredProducts = products.filter((p) => {
     const pWarehouse = p.warehouseName || 'Tâm An Mỹ Ngãi';
     if (lockedWarehouse && pWarehouse !== lockedWarehouse) return false;
@@ -100,15 +232,15 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       return false;
     }
     if (categoryFilter !== 'all' && p.category !== categoryFilter) return false;
-    if (stockFilter === 'low_or_out' && evaluateStockAlert(p) === 'normal') return false;
-    const q = searchQuery.trim().toLowerCase();
+    const alert = evaluateStockAlert(p);
+    if (stockFilter === 'low_or_out' && alert === 'normal') return false;
+    if (stockFilter === 'out_of_stock' && alert !== 'out_of_stock') return false;
+    if (stockFilter === 'normal' && alert !== 'normal') return false;
+    const q = normalizeVietnameseSearch(searchQuery);
     if (!q) return true;
-    return (
-      p.name.toLowerCase().includes(q) ||
-      p.code.toLowerCase().includes(q) ||
-      p.supplierName.toLowerCase().includes(q) ||
-      pWarehouse.toLowerCase().includes(q)
-    );
+    return normalizeVietnameseSearch(
+      `${p.name} ${p.code} ${p.category} ${p.supplierName} ${pWarehouse}`
+    ).includes(q);
   });
 
   const resetProductModalToBlank = () => {
@@ -216,12 +348,100 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   return (
     <div className="space-y-5">
+      {/* 4 Interactive Inventory Overview KPI Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <button
+          type="button"
+          onClick={() => setStockFilter('all')}
+          className={`text-left bg-white p-4 rounded-xl border transition-colors ${
+            stockFilter === 'all'
+              ? 'border-emerald-600 ring-2 ring-emerald-500/15'
+              : 'border-slate-200 hover:border-emerald-300'
+          }`}
+        >
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>Tổng Danh Mục &amp; Tồn Kho</span>
+            <Boxes className="w-4 h-4 text-emerald-700" />
+          </div>
+          <div className="text-xl font-bold font-mono tabular-nums text-slate-900 mt-1.5">
+            {inventorySummaryKpis.productCount} mặt hàng
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            Tổng tồn:{' '}
+            <strong className="font-mono text-emerald-800">
+              {inventorySummaryKpis.totalUnits.toLocaleString('vi-VN')} ĐVT
+            </strong>
+          </div>
+        </button>
+
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>Tổng Giá Trị Tồn Kho</span>
+            <TrendingUp className="w-4 h-4 text-emerald-700" />
+          </div>
+          <div className="text-xl font-bold font-mono tabular-nums text-emerald-800 mt-1.5">
+            {formatVND(inventorySummaryKpis.totalCostValue)}
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            Giá trị bán lẻ:{' '}
+            <strong className="font-mono text-slate-800">
+              {formatVND(inventorySummaryKpis.totalRetailValue)}
+            </strong>
+          </div>
+        </div>
+
+        <div className="bg-white p-4 rounded-xl border border-slate-200">
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>Tổng Nhập / Xuất Lũy Kế</span>
+            <History className="w-4 h-4 text-emerald-700" />
+          </div>
+          <div className="flex items-baseline gap-3 mt-1.5 font-mono tabular-nums">
+            <span className="text-base font-bold text-emerald-700">
+              +{inventorySummaryKpis.totalInUnits.toLocaleString('vi-VN')} nhập
+            </span>
+            <span className="text-slate-300">|</span>
+            <span className="text-base font-bold text-amber-700">
+              -{inventorySummaryKpis.totalOutUnits.toLocaleString('vi-VN')} xuất
+            </span>
+          </div>
+          <div className="text-[11px] text-slate-500 mt-1">
+            Bấm vào từng mặt hàng bên dưới để xem chi tiết Xuất - Nhập - Tồn
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={() =>
+            setStockFilter((prev) => (prev === 'low_or_out' ? 'all' : 'low_or_out'))
+          }
+          className={`text-left bg-white p-4 rounded-xl border transition-colors ${
+            stockFilter === 'low_or_out'
+              ? 'border-amber-600 ring-2 ring-amber-500/15'
+              : 'border-slate-200 hover:border-amber-300'
+          }`}
+        >
+          <div className="flex items-center justify-between text-xs text-slate-500">
+            <span>Cảnh Báo Sắp Hết / Hết Hàng</span>
+            <AlertTriangle className="w-4 h-4 text-amber-600" />
+          </div>
+          <div className="text-xl font-bold font-mono tabular-nums text-amber-700 mt-1.5">
+            {inventorySummaryKpis.alertTotal} mặt hàng
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            Hết hàng: <strong className="text-red-600">{inventorySummaryKpis.outCount}</strong> · Sắp hết:{' '}
+            <strong className="text-amber-700">{inventorySummaryKpis.lowCount}</strong>
+          </div>
+        </button>
+      </div>
+
       {/* Alert Banner for Low Stock Items */}
       {lowStockCount > 0 && (
         <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
-            <h3 className="text-sm font-bold text-slate-900">Cảnh báo tồn kho</h3>
+            <h3 className="text-sm font-bold text-slate-900">
+              Cảnh báo tồn kho ({lowStockCount} mặt hàng chạm hoặc dưới định mức tối thiểu)
+            </h3>
           </div>
           <button
             type="button"
@@ -337,16 +557,42 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </option>
             ))}
           </select>
+
+          <select
+            aria-label="Lọc trạng thái tồn kho"
+            value={stockFilter}
+            onChange={(e) =>
+              setStockFilter(e.target.value as 'all' | 'low_or_out' | 'out_of_stock' | 'normal')
+            }
+            className="px-3 py-2 text-xs font-medium bg-white border border-slate-200 rounded-lg text-slate-800"
+          >
+            <option value="all">Tất cả trạng thái tồn</option>
+            <option value="normal">Đủ tồn kho</option>
+            <option value="low_or_out">Sắp hết / Hết hàng</option>
+            <option value="out_of_stock">Chỉ hết hàng (0)</option>
+          </select>
         </div>
 
-        <button
-          type="button"
-          onClick={openAddModal}
-          className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center justify-center gap-2 shrink-0"
-        >
-          <PackagePlus className="w-4 h-4" />
-          <span>Thêm vật tư mới</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onRequestAddNewProductInImports && (
+            <button
+              type="button"
+              onClick={onRequestAddNewProductInImports}
+              className="px-3.5 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-colors flex items-center justify-center gap-1.5 shrink-0"
+            >
+              <ArrowDownToLine className="w-4 h-4" />
+              <span>Nhập hàng &amp; VT mới</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={openAddModal}
+            className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center justify-center gap-2 shrink-0"
+          >
+            <PackagePlus className="w-4 h-4" />
+            <span>Thêm vật tư mới</span>
+          </button>
+        </div>
       </div>
 
       {/* Inventory Table */}
@@ -360,15 +606,31 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           ) : (
             filteredProducts.map((p) => {
               const alert = evaluateStockAlert(p);
+              const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
               return (
-                <div key={p.id} className="p-4 space-y-3 hover:bg-slate-50">
+                <div
+                  key={p.id}
+                  onClick={() => {
+                    setLedgerFromDate('');
+                    setLedgerToDate('');
+                    setLedgerTypeFilter('all');
+                    setDetailProductId(p.id);
+                  }}
+                  className="p-4 space-y-3 hover:bg-emerald-50/40 cursor-pointer transition-colors"
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="font-bold text-sm text-slate-900">{p.name}</div>
+                      <div className="font-bold text-sm text-slate-900 flex items-center gap-1.5">
+                        <span className="truncate">{p.name}</span>
+                        <Eye className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      </div>
                       <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
                         <span className="font-mono font-semibold text-slate-700">{p.code}</span>
                         <span aria-hidden="true">·</span>
                         <span>ĐVT: {p.unit}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono text-emerald-700">+{movCounts.qtyIn}</span>
+                        <span className="font-mono text-amber-700">-{movCounts.qtyOut}</span>
                       </div>
                     </div>
                     <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-md whitespace-nowrap shrink-0 flex items-center gap-1">
@@ -436,11 +698,28 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     </div>
 
                     <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setLedgerFromDate('');
+                          setLedgerToDate('');
+                          setLedgerTypeFilter('all');
+                          setDetailProductId(p.id);
+                        }}
+                        className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <Eye className="w-3 h-3" />
+                        <span>Chi tiết XNT</span>
+                      </button>
                       {canPerformRoleAction(role, 'edit_record') ? (
                         <>
                           <button
                             type="button"
-                            onClick={() => openEditModal(p)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditModal(p);
+                            }}
                             aria-label={`Sửa vật tư ${p.name}`}
                             className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                           >
@@ -449,7 +728,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteProduct(p.id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onDeleteProduct(p.id);
+                            }}
                             aria-label={`Xóa vật tư ${p.name}`}
                             className="p-1.5 text-slate-400 hover:text-red-600 rounded-md border border-slate-200"
                           >
@@ -467,7 +749,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       )}
                       <button
                         type="button"
-                        onClick={() => onQuickRestock(p.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onQuickRestock(p.id);
+                        }}
                         aria-label={`Nhập thêm ngay cho ${p.name}`}
                         className={`px-2.5 py-1.5 text-xs font-semibold rounded-md flex items-center gap-1 whitespace-nowrap ${
                           alert !== 'normal'
@@ -502,16 +787,44 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-sm">
-              {filteredProducts.map((p) => {
+              {filteredProducts.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-10 px-4 text-center text-xs text-slate-500">
+                    Chưa có vật tư nông nghiệp nào khớp với bộ lọc hiện tại. Bấm &quot;+ Nhập hàng &amp; VT mới&quot; hoặc &quot;+ Thêm vật tư mới&quot; để khởi tạo danh mục kho.
+                  </td>
+                </tr>
+              ) : (
+              filteredProducts.map((p) => {
                 const alert = evaluateStockAlert(p);
+                const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
                 return (
-                  <tr key={p.id} className="hover:bg-slate-50">
+                  <tr
+                    key={p.id}
+                    onClick={() => {
+                      setLedgerFromDate('');
+                      setLedgerToDate('');
+                      setLedgerTypeFilter('all');
+                      setDetailProductId(p.id);
+                    }}
+                    title="Bấm để xem Chi tiết Xuất - Nhập - Tồn kho của mặt hàng này"
+                    className="hover:bg-emerald-50/50 cursor-pointer transition-colors"
+                  >
                     <td className="py-3.5 px-4 min-w-[230px] align-middle">
-                      <div className="font-semibold text-slate-900 leading-snug">{p.name}</div>
-                      <div className="text-xs text-slate-500 mt-0.5">
+                      <div className="font-semibold text-slate-900 leading-snug flex items-center gap-1.5">
+                        <span>{p.name}</span>
+                        <Eye className="w-3.5 h-3.5 text-emerald-700 shrink-0 opacity-75" />
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
                         <span className="font-mono">{p.code}</span>
-                        <span className="mx-1.5" aria-hidden="true">·</span>
+                        <span aria-hidden="true">·</span>
                         <span>Đơn vị: {p.unit}</span>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-mono text-emerald-700 font-semibold">
+                          +{movCounts.qtyIn}
+                        </span>
+                        <span className="font-mono text-amber-700 font-semibold">
+                          -{movCounts.qtyOut}
+                        </span>
                       </div>
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap align-middle">
@@ -567,11 +880,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     </td>
                     <td className="py-3.5 px-4 text-right whitespace-nowrap align-middle">
                       <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setLedgerFromDate('');
+                            setLedgerToDate('');
+                            setLedgerTypeFilter('all');
+                            setDetailProductId(p.id);
+                          }}
+                          title="Xem chi tiết Xuất - Nhập - Tồn kho"
+                          className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <Eye className="w-3 h-3" />
+                          <span>Chi tiết</span>
+                        </button>
                         {canPerformRoleAction(role, 'edit_record') ? (
                           <>
                             <button
                               type="button"
-                              onClick={() => openEditModal(p)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openEditModal(p);
+                              }}
                               aria-label={`Sửa vật tư ${p.name}`}
                               className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                             >
@@ -580,7 +911,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={() => onDeleteProduct(p.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDeleteProduct(p.id);
+                              }}
                               aria-label={`Xóa vật tư ${p.name}`}
                               className="p-1.5 text-slate-400 hover:text-red-600 rounded-md"
                             >
@@ -598,7 +932,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         )}
                         <button
                           type="button"
-                          onClick={() => onQuickRestock(p.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onQuickRestock(p.id);
+                          }}
                           aria-label={`Nhập thêm ngay cho ${p.name}`}
                           className={`px-2.5 py-1 text-xs font-semibold rounded-md flex items-center gap-1 whitespace-nowrap ${
                             alert !== 'normal'
@@ -613,7 +950,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     </td>
                   </tr>
                 );
-              })}
+              })
+              )}
             </tbody>
           </table>
         </div>
@@ -964,6 +1302,324 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Detailed Stock Movement Ledger Modal (Chi tiết Xuất - Nhập - Tồn kho từng mặt hàng) */}
+      {detailProduct && detailLedger && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-2.5 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Chi tiết xuất nhập tồn kho ${detailProduct.name}`}
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-4xl max-h-[calc(100dvh-1.25rem)] sm:max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 bg-emerald-50/70 flex items-start justify-between gap-3 shrink-0">
+              <div className="min-w-0 space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2 py-0.5 text-[11px] font-mono font-bold bg-emerald-700 text-white rounded">
+                    {detailProduct.code}
+                  </span>
+                  <span className="px-2 py-0.5 text-[11px] font-semibold bg-white text-emerald-900 border border-emerald-200 rounded flex items-center gap-1">
+                    <Warehouse className="w-3 h-3" />
+                    <span>{detailProduct.warehouseName || 'Tâm An Mỹ Ngãi'}</span>
+                  </span>
+                  <span className="text-[11px] font-medium text-slate-600">
+                    Nhóm: {detailProduct.category} · ĐVT: {detailProduct.unit}
+                  </span>
+                </div>
+                <h3 className="text-base sm:text-lg font-bold text-slate-900 truncate">
+                  Chi Tiết Xuất - Nhập - Tồn Kho: {detailProduct.name}
+                </h3>
+                <div className="text-xs text-slate-600 flex flex-wrap gap-x-3 gap-y-1">
+                  <span>
+                    Giá nhập: <strong className="font-mono">{formatVND(detailProduct.importPrice)}</strong>
+                  </span>
+                  <span>
+                    Giá bán: <strong className="font-mono text-emerald-800">{formatVND(detailProduct.sellPrice)}</strong>
+                  </span>
+                  <span>
+                    Định mức tối thiểu: <strong className="font-mono">{detailProduct.minStock} {detailProduct.unit}</strong>
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailProductId(null)}
+                aria-label="Đóng chi tiết xuất nhập tồn"
+                className="p-1.5 text-slate-400 hover:text-slate-800 bg-white rounded-lg border border-slate-200 shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
+              {/* 4 Stock Balance Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="text-[11px] text-slate-500">Tồn đầu kỳ</div>
+                  <div className="text-lg font-bold font-mono text-slate-900 mt-1">
+                    {detailLedger.openingStock.toLocaleString('vi-VN')} {detailProduct.unit}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200">
+                  <div className="text-[11px] text-emerald-800 font-medium">
+                    Nhập kho trong kỳ ({detailLedger.periodImportCount} phiếu)
+                  </div>
+                  <div className="text-lg font-bold font-mono text-emerald-800 mt-1">
+                    +{detailLedger.periodImportQty.toLocaleString('vi-VN')} {detailProduct.unit}
+                  </div>
+                  <div className="text-[11px] font-mono text-emerald-700">
+                    {formatVND(detailLedger.periodImportValue)}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200">
+                  <div className="text-[11px] text-amber-800 font-medium">
+                    Xuất bán &amp; KM ({detailLedger.periodExportCount} lượt)
+                  </div>
+                  <div className="text-lg font-bold font-mono text-amber-800 mt-1">
+                    -{detailLedger.periodExportTotalQty.toLocaleString('vi-VN')} {detailProduct.unit}
+                  </div>
+                  <div className="text-[11px] font-mono text-amber-700">
+                    {detailLedger.periodExportGiftQty > 0
+                      ? `Bán: ${detailLedger.periodExportSaleQty} · Tặng KM: ${detailLedger.periodExportGiftQty}`
+                      : formatVND(detailLedger.periodExportRevenue)}
+                  </div>
+                </div>
+                <div className="p-3 rounded-xl bg-emerald-700 text-white">
+                  <div className="text-[11px] text-emerald-100">
+                    Tồn cuối kỳ / Thực tế hiện tại
+                  </div>
+                  <div className="text-lg font-bold font-mono mt-1">
+                    {detailLedger.closingStock.toLocaleString('vi-VN')} {detailProduct.unit}
+                  </div>
+                  <div className="text-[11px] text-emerald-100 font-mono">
+                    Thực tế kho: {detailProduct.stock} {detailProduct.unit}
+                  </div>
+                </div>
+              </div>
+
+              {/* Filter & Date Range Controls */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Calendar className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLedgerFromDate('');
+                      setLedgerToDate('');
+                    }}
+                    className={`px-2.5 py-1 rounded-md font-semibold ${
+                      !ledgerFromDate && !ledgerToDate
+                        ? 'bg-emerald-700 text-white'
+                        : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    Toàn thời gian
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const r = getCurrentMonthRangeVietnam();
+                      setLedgerFromDate(r.from);
+                      setLedgerToDate(r.to);
+                    }}
+                    className="px-2.5 py-1 rounded-md font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100"
+                  >
+                    Tháng này
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const r = getRecentDaysRangeVietnam(7);
+                      setLedgerFromDate(r.from);
+                      setLedgerToDate(r.to);
+                    }}
+                    className="px-2.5 py-1 rounded-md font-semibold bg-white border border-slate-200 text-slate-700 hover:bg-slate-100"
+                  >
+                    7 ngày qua
+                  </button>
+                  <input
+                    type="date"
+                    aria-label="Từ ngày"
+                    value={ledgerFromDate}
+                    onChange={(e) => setLedgerFromDate(e.target.value)}
+                    className="px-2 py-1 rounded-md border border-slate-200 bg-white font-mono text-xs"
+                  />
+                  <span>→</span>
+                  <input
+                    type="date"
+                    aria-label="Đến ngày"
+                    value={ledgerToDate}
+                    onChange={(e) => setLedgerToDate(e.target.value)}
+                    className="px-2 py-1 rounded-md border border-slate-200 bg-white font-mono text-xs"
+                  />
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  {(
+                    [
+                      { id: 'all', label: 'Tất cả' },
+                      { id: 'import', label: 'Chỉ Nhập (+)' },
+                      { id: 'export', label: 'Chỉ Xuất (-)' },
+                    ] as const
+                  ).map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setLedgerTypeFilter(t.id)}
+                      className={`px-2.5 py-1 rounded-md font-semibold ${
+                        ledgerTypeFilter === t.id
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Chronological Stock Card Ledger Table */}
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[680px] text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
+                      <tr>
+                        <th className="py-2.5 px-3">Ngày chứng từ</th>
+                        <th className="py-2.5 px-3">Loại &amp; Mã phiếu</th>
+                        <th className="py-2.5 px-3">Đối tác (NCC / Khách hàng)</th>
+                        <th className="py-2.5 px-3 text-right">Nhập (+)</th>
+                        <th className="py-2.5 px-3 text-right">Xuất (-)</th>
+                        <th className="py-2.5 px-3 text-right">Tồn sau GD</th>
+                        <th className="py-2.5 px-3 text-right">Đơn giá / Thành tiền</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {filteredDetailMovements.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-8 px-4 text-center text-slate-500">
+                            Chưa có chứng từ nhập hoặc xuất nào cho mặt hàng này trong khoảng thời gian đã chọn.
+                          </td>
+                        </tr>
+                      ) : (
+                        filteredDetailMovements.map((mov) => (
+                          <tr key={mov.id} className="hover:bg-slate-50">
+                            <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap">
+                              {(mov.dateIso || '').slice(0, 16).replace('T', ' ')}
+                            </td>
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <div className="flex items-center gap-1.5">
+                                {mov.type === 'import' ? (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900 font-semibold text-[11px]">
+                                    <ArrowDownLeft className="w-3 h-3" />
+                                    Nhập
+                                  </span>
+                                ) : mov.type === 'gift_export' ? (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-100 text-purple-900 font-semibold text-[11px]">
+                                    <ArrowUpRight className="w-3 h-3" />
+                                    Quà KM
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-semibold text-[11px]">
+                                    <ArrowUpRight className="w-3 h-3" />
+                                    Xuất bán
+                                  </span>
+                                )}
+                                <span className="font-mono font-bold text-slate-800">
+                                  {mov.voucherCode}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-medium text-slate-900">{mov.partnerName}</div>
+                              {mov.note && (
+                                <div className="text-[11px] text-slate-500 truncate max-w-[200px]">
+                                  {mov.note}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-700 whitespace-nowrap">
+                              {mov.qtyIn > 0 ? `+${mov.qtyIn}` : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-amber-700 whitespace-nowrap">
+                              {mov.qtyOut > 0 ? `-${mov.qtyOut}` : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
+                              {mov.balanceAfter} {detailProduct.unit}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-mono whitespace-nowrap">
+                              <div className="text-slate-900 font-semibold">
+                                {formatVND(mov.totalValue)}
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                ĐG: {formatVND(mov.unitPriceOrCost)}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetId = detailProduct.id;
+                    setDetailProductId(null);
+                    onQuickRestock(targetId);
+                  }}
+                  className="px-3.5 py-2 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-lg flex items-center gap-1.5"
+                >
+                  <ArrowDownToLine className="w-3.5 h-3.5" />
+                  <span>Nhập thêm hàng</span>
+                </button>
+                {canPerformRoleAction(role, 'edit_record') && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const prod = detailProduct;
+                      setDetailProductId(null);
+                      openEditModal(prod);
+                    }}
+                    className="px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-lg flex items-center gap-1.5"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                    <span>Sửa vật tư</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const periodStr =
+                      ledgerFromDate || ledgerToDate
+                        ? `Từ ${ledgerFromDate || 'Đầu kỳ'} đến ${ledgerToDate || 'Hiện tại'}`
+                        : 'Toàn thời gian';
+                    exportProductStockCardExcel(detailLedger, periodStr);
+                  }}
+                  className="px-3.5 py-2 text-xs font-semibold text-emerald-900 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 rounded-lg flex items-center gap-1.5"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Xuất Thẻ Kho Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDetailProductId(null)}
+                  className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50"
+                >
+                  Đóng
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
