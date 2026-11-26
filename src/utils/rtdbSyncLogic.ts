@@ -29,10 +29,12 @@ import {
 } from '../data/seedData';
 import {
   canAccountCreateStaff,
+  dedupeWarehouseNames,
   formatDefaultWarehouseNameFromGmail,
   getDefaultPermissionsForPosition,
   getIndependentWarehouseFullPermissions,
   hasMultiWarehouseManagementGrant,
+  normalizeWarehouseKey,
 } from './businessLogic';
 
 export interface RtdbWorkspaceMeta {
@@ -748,7 +750,7 @@ export function aggregateAdminWorkspacesFromRtdb(
     ),
     auditLogs: sortedAuditLogs,
     backups: dedupeRecordsById(allBackups),
-    warehouses: Array.from(warehouseSet),
+    warehouses: dedupeWarehouseNames(Array.from(warehouseSet)),
     customerGroups: Array.from(custGroupSet),
     productCategories: Array.from(prodCatSet),
     receiptGroups: Array.from(recGroupSet),
@@ -780,6 +782,7 @@ export function partitionAdminStateByWorkspace(params: {
   knownOwnerUids: string[];
   adminUid: string;
   nowIso: string;
+  existingMetaByUid?: Record<string, RtdbWorkspaceMeta>;
 }): Record<string, RtdbWorkspacePayload> {
   const {
     products,
@@ -798,22 +801,39 @@ export function partitionAdminStateByWorkspace(params: {
     knownOwnerUids,
     adminUid,
     nowIso,
+    existingMetaByUid = {},
   } = params;
 
-  const ownerByWarehouse = new Map<string, string>();
+  const ownerByWarehouseKey = new Map<string, string>();
   const staffByUid = new Map<string, StaffMember>();
   for (const st of staffList) {
     staffByUid.set(st.uid, st);
-    if (st.assignedWarehouse && st.assignedWarehouse !== 'Tất cả kho' && !ownerByWarehouse.has(st.assignedWarehouse)) {
-      ownerByWarehouse.set(st.assignedWarehouse, st.uid);
+    const whKey = normalizeWarehouseKey(st.assignedWarehouse);
+    if (
+      whKey &&
+      st.assignedWarehouse !== 'Tất cả kho' &&
+      !ownerByWarehouseKey.has(whKey)
+    ) {
+      ownerByWarehouseKey.set(whKey, st.uid);
+    }
+  }
+  for (const [metaUid, meta] of Object.entries(existingMetaByUid)) {
+    const whKey = normalizeWarehouseKey(meta?.assignedWarehouse);
+    if (
+      whKey &&
+      meta.assignedWarehouse !== 'Tất cả kho' &&
+      !ownerByWarehouseKey.has(whKey)
+    ) {
+      ownerByWarehouseKey.set(whKey, metaUid);
     }
   }
 
   const resolveOwner = (record: { ownerId?: string; warehouseName?: string; actorUid?: string }): string => {
     if (record.ownerId && record.ownerId.trim()) return record.ownerId.trim();
     if (record.actorUid && record.actorUid.trim()) return record.actorUid.trim();
-    if (record.warehouseName && ownerByWarehouse.has(record.warehouseName)) {
-      return ownerByWarehouse.get(record.warehouseName) || adminUid;
+    const whKey = normalizeWarehouseKey(record.warehouseName);
+    if (whKey && ownerByWarehouseKey.has(whKey)) {
+      return ownerByWarehouseKey.get(whKey) || adminUid;
     }
     return adminUid;
   };
@@ -823,13 +843,17 @@ export function partitionAdminStateByWorkspace(params: {
     const existing = buckets.get(uid);
     if (existing) return existing;
     const ownerStaff = staffByUid.get(uid);
+    const prevMeta = existingMetaByUid[uid];
+    const resolvedWh =
+      ownerStaff?.assignedWarehouse ||
+      prevMeta?.assignedWarehouse ||
+      (uid === PRIMARY_ADMIN_UID ? 'Tất cả kho' : '');
     const created: RtdbWorkspacePayload = {
       meta: {
         ownerUid: uid,
-        ownerEmail: ownerStaff?.email || '',
-        ownerDisplayName: ownerStaff?.displayName || '',
-        assignedWarehouse:
-          ownerStaff?.assignedWarehouse || (uid === adminUid ? 'Tất cả kho' : ''),
+        ownerEmail: ownerStaff?.email || prevMeta?.ownerEmail || '',
+        ownerDisplayName: ownerStaff?.displayName || prevMeta?.ownerDisplayName || '',
+        assignedWarehouse: resolvedWh,
         updatedAt: nowIso,
         updatedByUid: adminUid,
         schemaVersion: 1,
@@ -848,8 +872,8 @@ export function partitionAdminStateByWorkspace(params: {
       settings: {
         ...settings,
         warehouses:
-          ownerStaff?.assignedWarehouse && ownerStaff.assignedWarehouse !== 'Tất cả kho'
-            ? Array.from(new Set([ownerStaff.assignedWarehouse]))
+          resolvedWh && resolvedWh !== 'Tất cả kho'
+            ? Array.from(new Set([resolvedWh]))
             : settings.warehouses,
       },
     };
@@ -883,6 +907,84 @@ export function partitionAdminStateByWorkspace(params: {
     out[key] = sanitizeForRealtimeDb(val);
   });
   return out;
+}
+
+/**
+ * Resolves ALL workspace owner UIDs that own or hold records for the granted warehouse names,
+ * using accent- and case-insensitive matching so "Tâm An Mỹ Ngãi" always matches "TÂM AN MỸ NGÃI".
+ */
+export function resolveDesignatedOwnerUidsForWarehouses(params: {
+  targetUid: string;
+  selectedWarehouses: string[];
+  staffList: StaffMember[];
+  workspacesMap?: Record<string, unknown>;
+  adminSummaries?: AdminWarehouseAccountSummary[];
+  records?: Array<{ warehouseName?: string; ownerId?: string }>;
+}): Record<string, boolean> {
+  const ownerUidsMap: Record<string, boolean> = {};
+  if (params.targetUid && params.targetUid.trim()) {
+    ownerUidsMap[params.targetUid.trim()] = true;
+  }
+
+  const selectedKeys = new Set(
+    (params.selectedWarehouses || [])
+      .map((w) => normalizeWarehouseKey(w))
+      .filter((k) => Boolean(k) && k !== normalizeWarehouseKey('Tất cả kho'))
+  );
+  if (selectedKeys.size === 0) {
+    return ownerUidsMap;
+  }
+
+  for (const st of params.staffList || []) {
+    if (!st?.uid) continue;
+    const whKey = normalizeWarehouseKey(st.assignedWarehouse);
+    if (whKey && selectedKeys.has(whKey)) {
+      ownerUidsMap[st.uid] = true;
+    }
+  }
+
+  for (const sum of params.adminSummaries || []) {
+    if (!sum?.uid) continue;
+    const whKey = normalizeWarehouseKey(sum.assignedWarehouse);
+    if (whKey && selectedKeys.has(whKey)) {
+      ownerUidsMap[sum.uid] = true;
+    }
+  }
+
+  for (const [wsUid, rawWs] of Object.entries(params.workspacesMap || {})) {
+    if (!wsUid || !rawWs || typeof rawWs !== 'object') continue;
+    const norm = normalizeWorkspaceFromRtdb(rawWs, wsUid);
+    if (selectedKeys.has(normalizeWarehouseKey(norm.meta.assignedWarehouse))) {
+      ownerUidsMap[wsUid] = true;
+    }
+    const wsRecords: Array<{ warehouseName?: string; ownerId?: string }> = [
+      ...norm.products,
+      ...norm.customers,
+      ...norm.suppliers,
+      ...norm.sales,
+      ...norm.imports,
+      ...norm.receiptVouchers,
+      ...norm.paymentVouchers,
+      ...norm.savedVouchers,
+      ...(norm.stockAdjustments || []),
+    ];
+    for (const rec of wsRecords) {
+      if (selectedKeys.has(normalizeWarehouseKey(rec.warehouseName))) {
+        ownerUidsMap[wsUid] = true;
+        if (rec.ownerId && rec.ownerId.trim()) {
+          ownerUidsMap[rec.ownerId.trim()] = true;
+        }
+      }
+    }
+  }
+
+  for (const rec of params.records || []) {
+    if (rec?.ownerId && selectedKeys.has(normalizeWarehouseKey(rec.warehouseName))) {
+      ownerUidsMap[rec.ownerId.trim()] = true;
+    }
+  }
+
+  return ownerUidsMap;
 }
 
 /**

@@ -89,6 +89,7 @@ import {
   buildWorkspaceDiffUpdates,
   computeWorkspaceFingerprint,
   countWorkspaceBusinessRecords,
+  ensureArrayFromRtdb,
   isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
   mergeWorkspacePayloads,
@@ -2109,9 +2110,18 @@ export async function writeWorkspaceToFirebaseStorage(
 
     const targetPaths: string[] = [paths.uidPath];
     if (paths.emailPath) targetPaths.push(paths.emailPath);
-    if (paths.warehousePath) targetPaths.push(paths.warehousePath);
-    // Always overwrite backupPath on deletions / intentional wipes too so stale deleted items never survive
-    if (recordCount > 0 || isDeletionSync) {
+    // Protect shared warehouse_*.json alias: NEVER let an empty account overwrite another owner's warehouse alias!
+    if (
+      paths.warehousePath &&
+      (recordCount > 0 || (isDeletionSync && prevRecordCount > 0))
+    ) {
+      targetPaths.push(paths.warehousePath);
+    }
+    // Only write /backups/{safeUid}/ when caller is the owner or Primary Admin (matches storage.rules)
+    if (
+      (user.uid === safeUid || isCurrentUserAdmin(user)) &&
+      (recordCount > 0 || isDeletionSync)
+    ) {
       targetPaths.push(paths.backupPath);
     }
 
@@ -2177,6 +2187,86 @@ export async function readWorkspaceFromFirebaseStorage(params: {
   }
 
   return null;
+}
+
+export async function readAdminWorkspacesIndexFromFirebaseStorage(): Promise<
+  AdminWarehouseAccountSummary[]
+> {
+  if (!auth.currentUser) return [];
+  const parsed = await readJsonFromFirebaseStoragePath<{
+    accounts?: AdminWarehouseAccountSummary[];
+  }>('documents/workspaces/all_warehouses_summary.json');
+  if (parsed && Array.isArray(parsed.accounts)) {
+    return parsed.accounts;
+  }
+  return [];
+}
+
+export async function readDesignatedWorkspacesFromFirebaseStorage(
+  targets: Array<{ uid: string; email?: string | null; assignedWarehouse?: string | null }>
+): Promise<Record<string, RtdbWorkspacePayload>> {
+  if (!auth.currentUser || !targets.length) return {};
+  const deduped = new Map<
+    string,
+    { uid: string; email?: string | null; assignedWarehouse?: string | null }
+  >();
+  for (const t of targets) {
+    const safeUid = sanitizeFirestoreId(t.uid);
+    if (safeUid && !deduped.has(safeUid)) {
+      deduped.set(safeUid, { ...t, uid: safeUid });
+    }
+  }
+  const out: Record<string, RtdbWorkspacePayload> = {};
+  await Promise.allSettled(
+    Array.from(deduped.values()).map(async (target) => {
+      const ws = await readWorkspaceFromFirebaseStorage(target);
+      if (ws) {
+        out[target.uid] = ws;
+      }
+    })
+  );
+  return out;
+}
+
+export async function readRealtimeWorkspacesOnce(
+  ownerUids: string[] | '__ALL__',
+  allowDesignatedAllWarehouses = false
+): Promise<Record<string, unknown>> {
+  const user = auth.currentUser;
+  if (!user) return {};
+
+  if (ownerUids === '__ALL__') {
+    if (!isCurrentUserAdmin(user) && !allowDesignatedAllWarehouses) return {};
+    try {
+      const snap = await rtdbGet(rtdbRef(rtdb, 'workspaces'));
+      const val = snap.val();
+      return val && typeof val === 'object' ? (val as Record<string, unknown>) : {};
+    } catch (err) {
+      console.warn('readRealtimeWorkspacesOnce(__ALL__) warning:', err instanceof Error ? err.message : err);
+      return {};
+    }
+  }
+
+  const uniqueUids = Array.from(
+    new Set(ownerUids.map((u) => sanitizeFirestoreId(u)).filter(Boolean))
+  );
+  const out: Record<string, unknown> = {};
+  await Promise.allSettled(
+    uniqueUids.map(async (safeUid) => {
+      try {
+        const snap = await rtdbGet(rtdbRef(rtdb, `workspaces/${safeUid}`));
+        if (snap.exists()) {
+          out[safeUid] = snap.val();
+        }
+      } catch (err) {
+        console.warn(
+          `readRealtimeWorkspacesOnce(${safeUid}) warning:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    })
+  );
+  return out;
 }
 
 export async function writeAdminWorkspacesIndexToFirebaseStorage(
@@ -2409,10 +2499,11 @@ export function subscribeToRealtimeWorkspace(
 
 export function subscribeToAllRealtimeWorkspacesForAdmin(
   onWorkspacesMap: (workspacesMap: Record<string, unknown>) => void,
-  onError?: (err: Error) => void
+  onError?: (err: Error) => void,
+  allowDesignatedAllWarehouses = false
 ): () => void {
   const user = auth.currentUser;
-  if (!user || !isCurrentUserAdmin(user)) {
+  if (!user || (!isCurrentUserAdmin(user) && !allowDesignatedAllWarehouses)) {
     return () => {};
   }
   const allRef = rtdbRef(rtdb, 'workspaces');
@@ -2542,7 +2633,8 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
       if (st.uid) byUid.set(st.uid, normalizeIndependentWarehouseStaffMember(st));
     }
 
-    // Preserve valid RTDB directory entries (especially user-renamed TÂM AN ... warehouses)
+    // Preserve valid RTDB directory entries — INCLUDING Admin multi-warehouse grants (assignedWarehouses, multiWarehouseGrantedByAdmin, assignedOwnerUids)
+    const uidsNeedingDirectorySync = new Set<string>();
     for (const [uid, dir] of Object.entries(existingRtdbDir)) {
       if (!dir || !uid) continue;
       const prev = byUid.get(uid);
@@ -2550,26 +2642,57 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
       const resolvedEmail = dir.email || priv?.email || prev?.email || '';
       const rawWh = (dir.assignedWarehouse || '').trim();
       const validExistingWh =
-        rawWh && rawWh !== 'Kho VTNN Tâm An' && rawWh !== 'VTNN Tâm An' ? rawWh : prev?.assignedWarehouse || '';
+        rawWh && rawWh !== 'Kho VTNN Tâm An' && rawWh !== 'VTNN Tâm An'
+          ? rawWh
+          : prev?.assignedWarehouse || '';
+      const dirMultiWhs = ensureArrayFromRtdb<string>(dir.assignedWarehouses);
+      const resolvedMultiWhs =
+        dirMultiWhs.length > 0
+          ? dirMultiWhs
+          : dir.multiWarehouseGrantedByAdmin === false
+          ? undefined
+          : prev?.assignedWarehouses;
+      const resolvedMultiGrant =
+        dir.multiWarehouseGrantedByAdmin !== undefined
+          ? Boolean(dir.multiWarehouseGrantedByAdmin)
+          : prev?.multiWarehouseGrantedByAdmin;
+      const resolvedOwnerUids =
+        dir.assignedOwnerUids && typeof dir.assignedOwnerUids === 'object'
+          ? dir.assignedOwnerUids
+          : dir.multiWarehouseGrantedByAdmin === false
+          ? undefined
+          : prev?.assignedOwnerUids;
 
-      byUid.set(
+      const normalizedExisting = normalizeIndependentWarehouseStaffMember({
         uid,
-        normalizeIndependentWarehouseStaffMember({
-          uid,
-          username: dir.username || prev?.username || resolvedEmail.split('@')[0] || `user_${uid.slice(0, 6)}`,
-          password: '',
-          displayName: dir.displayName || prev?.displayName || 'Thành viên VTNN Tâm An',
-          phone: dir.phone || priv?.phone || prev?.phone || '',
-          email: resolvedEmail,
-          role: dir.role || prev?.role || 'manager',
-          positionRole: dir.positionRole || prev?.positionRole || 'warehouse_manager',
-          permissions: dir.permissions || prev?.permissions,
-          assignedWarehouse: validExistingWh,
-          active: dir.active !== false,
-          createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
-          updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
-        })
-      );
+        username: dir.username || prev?.username || resolvedEmail.split('@')[0] || `user_${uid.slice(0, 6)}`,
+        password: '',
+        displayName: dir.displayName || prev?.displayName || 'Thành viên VTNN Tâm An',
+        phone: dir.phone || priv?.phone || prev?.phone || '',
+        email: resolvedEmail,
+        role: dir.role || prev?.role || 'staff',
+        positionRole: dir.positionRole || prev?.positionRole || 'warehouse_manager',
+        permissions: dir.permissions || prev?.permissions,
+        assignedWarehouse: validExistingWh,
+        assignedWarehouses: resolvedMultiWhs,
+        multiWarehouseGrantedByAdmin: resolvedMultiGrant,
+        assignedOwnerUids: resolvedOwnerUids,
+        active: dir.active !== false,
+        createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
+        updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
+      });
+      byUid.set(uid, normalizedExisting);
+
+      // Only mark for write-back if directory was missing email/phone or had an invalid legacy warehouse
+      if (
+        (!dir.email && resolvedEmail) ||
+        (!dir.phone && (priv?.phone || prev?.phone)) ||
+        !rawWh ||
+        rawWh === 'Kho VTNN Tâm An' ||
+        rawWh === 'VTNN Tâm An'
+      ) {
+        uidsNeedingDirectorySync.add(uid);
+      }
     }
 
     for (const sDoc of staffSnap.docs) {
@@ -2600,7 +2723,7 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
             displayName: String(d.displayName || resolvedUsername || 'Thành viên VTNN Tâm An'),
             phone: String(d.phone || priv?.phone || ''),
             email: resolvedEmail,
-            role: 'manager',
+            role: isPrimary ? 'manager' : 'staff',
             positionRole: isPrimary ? 'primary_manager' : 'warehouse_manager',
             permissions: isPrimary ? undefined : getIndependentWarehouseFullPermissions(),
             assignedWarehouse: autoWh,
@@ -2609,8 +2732,12 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
             updatedAt: normalizeTimestamp(d.updatedAt),
           })
         );
-      } else {
-        // Fill missing email/phone from staff_private if directory didn't have it
+        uidsNeedingDirectorySync.add(uid);
+      } else if (
+        (!existing.email && resolvedEmail) ||
+        (!existing.phone && priv?.phone) ||
+        (!existing.displayName && d.displayName)
+      ) {
         byUid.set(
           uid,
           normalizeIndependentWarehouseStaffMember({
@@ -2620,11 +2747,22 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
             displayName: existing.displayName || String(d.displayName || ''),
           })
         );
+        uidsNeedingDirectorySync.add(uid);
+      }
+    }
+
+    // Also seed brand-new local-only entries that don't yet exist in RTDB directory
+    for (const st of localStaffList) {
+      if (st.uid && !existingRtdbDir[st.uid]) {
+        uidsNeedingDirectorySync.add(st.uid);
       }
     }
 
     await Promise.all(
-      Array.from(byUid.values()).map((st) => upsertRealtimeUserDirectoryProfile(st))
+      Array.from(uidsNeedingDirectorySync)
+        .map((uid) => byUid.get(uid))
+        .filter((st): st is StaffMember => Boolean(st))
+        .map((st) => upsertRealtimeUserDirectoryProfile(st))
     );
   } catch (err) {
     console.warn('seedExistingStaffToRealtimeDirectoryIfAdmin warning:', err instanceof Error ? err.message : err);

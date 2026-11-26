@@ -35,6 +35,7 @@ export { InitialLoginScreenPortal, PasswordInputWithEye };
 import {
   ALL_STAFF_FUNCTIONAL_PERMISSIONS,
   canAccountCreateStaff,
+  dedupeWarehouseNames,
   extractCustomWarehouseSuffix,
   formatDefaultWarehouseNameFromGmail,
   formatVND,
@@ -45,6 +46,7 @@ import {
   MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
+  normalizeWarehouseKey,
   SearchableOptionItem,
 } from '../utils/businessLogic';
 import { AdminWarehouseAccountSummary } from '../utils/rtdbSyncLogic';
@@ -231,6 +233,27 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   const [multiWhGrantAll, setMultiWhGrantAll] = useState<boolean>(false);
   const [multiWhSearch, setMultiWhSearch] = useState<string>('');
 
+  const canonicalWarehouses = useMemo(
+    () => dedupeWarehouseNames(warehouses),
+    [warehouses]
+  );
+
+  const summaryByWarehouseKey = useMemo(() => {
+    const map = new Map<string, { owners: string[]; products: number; sales: number }>();
+    for (const s of adminWorkspaceSummaries) {
+      const key = normalizeWarehouseKey(s.assignedWarehouse);
+      if (!key || s.assignedWarehouse === 'Tất cả kho') continue;
+      const prev = map.get(key) || { owners: [], products: 0, sales: 0 };
+      if (s.username && !prev.owners.includes(`@${s.username}`)) {
+        prev.owners.push(`@${s.username}`);
+      }
+      prev.products += Number(s.productsCount) || 0;
+      prev.sales += Number(s.salesCount) || 0;
+      map.set(key, prev);
+    }
+    return map;
+  }, [adminWorkspaceSummaries]);
+
   const openMultiWarehouseModal = (st: StaffMember) => {
     setMultiWhModalStaff(st);
     setMultiWhSearch('');
@@ -239,13 +262,19 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       Boolean(st.permissions?.includes('manage_all_warehouses')) ||
       st.positionRole === 'deputy_general_manager';
     setMultiWhGrantAll(isAll);
-    const initialList =
+    const canonicalByKey = new Map(
+      canonicalWarehouses.map((w) => [normalizeWarehouseKey(w), w])
+    );
+    const rawList =
       st.assignedWarehouses && st.assignedWarehouses.length > 0
         ? st.assignedWarehouses
         : st.assignedWarehouse && st.assignedWarehouse !== 'Tất cả kho'
         ? [st.assignedWarehouse]
         : [];
-    setMultiWhSelectedList(Array.from(new Set(initialList)));
+    const mapped = dedupeWarehouseNames(
+      rawList.map((w) => canonicalByKey.get(normalizeWarehouseKey(w)) || w)
+    );
+    setMultiWhSelectedList(mapped);
   };
 
   // Strict check: ONLY trannhat1205@gmail.com or phone 0393120246 can create accounts & assign permissions
@@ -503,6 +532,16 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                 <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
                 <span>Quản lý chính · Toàn bộ các kho</span>
               </span>
+            ) : hasMultiWarehouseManagementGrant(currentStaff) ? (
+              <span className="px-2.5 py-0.5 text-[11px] font-bold bg-teal-700 text-white rounded-md flex items-center gap-1">
+                <Warehouse className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {currentStaff.assignedWarehouse === 'Tất cả kho' ||
+                  currentStaff.permissions?.includes('manage_all_warehouses')
+                    ? 'Phó quản lý · Tất cả kho (Sửa/Xóa)'
+                    : `Quản lý ${dedupeWarehouseNames(currentStaff.assignedWarehouses || []).length} kho được cấp (Sửa/Xóa)`}
+                </span>
+              </span>
             ) : (
               <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
                 <Warehouse className="w-3.5 h-3.5 shrink-0" />
@@ -515,6 +554,10 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
             <span className="text-xs font-mono font-bold text-emerald-900 bg-emerald-50 px-2.5 py-0.5 rounded border border-emerald-200">
               {canCreateAndAssignRoles
                 ? `Quản trị tổng: ${currentStaff.assignedWarehouse}`
+                : hasMultiWarehouseManagementGrant(currentStaff)
+                ? currentStaff.assignedWarehouses && currentStaff.assignedWarehouses.length >= 2
+                  ? `Phạm vi: ${dedupeWarehouseNames(currentStaff.assignedWarehouses).join(', ')}`
+                  : `Phạm vi: ${currentStaff.assignedWarehouse}`
                 : `Quản lý 1 kho: ${currentStaff.assignedWarehouse}`}
             </span>
             {canCreateAndAssignRoles && (
@@ -553,7 +596,9 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       </div>
 
       {/* Quick Self-Service Warehouse Rename Card for Independent Single-Warehouse Owners */}
-      {!canCreateAndAssignRoles && currentStaff.assignedWarehouse !== 'Tất cả kho' && (
+      {!canCreateAndAssignRoles &&
+        !hasMultiWarehouseManagementGrant(currentStaff) &&
+        currentStaff.assignedWarehouse !== 'Tất cả kho' && (
         <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-xs">
           <div className="px-5 py-3.5 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -1977,7 +2022,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   />
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-slate-900">
-                      Cấp quyền quản lý TẤT CẢ CÁC KHO ({warehouses.length} kho)
+                      Cấp quyền quản lý TẤT CẢ CÁC KHO ({canonicalWarehouses.length} kho)
                     </div>
                     <div className="text-[11px] text-slate-600">
                       Phó quản lý tổng — giám sát toàn bộ kho &amp; mở toàn quyền Sửa / Xóa chứng từ
@@ -1994,13 +2039,13 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-bold text-slate-900">
-                      Hoặc chọn các kho chỉ định ({multiWhSelectedList.length}/{warehouses.length}{' '}
+                      Hoặc chọn các kho chỉ định ({multiWhSelectedList.length}/{canonicalWarehouses.length}{' '}
                       kho đã chọn):
                     </span>
                     <div className="flex items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => setMultiWhSelectedList([...warehouses])}
+                        onClick={() => setMultiWhSelectedList([...canonicalWarehouses])}
                         className="px-2 py-0.5 text-[11px] font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded"
                       >
                         Chọn hết
@@ -2026,18 +2071,24 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     type="text"
                     value={multiWhSearch}
                     onChange={(e) => setMultiWhSearch(e.target.value)}
-                    placeholder="Gõ tên kho cần tìm nhanh (VD: PHUCANTAM, NHAN QUA, HONGHUY...)..."
+                    placeholder="Gõ tên kho cần tìm nhanh (VD: MỸ NGÃI, PHUCANTAM, NHAN QUA...)..."
                     className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
                   />
 
                   <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl bg-white">
-                    {warehouses
+                    {canonicalWarehouses
                       .filter((w) => {
                         const q = normalizeVietnameseSearch(multiWhSearch);
-                        return !q || normalizeVietnameseSearch(w).includes(q);
+                        const meta = summaryByWarehouseKey.get(normalizeWarehouseKey(w));
+                        const haystack = `${w} ${meta?.owners.join(' ') || ''}`;
+                        return !q || normalizeVietnameseSearch(haystack).includes(q);
                       })
                       .map((w) => {
-                        const checked = multiWhSelectedList.includes(w);
+                        const whKey = normalizeWarehouseKey(w);
+                        const checked = multiWhSelectedList.some(
+                          (item) => normalizeWarehouseKey(item) === whKey
+                        );
+                        const whMeta = summaryByWarehouseKey.get(whKey);
                         return (
                           <label
                             key={w}
@@ -2051,14 +2102,23 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                                 checked={checked}
                                 onChange={() =>
                                   setMultiWhSelectedList((prev) =>
-                                    prev.includes(w)
-                                      ? prev.filter((item) => item !== w)
+                                    prev.some((item) => normalizeWarehouseKey(item) === whKey)
+                                      ? prev.filter((item) => normalizeWarehouseKey(item) !== whKey)
                                       : [...prev, w]
                                   )
                                 }
                                 className="w-4 h-4 accent-teal-700 rounded shrink-0"
                               />
-                              <span className="truncate">{w}</span>
+                              <div className="min-w-0">
+                                <div className="truncate">{w}</div>
+                                {whMeta && (
+                                  <div className="text-[10px] font-normal text-slate-500 truncate">
+                                    {whMeta.owners.join(', ')}
+                                    {(whMeta.products > 0 || whMeta.sales > 0) &&
+                                      ` · ${whMeta.products} VT · ${whMeta.sales} đơn`}
+                                  </div>
+                                )}
+                              </div>
                             </div>
                             {checked && (
                               <span className="text-[10px] font-bold text-teal-700 shrink-0">

@@ -522,6 +522,45 @@ export function normalizeVietnameseSearch(input: string): string {
     .trim();
 }
 
+/**
+ * Accent- and case-insensitive canonical key for comparing warehouse names
+ * (e.g. "Tâm An Mỹ Ngãi" === "TÂM AN MỸ NGÃI" -> "tam an my ngai").
+ */
+export function normalizeWarehouseKey(name?: string | null): string {
+  return normalizeVietnameseSearch(name || '').replace(/\s+/g, ' ').trim();
+}
+
+export function areWarehouseNamesEquivalent(
+  a?: string | null,
+  b?: string | null
+): boolean {
+  const ka = normalizeWarehouseKey(a);
+  const kb = normalizeWarehouseKey(b);
+  return Boolean(ka && kb && ka === kb);
+}
+
+/**
+ * Deduplicates warehouse names case- and accent-insensitively while preserving order.
+ * If both Title Case ("Tâm An Mỹ Ngãi") and ALL CAPS ("TÂM AN MỸ NGÃI") appear, keeps the preferred canonical label.
+ */
+export function dedupeWarehouseNames(warehouses: string[]): string[] {
+  const byKey = new Map<string, string>();
+  for (const raw of warehouses || []) {
+    const trimmed = (raw || '').trim();
+    if (!trimmed || trimmed === 'Tất cả kho') continue;
+    const key = normalizeWarehouseKey(trimmed);
+    if (!key) continue;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, trimmed);
+    } else if (trimmed === trimmed.toUpperCase() && prev !== prev.toUpperCase()) {
+      // Prefer canonical ALL CAPS "TÂM AN ..." display name used by self-managed accounts
+      byKey.set(key, trimmed);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
 export interface SearchableOptionItem {
   value: string;
   label: string;
@@ -907,7 +946,8 @@ export function getStaffAllowedWarehouses(
   staff: StaffMember | null | undefined,
   allWarehouses: string[]
 ): string[] {
-  const defaultWh = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  const dedupedAll = dedupeWarehouseNames(allWarehouses);
+  const defaultWh = dedupedAll[0] || allWarehouses[0] || 'Tâm An Mỹ Ngãi';
   if (!staff) return [defaultWh];
   if (
     canAccountCreateStaff(staff) ||
@@ -916,17 +956,15 @@ export function getStaffAllowedWarehouses(
     staff.permissions?.includes('manage_all_warehouses') ||
     staff.assignedWarehouse === 'Tất cả kho'
   ) {
-    return allWarehouses.length > 0 ? allWarehouses : [defaultWh];
+    return dedupedAll.length > 0 ? dedupedAll : [defaultWh];
   }
-  const designated = Array.from(
-    new Set(
-      (staff.assignedWarehouses || [])
-        .map((w) => (w || '').trim())
-        .filter((w) => Boolean(w) && w !== 'Tất cả kho')
-    )
-  );
+  const designated = dedupeWarehouseNames(staff.assignedWarehouses || []);
   if (designated.length >= 2) {
-    return designated;
+    // Map designated names onto canonical casing from dedupedAll when equivalent
+    const allByKey = new Map(dedupedAll.map((w) => [normalizeWarehouseKey(w), w]));
+    return dedupeWarehouseNames(
+      designated.map((w) => allByKey.get(normalizeWarehouseKey(w)) || w)
+    );
   }
   const locked =
     staff.assignedWarehouse && staff.assignedWarehouse !== 'Tất cả kho'
@@ -3732,8 +3770,13 @@ export function resolveActiveWarehouses(
   if (!canStaffFilterMultiWarehouses(staff)) {
     return allowedWarehouses;
   }
-  const validSelected = selectedWarehouses.filter((w) => allowedWarehouses.includes(w));
-  if (validSelected.length === 0 || validSelected.length === allowedWarehouses.length) {
+  const allowedByKey = new Map(allowedWarehouses.map((w) => [normalizeWarehouseKey(w), w]));
+  const validSelected = dedupeWarehouseNames(
+    selectedWarehouses
+      .map((w) => allowedByKey.get(normalizeWarehouseKey(w)))
+      .filter((w): w is string => Boolean(w))
+  );
+  if (validSelected.length === 0 || validSelected.length >= allowedWarehouses.length) {
     return allowedWarehouses;
   }
   return validSelected;
@@ -3741,8 +3784,8 @@ export function resolveActiveWarehouses(
 
 /**
  * Filters records with an optional warehouseName field by the currently selected warehouses.
- * For independent single-warehouse owners, also includes records explicitly owned by their UID
- * so renaming a warehouse on one device never hides their own records on another device.
+ * Uses accent- and case-insensitive warehouse matching ("Tâm An Mỹ Ngãi" === "TÂM AN MỸ NGÃI")
+ * so records never disappear due to casing differences across accounts or devices.
  */
 export function filterRecordsBySelectedWarehouses<
   T extends { warehouseName?: string; ownerId?: string }
@@ -3752,16 +3795,18 @@ export function filterRecordsBySelectedWarehouses<
   allWarehouses: string[],
   selectedWarehouses: string[]
 ): T[] {
-  const defaultWarehouse = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
-  const allowedWarehouses = getStaffAllowedWarehouses(staff, allWarehouses);
-  const activeSet = new Set(resolveActiveWarehouses(staff, allWarehouses, selectedWarehouses));
+  const dedupedAll = dedupeWarehouseNames(allWarehouses);
+  const defaultWarehouse = dedupedAll[0] || allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  const allowedWarehouses = getStaffAllowedWarehouses(staff, dedupedAll);
+  const activeList = resolveActiveWarehouses(staff, dedupedAll, selectedWarehouses);
+  const activeKeySet = new Set(activeList.map((w) => normalizeWarehouseKey(w)).filter(Boolean));
   const hasAllSystemWarehouses =
     canAccountCreateStaff(staff) ||
     staff.positionRole === 'primary_manager' ||
     staff.positionRole === 'deputy_general_manager' ||
     Boolean(staff.permissions?.includes('manage_all_warehouses')) ||
     staff.assignedWarehouse === 'Tất cả kho';
-  if (hasAllSystemWarehouses && activeSet.size >= allWarehouses.length) {
+  if (hasAllSystemWarehouses && activeKeySet.size >= dedupedAll.length) {
     return records;
   }
   const isSingleWarehouseOwner =
@@ -3773,16 +3818,21 @@ export function filterRecordsBySelectedWarehouses<
     staff.assignedOwnerUids && typeof staff.assignedOwnerUids === 'object'
       ? staff.assignedOwnerUids
       : null;
-  const showingAllAllowed = activeSet.size >= allowedWarehouses.length;
-  return records.filter(
-    (rec) =>
-      activeSet.has(rec.warehouseName || defaultWarehouse) ||
-      (isSingleWarehouseOwner && Boolean(rec.ownerId) && rec.ownerId === staff.uid) ||
-      (canStaffFilterMultiWarehouses(staff) &&
-        showingAllAllowed &&
-        Boolean(rec.ownerId) &&
-        Boolean(designatedOwnerUids?.[rec.ownerId!]))
-  );
+  const showingAllAllowed = activeKeySet.size >= allowedWarehouses.length;
+  return records.filter((rec) => {
+    const recKey = normalizeWarehouseKey(rec.warehouseName || defaultWarehouse);
+    if (recKey && activeKeySet.has(recKey)) return true;
+    if (isSingleWarehouseOwner && Boolean(rec.ownerId) && rec.ownerId === staff.uid) return true;
+    if (
+      canStaffFilterMultiWarehouses(staff) &&
+      showingAllAllowed &&
+      Boolean(rec.ownerId) &&
+      Boolean(designatedOwnerUids?.[rec.ownerId!])
+    ) {
+      return true;
+    }
+    return false;
+  });
 }
 
 /**

@@ -15,6 +15,8 @@ import {
   mergeWorkspacePayloads,
   normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
+  partitionAdminStateByWorkspace,
+  resolveDesignatedOwnerUidsForWarehouses,
   RTDB_RECORD_COLLECTIONS,
   RtdbWorkspacePayload,
   toRtdbRecordKey,
@@ -22,12 +24,14 @@ import {
 } from './rtdbSyncLogic';
 import {
   canStaffFilterMultiWarehouses,
+  dedupeWarehouseNames,
   evaluateStaffAccessScope,
   filterRecordsBySelectedWarehouses,
   formatSelectedWarehousesBadge,
   getIndependentWarehouseFullPermissions,
   getStaffAllowedWarehouses,
   hasMultiWarehouseManagementGrant,
+  normalizeWarehouseKey,
 } from './businessLogic';
 import type { AuditLogEntry, BackupEntry, SaleTransaction } from '../types';
 
@@ -468,4 +472,124 @@ test('Multi-warehouse RBAC: ONLY Primary Admin & designated multi-warehouse mana
   const filtered = filterRecordsBySelectedWarehouses(sampleRecs, multiWhUser, allWhs, []);
   assert.equal(filtered.length, 4);
   assert.equal(filtered.some((r) => r.warehouseName === 'TÂM AN MỸ NGÃI'), false);
+});
+
+test('Case-insensitive multi-warehouse matching & owner UID resolution: "Tâm An Mỹ Ngãi" matches "TÂM AN MỸ NGÃI" (vtnntaman99)', () => {
+  // 1. Normalization & deduplication unify Title Case and ALL CAPS variants
+  assert.equal(normalizeWarehouseKey('Tâm An Mỹ Ngãi'), normalizeWarehouseKey('TÂM AN MỸ NGÃI'));
+  const deduped = dedupeWarehouseNames([
+    'Tâm An Mỹ Ngãi',
+    'TÂM AN MỸ NGÃI',
+    'Tâm An Cao Lãnh',
+    'Tâm An Mỹ Trà',
+  ]);
+  assert.equal(deduped.length, 3);
+  assert.equal(deduped[0], 'TÂM AN MỸ NGÃI');
+
+  // 2. Granting "Tâm An Mỹ Ngãi" (Title Case) resolves @vtnntaman99's UID whose warehouse is "TÂM AN MỸ NGÃI" (ALL CAPS)
+  const v99Ws = buildRecoveredVtnnTamAn99Workspace('TÂM AN MỸ NGÃI');
+  const ownerMap = resolveDesignatedOwnerUidsForWarehouses({
+    targetUid: 'LAiiKyabFmg4XxjkaTEgIcW4DnK2',
+    selectedWarehouses: ['TÂM AN NHATTAMNHANQUA99', 'Tâm An Mỹ Ngãi', 'Tâm An Cao Lãnh'],
+    staffList: [
+      {
+        uid: VTNNTAMAN99_UID,
+        username: 'vtnntaman99',
+        password: '',
+        displayName: 'Nguyễn Trịnh Huỳnh Như',
+        phone: '0708959764',
+        email: 'vtnntaman99@gmail.com',
+        role: 'staff',
+        positionRole: 'warehouse_manager',
+        assignedWarehouse: 'TÂM AN MỸ NGÃI',
+        active: true,
+        createdAt: '2026-11-26T00:00:00Z',
+        updatedAt: '2026-11-26T00:00:00Z',
+      },
+    ],
+    workspacesMap: {
+      [VTNNTAMAN99_UID]: v99Ws,
+    },
+  });
+  assert.equal(ownerMap['LAiiKyabFmg4XxjkaTEgIcW4DnK2'], true);
+  assert.equal(ownerMap[VTNNTAMAN99_UID], true);
+
+  // 3. Filtering records when designated user selects Title Case "Tâm An Mỹ Ngãi" STILL returns all 8 products & 13 sales tagged "TÂM AN MỸ NGÃI"
+  const designatedManager = normalizeIndependentWarehouseStaffMember({
+    uid: 'LAiiKyabFmg4XxjkaTEgIcW4DnK2',
+    username: 'nhattamnhanqua99',
+    password: '',
+    displayName: 'Tâm Nhất',
+    phone: '',
+    email: 'nhattamnhanqua99@gmail.com',
+    role: 'manager',
+    positionRole: 'warehouse_manager',
+    permissions: [...getIndependentWarehouseFullPermissions(), 'edit_delete_vouchers'],
+    assignedWarehouse: 'TÂM AN NHATTAMNHANQUA99',
+    assignedWarehouses: [
+      'TÂM AN NHATTAMNHANQUA99',
+      'Tâm An Mỹ Ngãi',
+      'Tâm An Cao Lãnh',
+      'Tâm An Mỹ Trà',
+    ],
+    assignedOwnerUids: ownerMap,
+    multiWarehouseGrantedByAdmin: true,
+    active: true,
+    createdAt: '2026-11-26T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  });
+  const allWhs = [
+    'TÂM AN NHATTAMNHANQUA99',
+    'Tâm An Mỹ Ngãi',
+    'TÂM AN MỸ NGÃI',
+    'Tâm An Cao Lãnh',
+    'Tâm An Mỹ Trà',
+  ];
+  const visibleWhenFilteredSingle = filterRecordsBySelectedWarehouses(
+    v99Ws.products,
+    designatedManager,
+    allWhs,
+    ['Tâm An Mỹ Ngãi']
+  );
+  assert.equal(visibleWhenFilteredSingle.length, 8);
+  const visibleSalesWhenAll = filterRecordsBySelectedWarehouses(
+    v99Ws.sales,
+    designatedManager,
+    allWhs,
+    []
+  );
+  assert.equal(visibleSalesWhenAll.length, 13);
+
+  // 4. partitionAdminStateByWorkspace preserves existingMetaByUid for another owner's workspace even if staffList omits them
+  const partitioned = partitionAdminStateByWorkspace({
+    products: v99Ws.products,
+    customers: v99Ws.customers,
+    suppliers: v99Ws.suppliers,
+    sales: v99Ws.sales,
+    imports: v99Ws.imports,
+    receiptVouchers: [],
+    paymentVouchers: [],
+    savedVouchers: [],
+    auditLogs: [],
+    backups: [],
+    settings: v99Ws.settings,
+    staffList: [designatedManager],
+    knownOwnerUids: ['LAiiKyabFmg4XxjkaTEgIcW4DnK2', VTNNTAMAN99_UID],
+    adminUid: 'LAiiKyabFmg4XxjkaTEgIcW4DnK2',
+    nowIso: '2026-11-26T17:00:00.000Z',
+    existingMetaByUid: {
+      [VTNNTAMAN99_UID]: {
+        ownerUid: VTNNTAMAN99_UID,
+        ownerEmail: 'vtnntaman99@gmail.com',
+        ownerDisplayName: 'Nguyễn Trịnh Huỳnh Như',
+        assignedWarehouse: 'TÂM AN MỸ NGÃI',
+        updatedAt: '2026-11-26T16:00:00.000Z',
+        updatedByUid: VTNNTAMAN99_UID,
+        schemaVersion: 1,
+      },
+    },
+  });
+  assert.equal(partitioned[VTNNTAMAN99_UID].meta.assignedWarehouse, 'TÂM AN MỸ NGÃI');
+  assert.equal(partitioned[VTNNTAMAN99_UID].meta.ownerEmail, 'vtnntaman99@gmail.com');
+  assert.equal(partitioned[VTNNTAMAN99_UID].products.length, 8);
 });

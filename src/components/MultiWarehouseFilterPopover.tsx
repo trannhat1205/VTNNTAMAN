@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Warehouse } from 'lucide-react';
+import { dedupeWarehouseNames, normalizeWarehouseKey } from '../utils/businessLogic';
 
 interface MultiWarehouseFilterPopoverProps {
   allWarehouses: string[];
@@ -37,11 +38,18 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
     };
   }, [isOpen]);
 
-  // Normalize selected list
-  const validSelected = selectedWarehouses.filter((w) => allWarehouses.includes(w));
+  // Deduplicate and normalize selected list case- & accent-insensitively
+  const canonicalWarehouses = dedupeWarehouseNames(allWarehouses);
+  const byKey = new Map(canonicalWarehouses.map((w) => [normalizeWarehouseKey(w), w]));
+  const validSelected = dedupeWarehouseNames(
+    selectedWarehouses
+      .map((w) => byKey.get(normalizeWarehouseKey(w)))
+      .filter((w): w is string => Boolean(w))
+  );
   const isAllSelected =
-    validSelected.length === 0 || validSelected.length >= allWarehouses.length;
-  const activeList = isAllSelected ? allWarehouses : validSelected;
+    validSelected.length === 0 || validSelected.length >= canonicalWarehouses.length;
+  const activeList = isAllSelected ? canonicalWarehouses : validSelected;
+  const activeKeySet = new Set(activeList.map((w) => normalizeWarehouseKey(w)));
 
   if (!canFilterMultiWarehouses) {
     return (
@@ -60,13 +68,13 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
   }
 
   const badgeText = isAllSelected
-    ? `Tất cả kho (${allWarehouses.length})`
+    ? `Tất cả kho (${canonicalWarehouses.length})`
     : activeList.length === 1
     ? activeList[0]
-    : `Đã chọn ${activeList.length}/${allWarehouses.length} kho`;
+    : `Đã chọn ${activeList.length}/${canonicalWarehouses.length} kho`;
 
   const handleSelectAll = () => {
-    onChangeSelectedWarehouses(allWarehouses);
+    onChangeSelectedWarehouses(canonicalWarehouses);
   };
 
   const handleSelectSingleOnly = (warehouse: string) => {
@@ -75,16 +83,17 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
   };
 
   const handleToggleCheckbox = (warehouse: string) => {
+    const whKey = normalizeWarehouseKey(warehouse);
     if (isAllSelected) {
       // Unchecking one from all -> keep the rest; if only 1 total warehouse, keep it
-      const remaining = allWarehouses.filter((w) => w !== warehouse);
+      const remaining = canonicalWarehouses.filter((w) => normalizeWarehouseKey(w) !== whKey);
       onChangeSelectedWarehouses(remaining.length > 0 ? remaining : [warehouse]);
       return;
     }
-    if (activeList.includes(warehouse)) {
-      const remaining = activeList.filter((w) => w !== warehouse);
+    if (activeKeySet.has(whKey)) {
+      const remaining = activeList.filter((w) => normalizeWarehouseKey(w) !== whKey);
       // If user unchecks the last remaining warehouse, revert to all warehouses so view is never dead
-      onChangeSelectedWarehouses(remaining.length > 0 ? remaining : allWarehouses);
+      onChangeSelectedWarehouses(remaining.length > 0 ? remaining : canonicalWarehouses);
     } else {
       const next = [...activeList, warehouse];
       onChangeSelectedWarehouses(next);
@@ -135,7 +144,7 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
                   : 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
               }`}
             >
-              Chọn tất cả ({allWarehouses.length})
+              Chọn tất cả ({canonicalWarehouses.length})
             </button>
           </div>
 
@@ -159,7 +168,7 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
               >
                 <Check className="w-3 h-3" />
               </span>
-              <span className="truncate">Tất cả kho ({allWarehouses.length} kho)</span>
+              <span className="truncate">Tất cả kho ({canonicalWarehouses.length} kho)</span>
             </div>
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 shrink-0">
               Tổng hợp
@@ -168,9 +177,13 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
 
           {/* Individual Warehouses: Checkbox to combine multiple OR "Chỉ xem" to view single warehouse */}
           <div className="space-y-1.5 max-h-56 overflow-y-auto pr-0.5">
-            {allWarehouses.map((wh) => {
-              const isChecked = activeList.includes(wh);
-              const isSingleSelected = !isAllSelected && activeList.length === 1 && activeList[0] === wh;
+            {canonicalWarehouses.map((wh) => {
+              const whKey = normalizeWarehouseKey(wh);
+              const isChecked = activeKeySet.has(whKey);
+              const isSingleSelected =
+                !isAllSelected &&
+                activeList.length === 1 &&
+                normalizeWarehouseKey(activeList[0]) === whKey;
               return (
                 <div
                   key={wh}
