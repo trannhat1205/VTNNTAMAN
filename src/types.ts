@@ -114,6 +114,14 @@ export interface VietQrBankConfig {
   updatedAt?: string;
 }
 
+export interface ProductNoteTemplate {
+  id: string;
+  title: string;
+  content: string;
+  category?: string;
+  updatedAt: string;
+}
+
 export interface ImportTransaction {
   id: string;
   receiptCode: string;

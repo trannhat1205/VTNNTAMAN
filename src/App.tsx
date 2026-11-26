@@ -43,6 +43,7 @@ import {
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
+  ProductNoteTemplate,
   SalePromotionType,
   SaleTransaction,
   SavedVoucherRecord,
@@ -56,11 +57,15 @@ import {
 } from './types';
 import {
   allocatePaymentAcrossCartItems,
+  bindProductNoteToProduct,
   clearOfflineQueueStorage,
+  deleteProductNoteTemplate,
   enqueueOfflineQueueItem,
   loadOfflineQueue,
   OfflineQueueItem,
   PosCartDraftItem,
+  resolveProductNoteTemplates,
+  upsertProductNoteTemplate,
   validateCartInventory,
 } from './utils/smartPosFeatures';
 import {
@@ -350,6 +355,9 @@ export default function App() {
   const [bankQrConfig, setBankQrConfig] = useState<VietQrBankConfig | undefined>(
     initialWorkspace.bankQrConfig
   );
+  const [productNoteTemplates, setProductNoteTemplates] = useState<ProductNoteTemplate[]>(() =>
+    resolveProductNoteTemplates(initialWorkspace.productNoteTemplates)
+  );
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
@@ -436,6 +444,7 @@ export default function App() {
       staffList,
       notificationPrefs,
       bankQrConfig,
+      productNoteTemplates,
       autoDailyBackupEnabled,
     });
   }, [
@@ -458,6 +467,7 @@ export default function App() {
     staffList,
     notificationPrefs,
     bankQrConfig,
+    productNoteTemplates,
     autoDailyBackupEnabled,
   ]);
 
@@ -487,6 +497,9 @@ export default function App() {
         setNotificationPrefs(parsed.notificationPrefs);
         if (parsed.bankQrConfig) {
           setBankQrConfig(parsed.bankQrConfig);
+        }
+        if (parsed.productNoteTemplates && parsed.productNoteTemplates.length > 0) {
+          setProductNoteTemplates(parsed.productNoteTemplates);
         }
       } catch {
         // ignore invalid storage payload
@@ -1002,6 +1015,7 @@ export default function App() {
     staffList,
     notificationPrefs,
     bankQrConfig,
+    productNoteTemplates,
     autoDailyBackupEnabled,
   });
   latestWorkspaceRef.current = {
@@ -1024,6 +1038,7 @@ export default function App() {
     staffList,
     notificationPrefs,
     bankQrConfig,
+    productNoteTemplates,
     autoDailyBackupEnabled,
   };
 
@@ -1587,6 +1602,16 @@ export default function App() {
             : unifiedWs.settings.bankQrConfig
         );
       }
+      if (
+        unifiedWs.settings.productNoteTemplates &&
+        unifiedWs.settings.productNoteTemplates.length > 0
+      ) {
+        setProductNoteTemplates((prev) =>
+          JSON.stringify(prev) === JSON.stringify(unifiedWs.settings.productNoteTemplates)
+            ? prev
+            : unifiedWs.settings.productNoteTemplates!
+        );
+      }
 
       if (isLegacy || rtdbNeedsHeal) {
         setRtdbWriteTrigger((n) => n + 1);
@@ -1673,6 +1698,7 @@ export default function App() {
         paymentGroups,
         notificationPrefs,
         ...(bankQrConfig ? { bankQrConfig } : {}),
+        productNoteTemplates,
         autoDailyBackupEnabled,
       };
 
@@ -1783,6 +1809,7 @@ export default function App() {
     staffList,
     notificationPrefs,
     bankQrConfig,
+    productNoteTemplates,
     autoDailyBackupEnabled,
     rtdbWriteTrigger,
   ]);
@@ -2115,6 +2142,51 @@ export default function App() {
       'settings',
       `Cấu hình VietQR ${nextConfig.bankCode} - ${nextConfig.accountNumber}`,
       lockedWarehouse || currentStaff.assignedWarehouse
+    );
+  };
+
+  const handleSaveProductNoteTemplate = (
+    draft: { title: string; content: string; category?: string },
+    editingId?: string
+  ): ProductNoteTemplate => {
+    const res = upsertProductNoteTemplate(productNoteTemplates, draft, editingId);
+    setProductNoteTemplates(res.templates);
+    trackOfflineOperation(
+      'settings',
+      `${editingId ? 'Cập nhật' : 'Tạo'} mẫu ghi chú sản phẩm "${res.savedTemplate.title}"`,
+      lockedWarehouse || currentStaff.assignedWarehouse
+    );
+    showToast(
+      editingId
+        ? `Đã cập nhật mẫu ghi chú sản phẩm "${res.savedTemplate.title}"!`
+        : `Đã lưu mẫu ghi chú sản phẩm "${res.savedTemplate.title}" để tìm chọn nhanh!`
+    );
+    return res.savedTemplate;
+  };
+
+  const handleDeleteProductNoteTemplate = (templateId: string) => {
+    setProductNoteTemplates((prev) => deleteProductNoteTemplate(prev, templateId));
+    showToast('Đã xóa mẫu ghi chú sản phẩm.');
+  };
+
+  const handleBindProductNoteToProduct = (productId: string, noteContent: string) => {
+    const nowIso = new Date().toISOString();
+    const { updatedProducts, updatedProduct } = bindProductNoteToProduct(
+      productsRef.current,
+      productId,
+      noteContent,
+      nowIso
+    );
+    if (!updatedProduct) return;
+    productsRef.current = updatedProducts;
+    setProducts(updatedProducts);
+    if (isGoogleAuthenticated) {
+      void syncProductToFirestore(updatedProduct, false);
+    }
+    trackOfflineOperation(
+      'inventory',
+      `Ghi nhớ ghi chú cho sản phẩm ${updatedProduct.name}`,
+      updatedProduct.warehouseName
     );
   };
 
@@ -7336,6 +7408,10 @@ export default function App() {
               onCreateMultiItemSale={handleCreateMultiItemSale}
               bankQrConfig={bankQrConfig}
               onSaveBankQrConfig={handleSaveBankQrConfig}
+              productNoteTemplates={productNoteTemplates}
+              onSaveProductNoteTemplate={handleSaveProductNoteTemplate}
+              onDeleteProductNoteTemplate={handleDeleteProductNoteTemplate}
+              onBindProductNoteToProduct={handleBindProductNoteToProduct}
               onNotifyToast={showToast}
               onCreateCustomerInline={(data) => handleSaveCustomer(data)}
               onCreateProductInline={(data) => handleSaveProduct(data)}

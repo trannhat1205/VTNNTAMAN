@@ -32,6 +32,7 @@ import {
   PaymentStatus,
   ProductCategory,
   ProductItem,
+  ProductNoteTemplate,
   SalePromotionType,
   SaleTransaction,
   SupplierProfile,
@@ -60,7 +61,7 @@ import {
 import {
   allocatePaymentAcrossCartItems,
   buildZaloInvoiceAndDosageMessage,
-  DOSAGE_GUIDE_PRESETS,
+  DEFAULT_PRODUCT_NOTE_TEMPLATES,
   findInvoiceGroupSales,
   PosCartDraftItem,
   upsertQuickCartProductQuantity,
@@ -119,6 +120,13 @@ interface SalesLogViewProps {
   }) => SaleTransaction[];
   bankQrConfig?: VietQrBankConfig | null;
   onSaveBankQrConfig?: (config: VietQrBankConfig) => void;
+  productNoteTemplates?: ProductNoteTemplate[];
+  onSaveProductNoteTemplate?: (
+    draft: { title: string; content: string; category?: string },
+    editingId?: string
+  ) => ProductNoteTemplate;
+  onDeleteProductNoteTemplate?: (templateId: string) => void;
+  onBindProductNoteToProduct?: (productId: string, noteContent: string) => void;
   onNotifyToast?: (msg: string) => void;
   onCreateCustomerInline: (
     data: Omit<CustomerProfile, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
@@ -171,6 +179,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   onCreateMultiItemSale,
   bankQrConfig,
   onSaveBankQrConfig,
+  productNoteTemplates = DEFAULT_PRODUCT_NOTE_TEMPLATES,
+  onSaveProductNoteTemplate,
+  onDeleteProductNoteTemplate,
+  onBindProductNoteToProduct,
   onNotifyToast,
   onCreateCustomerInline,
   onCreateProductInline,
@@ -196,6 +208,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [dueDate, setDueDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [dosageGuide, setDosageGuide] = useState<string>('');
+  const [selectedNoteTemplateId, setSelectedNoteTemplateId] = useState<string>('');
+  const [noteTargetProductId, setNoteTargetProductId] = useState<string>('');
+  const [showNoteTemplateEditor, setShowNoteTemplateEditor] = useState<boolean>(false);
+  const [editingNoteTemplateId, setEditingNoteTemplateId] = useState<string | null>(null);
+  const [tplTitleInput, setTplTitleInput] = useState<string>('');
+  const [tplCategoryInput, setTplCategoryInput] = useState<string>('Liều lượng & Pha phun');
+  const [tplContentInput, setTplContentInput] = useState<string>('');
+  const [autoRememberedBadge, setAutoRememberedBadge] = useState<string | null>(null);
   const [posCartItems, setPosCartItems] = useState<PosCartDraftItem[]>([]);
   const [lastCreatedOrder, setLastCreatedOrder] = useState<{
     invoiceCode: string;
@@ -328,6 +348,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setDueDate('');
     setNote('');
     setDosageGuide('');
+    setSelectedNoteTemplateId('');
+    setNoteTargetProductId('');
+    setShowNoteTemplateEditor(false);
+    setEditingNoteTemplateId(null);
+    setAutoRememberedBadge(null);
     setPosCartItems([]);
     setShowNewCustomerBox(false);
     setNewCustName('');
@@ -418,7 +443,18 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     const prod = products.find((p) => p.id === prodId);
     if (prod) {
       setUnitPrice(String(prod.sellPrice));
-      setDosageGuide(prod.dosageGuide || '');
+      const remembered = prod.dosageGuide || '';
+      setDosageGuide(remembered);
+      setNoteTargetProductId(prod.id);
+      const matchedTpl = remembered
+        ? productNoteTemplates.find((t) => t.content.trim() === remembered.trim())
+        : undefined;
+      setSelectedNoteTemplateId(matchedTpl?.id || '');
+      setAutoRememberedBadge(
+        remembered
+          ? `Đã tự động gắn ghi chú đã nhớ của "${prod.name}"`
+          : null
+      );
       if (!quantity) setQuantity('1');
       if (!selectedWarehouse && !lockedWarehouse && prod.warehouseName) {
         setSelectedWarehouse(prod.warehouseName);
@@ -426,6 +462,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     } else {
       setUnitPrice('');
       setDosageGuide('');
+      setSelectedNoteTemplateId('');
+      setAutoRememberedBadge(null);
     }
   };
 
@@ -720,6 +758,9 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     }
 
     setPosCartItems(nextCart);
+    if (dosageGuide.trim() && dosageGuide.trim() !== (resolvedProduct.dosageGuide || '').trim()) {
+      onBindProductNoteToProduct?.(resolvedProduct.id, dosageGuide.trim());
+    }
     clearCurrentLineInputsOnly();
     setFormMessage({
       type: 'success',
@@ -1179,6 +1220,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         giftUnitCost: resolvedGiftProduct?.importPrice || 0,
         dosageGuide: dosageGuide.trim() || undefined,
       });
+
+      if (dosageGuide.trim() && dosageGuide.trim() !== (resolvedProduct.dosageGuide || '').trim()) {
+        onBindProductNoteToProduct?.(resolvedProduct.id, dosageGuide.trim());
+      }
 
       setLastCreatedOrder({
         invoiceCode: createdSale.invoiceCode,
@@ -2180,60 +2225,359 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               )}
             </div>
 
-            {/* Dosage Guide & Multi-Item POS Cart Section */}
-            <div className="space-y-2.5 p-3.5 bg-teal-50/45 rounded-xl border border-teal-200/80">
-              <div className="flex items-center justify-between gap-2">
-                <label
-                  htmlFor="sale-dosage-guide-input"
-                  className="text-xs font-bold text-teal-950 flex items-center gap-1.5"
-                >
-                  <Leaf className="w-3.5 h-3.5 text-teal-700 shrink-0" />
-                  <span>Hướng dẫn liều lượng &amp; cách pha phun (Tự in lên Hóa đơn / Gửi Zalo)</span>
-                </label>
-                {dosageGuide && (
-                  <button
-                    type="button"
-                    onClick={() => setDosageGuide('')}
-                    className="text-[11px] text-slate-500 hover:text-red-600 underline shrink-0"
-                  >
-                    Xóa
-                  </button>
-                )}
-              </div>
-              <textarea
-                id="sale-dosage-guide-input"
-                rows={2}
-                value={dosageGuide}
-                onChange={(e) => setDosageGuide(e.target.value)}
-                placeholder="VD: Pha 25-30ml / bình 25 lít nước, phun đều tán lá lúc sáng sớm..."
-                className="w-full px-3 py-1.5 text-xs bg-white border border-teal-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
-              />
-              <div className="flex flex-wrap gap-1">
-                {DOSAGE_GUIDE_PRESETS.slice(0, 3).map((preset, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setDosageGuide(preset)}
-                    className="px-2 py-0.5 text-[10px] font-medium text-teal-900 bg-white hover:bg-teal-100 border border-teal-200 rounded-full transition-colors text-left"
-                  >
-                    + {preset.length > 38 ? `${preset.slice(0, 38)}…` : preset}
-                  </button>
-                ))}
-              </div>
+            {/* Thêm ghi chú sản phẩm — Searchable Saved Templates & Auto-Remember Binding */}
+            {(() => {
+              const activeNoteProduct: ProductItem | null =
+                currentProduct ||
+                products.find((p) => p.id === noteTargetProductId) ||
+                (posCartItems.length > 0
+                  ? products.find((p) => p.id === posCartItems[posCartItems.length - 1].productId) ||
+                    null
+                  : null);
 
-              {onCreateMultiItemSale && (
-                <button
-                  type="button"
-                  onClick={handleAddCurrentItemToCart}
-                  className="w-full py-2 px-3 text-xs font-bold text-emerald-800 bg-white hover:bg-emerald-50 border-2 border-dashed border-emerald-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Plus className="w-4 h-4 shrink-0" />
-                  <span>
-                    Thêm vật tư kèm ưu đãi / liều lượng vào Giỏ ({posCartItems.length} mặt hàng)
-                  </span>
-                </button>
-              )}
-            </div>
+              const applyNoteAndRemember = (nextContent: string, matchedTemplateId = '') => {
+                setDosageGuide(nextContent);
+                setSelectedNoteTemplateId(matchedTemplateId);
+                if (activeNoteProduct) {
+                  onBindProductNoteToProduct?.(activeNoteProduct.id, nextContent);
+                  setPosCartItems((prev) =>
+                    prev.map((item) =>
+                      item.productId === activeNoteProduct.id
+                        ? { ...item, dosageGuide: nextContent.trim() || undefined }
+                        : item
+                    )
+                  );
+                  if (nextContent.trim()) {
+                    setAutoRememberedBadge(
+                      `Đã tự động ghi nhớ cho "${activeNoteProduct.name}" — lần sau chọn sẽ tự gắn sẵn!`
+                    );
+                  } else {
+                    setAutoRememberedBadge(null);
+                  }
+                }
+              };
+
+              const handleSaveTemplateInline = () => {
+                if (!tplContentInput.trim()) {
+                  setFormMessage({
+                    type: 'error',
+                    text: 'Vui lòng nhập nội dung ghi chú sản phẩm trước khi lưu mẫu.',
+                  });
+                  return;
+                }
+                const saved = onSaveProductNoteTemplate?.(
+                  {
+                    title: tplTitleInput.trim(),
+                    category: tplCategoryInput.trim() || 'Ghi chú sản phẩm',
+                    content: tplContentInput.trim(),
+                  },
+                  editingNoteTemplateId || undefined
+                );
+                if (saved) {
+                  applyNoteAndRemember(saved.content, saved.id);
+                } else {
+                  applyNoteAndRemember(tplContentInput.trim());
+                }
+                setShowNoteTemplateEditor(false);
+                setEditingNoteTemplateId(null);
+                setTplTitleInput('');
+                setTplContentInput('');
+              };
+
+              const selectedTplObj = productNoteTemplates.find(
+                (t) => t.id === selectedNoteTemplateId
+              );
+
+              return (
+                <div className="space-y-2.5 p-3.5 bg-teal-50/45 rounded-xl border border-teal-200/80">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label
+                      htmlFor="sale-product-note-select"
+                      className="text-xs font-bold text-teal-950 flex items-center gap-1.5"
+                    >
+                      <Leaf className="w-3.5 h-3.5 text-teal-700 shrink-0" />
+                      <span>Thêm ghi chú sản phẩm</span>
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      {onSaveProductNoteTemplate && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (showNoteTemplateEditor) {
+                              setShowNoteTemplateEditor(false);
+                              setEditingNoteTemplateId(null);
+                            } else {
+                              setEditingNoteTemplateId(null);
+                              setTplTitleInput('');
+                              setTplCategoryInput('Liều lượng & Pha phun');
+                              setTplContentInput(dosageGuide.trim());
+                              setShowNoteTemplateEditor(true);
+                            }
+                          }}
+                          className="px-2 py-1 text-[11px] font-semibold text-teal-800 bg-white hover:bg-teal-100 border border-teal-300 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <Plus className="w-3 h-3" />
+                          <span>{showNoteTemplateEditor ? 'Đóng tạo mẫu' : 'Tạo mẫu ghi chú'}</span>
+                        </button>
+                      )}
+                      {dosageGuide && (
+                        <button
+                          type="button"
+                          onClick={() => applyNoteAndRemember('', '')}
+                          className="text-[11px] text-slate-500 hover:text-red-600 underline shrink-0"
+                        >
+                          Xóa
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Quick target switcher when user picked multiple items in POS cart */}
+                  {posCartItems.length > 0 && !currentProduct && (
+                    <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                      <span className="text-slate-600 font-medium">Gắn ghi chú cho SP:</span>
+                      {posCartItems.map((item) => {
+                        const isTarget = activeNoteProduct?.id === item.productId;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setNoteTargetProductId(item.productId);
+                              const targetProd = products.find((p) => p.id === item.productId);
+                              const existingNote = item.dosageGuide || targetProd?.dosageGuide || '';
+                              setDosageGuide(existingNote);
+                              const matched = existingNote
+                                ? productNoteTemplates.find(
+                                    (t) => t.content.trim() === existingNote.trim()
+                                  )
+                                : undefined;
+                              setSelectedNoteTemplateId(matched?.id || '');
+                            }}
+                            className={`px-2 py-0.5 rounded-full border font-semibold transition-colors truncate max-w-[180px] ${
+                              isTarget
+                                ? 'bg-teal-700 text-white border-teal-700'
+                                : 'bg-white text-teal-900 border-teal-200 hover:bg-teal-100'
+                            }`}
+                          >
+                            {item.productName}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* Searchable Product Note Templates Selector */}
+                  <div className="space-y-1.5">
+                    <SearchableSelect
+                      id="sale-product-note-select"
+                      value={selectedNoteTemplateId}
+                      onChange={(tplId) => {
+                        if (!tplId) {
+                          setSelectedNoteTemplateId('');
+                          return;
+                        }
+                        const tpl = productNoteTemplates.find((t) => t.id === tplId);
+                        if (tpl) {
+                          applyNoteAndRemember(tpl.content, tpl.id);
+                        }
+                      }}
+                      placeholder="Tìm & chọn nhanh ghi chú sản phẩm có sẵn (liều lượng, HDSD, công dụng...)..."
+                      emptyOptionLabel="-- Bỏ chọn mẫu --"
+                      createActionLabel={
+                        onSaveProductNoteTemplate
+                          ? '+ Tạo mẫu ghi chú sản phẩm mới tại đây...'
+                          : undefined
+                      }
+                      onCreateAction={
+                        onSaveProductNoteTemplate
+                          ? (kw) => {
+                              setEditingNoteTemplateId(null);
+                              setTplTitleInput((kw || '').trim());
+                              setTplCategoryInput('Liều lượng & Pha phun');
+                              setTplContentInput(dosageGuide.trim() || (kw || '').trim());
+                              setShowNoteTemplateEditor(true);
+                            }
+                          : undefined
+                      }
+                      options={productNoteTemplates.map((tpl) => ({
+                        value: tpl.id,
+                        label: tpl.title,
+                        subLabel: tpl.content,
+                        badge: tpl.category || 'Ghi chú',
+                        keywords: `${tpl.title} ${tpl.content} ${tpl.category || ''}`,
+                      }))}
+                    />
+
+                    {selectedTplObj && onSaveProductNoteTemplate && (
+                      <div className="flex items-center justify-end gap-2 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingNoteTemplateId(selectedTplObj.id);
+                            setTplTitleInput(selectedTplObj.title);
+                            setTplCategoryInput(selectedTplObj.category || 'Liều lượng & Pha phun');
+                            setTplContentInput(selectedTplObj.content);
+                            setShowNoteTemplateEditor(true);
+                          }}
+                          className="text-teal-800 hover:underline font-semibold inline-flex items-center gap-0.5"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          <span>Sửa mẫu đang chọn</span>
+                        </button>
+                        {onDeleteProductNoteTemplate && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onDeleteProductNoteTemplate(selectedTplObj.id);
+                              setSelectedNoteTemplateId('');
+                            }}
+                            className="text-rose-600 hover:underline font-semibold inline-flex items-center gap-0.5"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>Xóa mẫu</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Inline Create / Edit Reusable Product Note Template Box */}
+                  {showNoteTemplateEditor && onSaveProductNoteTemplate && (
+                    <div className="p-3 bg-white rounded-lg border border-teal-300 space-y-2 shadow-2xs">
+                      <div className="text-xs font-bold text-teal-900">
+                        {editingNoteTemplateId
+                          ? 'Chỉnh sửa mẫu ghi chú sản phẩm'
+                          : 'Tạo mẫu ghi chú sản phẩm mới (dùng lại nhanh cho các đơn sau)'}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={tplTitleInput}
+                          onChange={(e) => setTplTitleInput(e.target.value)}
+                          placeholder="Tên ngắn để tìm nhanh (VD: Diệt mầm lúa 1-3 NSS)"
+                          className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500"
+                        />
+                        <select
+                          value={tplCategoryInput}
+                          onChange={(e) => setTplCategoryInput(e.target.value)}
+                          className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500"
+                        >
+                          <option value="Liều lượng & Pha phun">Liều lượng &amp; Pha phun</option>
+                          <option value="Hướng dẫn sử dụng">Hướng dẫn sử dụng</option>
+                          <option value="Công dụng sản phẩm">Công dụng sản phẩm</option>
+                          <option value="Hướng dẫn bón phân">Hướng dẫn bón phân</option>
+                          <option value="Lưu ý & Cách ly">Lưu ý &amp; Cách ly</option>
+                        </select>
+                      </div>
+                      <textarea
+                        rows={2}
+                        value={tplContentInput}
+                        onChange={(e) => setTplContentInput(e.target.value)}
+                        placeholder="Nhập đầy đủ thông tin: liều lượng pha, hướng dẫn sử dụng, công dụng sản phẩm, thời gian cách ly..."
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-500"
+                      />
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowNoteTemplateEditor(false);
+                            setEditingNoteTemplateId(null);
+                          }}
+                          className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-md"
+                        >
+                          Hủy
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleSaveTemplateInline}
+                          className="px-3 py-1 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-md"
+                        >
+                          {editingNoteTemplateId ? 'Cập nhật mẫu' : 'Lưu mẫu & Áp dụng ngay'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Active Product Note Editor */}
+                  <textarea
+                    id="sale-dosage-guide-input"
+                    rows={2}
+                    value={dosageGuide}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setDosageGuide(val);
+                      setSelectedNoteTemplateId('');
+                    }}
+                    onBlur={() => {
+                      if (activeNoteProduct && dosageGuide.trim() !== (activeNoteProduct.dosageGuide || '').trim()) {
+                        onBindProductNoteToProduct?.(activeNoteProduct.id, dosageGuide);
+                        setPosCartItems((prev) =>
+                          prev.map((item) =>
+                            item.productId === activeNoteProduct.id
+                              ? { ...item, dosageGuide: dosageGuide.trim() || undefined }
+                              : item
+                          )
+                        );
+                        if (dosageGuide.trim()) {
+                          setAutoRememberedBadge(
+                            `Đã tự động ghi nhớ cho "${activeNoteProduct.name}" — lần sau chọn sẽ tự gắn sẵn!`
+                          );
+                        }
+                      }
+                    }}
+                    placeholder="Ghi hoặc điều chỉnh thông tin, liều lượng, hướng dẫn sử dụng, công dụng sản phẩm (tự in lên Hóa đơn / Zalo)..."
+                    className="w-full px-3 py-1.5 text-xs bg-white border border-teal-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  />
+
+                  <div className="flex flex-wrap items-center justify-between gap-1.5">
+                    {autoRememberedBadge ? (
+                      <span className="text-[11px] font-semibold text-emerald-800 inline-flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>{autoRememberedBadge}</span>
+                      </span>
+                    ) : activeNoteProduct ? (
+                      <span className="text-[11px] text-teal-800">
+                        Khi chọn hoặc nhập ghi chú sẽ tự ghi nhớ cho{' '}
+                        <strong>{activeNoteProduct.name}</strong>.
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-slate-500">
+                        Chọn sản phẩm để tự động ghi nhớ &amp; gắn sẵn ghi chú cho các lần bán sau.
+                      </span>
+                    )}
+
+                    {activeNoteProduct && dosageGuide.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          applyNoteAndRemember(dosageGuide, selectedNoteTemplateId);
+                          onNotifyToast?.(
+                            `Đã ghi nhớ ghi chú cho sản phẩm "${activeNoteProduct.name}"!`
+                          );
+                        }}
+                        className="px-2 py-0.5 text-[11px] font-semibold text-emerald-800 bg-emerald-100 hover:bg-emerald-200 rounded-md whitespace-nowrap"
+                      >
+                        Ghi nhớ cho SP này
+                      </button>
+                    )}
+                  </div>
+
+                  {onCreateMultiItemSale && (
+                    <button
+                      type="button"
+                      onClick={handleAddCurrentItemToCart}
+                      className="w-full py-2 px-3 text-xs font-bold text-emerald-800 bg-white hover:bg-emerald-50 border-2 border-dashed border-emerald-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <Plus className="w-4 h-4 shrink-0" />
+                      <span>
+                        Thêm vật tư kèm ưu đãi / ghi chú vào Giỏ ({posCartItems.length} mặt hàng)
+                      </span>
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
 
             {lastCreatedOrder && (
               <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 space-y-2">

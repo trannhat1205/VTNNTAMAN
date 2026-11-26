@@ -655,7 +655,7 @@ export function exportSaleInvoicePDF(sale: {
 
         ctx.fillStyle = '#166534';
         ctx.font = `700 13px ${FONT_FAMILY}`;
-        ctx.fillText('HƯỚNG DẪN LIỀU LƯỢNG & CÁCH PHA PHUN AN TOÀN', marginX + 14, cursorY + 22);
+        ctx.fillText('GHI CHÚ SẢN PHẨM (LIỀU LƯỢNG, HDSD & CÔNG DỤNG)', marginX + 14, cursorY + 22);
 
         let textY = cursorY + 42;
         ctx.fillStyle = '#1E293B';
@@ -3093,7 +3093,7 @@ export function exportThermalReceiptPDF(params: {
         y += 18;
         ctx.fillStyle = '#166534';
         ctx.font = `800 ${baseSize - 1}px ${FONT_FAMILY}`;
-        ctx.fillText('HƯỚNG DẪN PHA PHUN / SỬ DỤNG:', marginX, y);
+        ctx.fillText('GHI CHÚ SẢN PHẨM / HDSD:', marginX, y);
         y += 18;
         ctx.fillStyle = '#0F172A';
         ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;

@@ -7,6 +7,7 @@ import {
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
+  ProductNoteTemplate,
   SaleTransaction,
   SavedVoucherRecord,
   StaffMember,
@@ -50,6 +51,7 @@ export interface RtdbWorkspaceSettings {
   paymentGroups: string[];
   notificationPrefs: NotificationPrefs;
   bankQrConfig?: VietQrBankConfig;
+  productNoteTemplates?: ProductNoteTemplate[];
   autoDailyBackupEnabled: boolean;
 }
 
@@ -359,6 +361,13 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
       },
       ...(rawSettings.bankQrConfig && typeof rawSettings.bankQrConfig === 'object'
         ? { bankQrConfig: rawSettings.bankQrConfig as VietQrBankConfig }
+        : {}),
+      ...(rawSettings.productNoteTemplates
+        ? {
+            productNoteTemplates: ensureArrayFromRtdb<ProductNoteTemplate>(
+              rawSettings.productNoteTemplates
+            ),
+          }
         : {}),
       autoDailyBackupEnabled:
         typeof rawSettings.autoDailyBackupEnabled === 'boolean'

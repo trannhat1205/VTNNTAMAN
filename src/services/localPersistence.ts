@@ -7,6 +7,7 @@ import {
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
+  ProductNoteTemplate,
   SaleTransaction,
   SavedVoucherRecord,
   StaffMember,
@@ -52,6 +53,7 @@ export interface WorkspacePersistedState {
   staffList: StaffMember[];
   notificationPrefs: NotificationPrefs;
   bankQrConfig?: VietQrBankConfig;
+  productNoteTemplates?: ProductNoteTemplate[];
   autoDailyBackupEnabled: boolean;
 }
 

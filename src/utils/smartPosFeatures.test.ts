@@ -2,9 +2,12 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   allocatePaymentAcrossCartItems,
+  bindProductNoteToProduct,
   buildVietQrImageUrl,
   buildZaloInvoiceAndDosageMessage,
   clearOfflineQueueStorage,
+  DEFAULT_PRODUCT_NOTE_TEMPLATES,
+  deleteProductNoteTemplate,
   enqueueOfflineQueueItem,
   findInvoiceGroupSales,
   isValidVietQrConfig,
@@ -12,6 +15,7 @@ import {
   OFFLINE_QUEUE_STORAGE_KEY,
   PosCartDraftItem,
   sanitizeVietQrText,
+  upsertProductNoteTemplate,
   upsertQuickCartProductQuantity,
   validateCartInventory,
 } from './smartPosFeatures';
@@ -253,6 +257,41 @@ describe('Priority 3 — Dosage & Spraying Guide Zalo Invoice Formatter', () => 
     assert.ok(message.includes('Pha 25ml / bình 25 lít nước'));
     assert.ok(message.includes('Vietcombank'));
     assert.ok(message.includes('0123456789'));
+  });
+
+  it('creates, edits, deletes reusable product note templates and remembers note bound to product', () => {
+    const { templates: afterCreate, savedTemplate } = upsertProductNoteTemplate(
+      DEFAULT_PRODUCT_NOTE_TEMPLATES,
+      {
+        title: 'Diệt mầm kích rễ lúa',
+        category: 'Công dụng & Liều lượng',
+        content: 'Pha 1 cặp / công 1.000m², phun sau sạ 1-3 ngày giúp diệt cỏ dại và kích rễ khỏe.',
+      }
+    );
+    assert.equal(afterCreate.length, DEFAULT_PRODUCT_NOTE_TEMPLATES.length + 1);
+    assert.equal(afterCreate[0].title, 'Diệt mầm kích rễ lúa');
+
+    const { templates: afterEdit } = upsertProductNoteTemplate(
+      afterCreate,
+      {
+        title: 'Diệt mầm kích rễ lúa (Chuẩn)',
+        category: 'Công dụng & Liều lượng',
+        content: 'Pha 1 cặp / công, phun 1-3 NSS.',
+      },
+      savedTemplate.id
+    );
+    assert.equal(afterEdit[0].title, 'Diệt mầm kích rễ lúa (Chuẩn)');
+
+    const { updatedProducts, updatedProduct } = bindProductNoteToProduct(
+      mockProducts,
+      'p1',
+      afterEdit[0].content
+    );
+    assert.equal(updatedProduct?.dosageGuide, 'Pha 1 cặp / công, phun 1-3 NSS.');
+    assert.equal(updatedProducts[0].dosageGuide, 'Pha 1 cặp / công, phun 1-3 NSS.');
+
+    const afterDelete = deleteProductNoteTemplate(afterEdit, savedTemplate.id);
+    assert.equal(afterDelete.length, DEFAULT_PRODUCT_NOTE_TEMPLATES.length);
   });
 });
 

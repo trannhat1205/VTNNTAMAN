@@ -1,5 +1,6 @@
 import {
   ProductItem,
+  ProductNoteTemplate,
   SalePromotionType,
   SaleTransaction,
   VietQrBankConfig,
@@ -44,6 +45,134 @@ export const DOSAGE_GUIDE_PRESETS: string[] = [
   'Pha 50ml / bình 25 lít, phun phòng định kỳ 7-10 ngày/lần. Cách ly 7 ngày trước thu hoạch.',
   'Không pha chung với thuốc có tính kiềm mạnh. Đeo đồ bảo hộ khi phun.',
 ];
+
+export const DEFAULT_PRODUCT_NOTE_TEMPLATES: ProductNoteTemplate[] = [
+  {
+    id: 'pnote_default_1',
+    title: 'Phun tán lá 25-30ml / bình 25L',
+    category: 'Liều lượng & Pha phun',
+    content: 'Pha 25-30ml / bình 25 lít nước, phun đều tán lá lúc sáng sớm hoặc chiều mát.',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+  },
+  {
+    id: 'pnote_default_2',
+    title: 'Pha 1 gói / bình 25L (2 bình/công)',
+    category: 'Liều lượng & Pha phun',
+    content: 'Pha 1 gói / bình 25 lít nước (2 bình / công 1.000m²), phun ướt đều thân lá.',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+  },
+  {
+    id: 'pnote_default_3',
+    title: '1 chai 480ml cho 2 phuy 200L',
+    category: 'Liều lượng & Pha phun',
+    content: 'Pha 1 chai 480ml cho 2 phuy 200 lít nước (hoặc 16-20 bình 25 lít).',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+  },
+  {
+    id: 'pnote_default_4',
+    title: 'Bón rải gốc 15-25kg / công 1.000m²',
+    category: 'Hướng dẫn bón phân',
+    content: 'Rải gốc 15-25 kg / công (1.000m²), tưới đủ ẩm sau khi bón.',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+  },
+  {
+    id: 'pnote_default_5',
+    title: 'Phun phòng định kỳ 7-10 ngày (cách ly 7 ngày)',
+    category: 'Công dụng & Cách ly',
+    content: 'Pha 50ml / bình 25 lít, phun phòng định kỳ 7-10 ngày/lần. Cách ly 7 ngày trước thu hoạch.',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+  },
+  {
+    id: 'pnote_default_6',
+    title: 'Lưu ý an toàn & không pha kiềm mạnh',
+    category: 'Lưu ý sử dụng',
+    content: 'Không pha chung với thuốc có tính kiềm mạnh. Đeo đồ bảo hộ khi phun.',
+    updatedAt: '2026-11-26T00:00:00.000Z',
+  },
+];
+
+export function resolveProductNoteTemplates(
+  saved: ProductNoteTemplate[] | undefined | null
+): ProductNoteTemplate[] {
+  if (Array.isArray(saved) && saved.length > 0) {
+    return saved;
+  }
+  return DEFAULT_PRODUCT_NOTE_TEMPLATES;
+}
+
+export function upsertProductNoteTemplate(
+  current: ProductNoteTemplate[],
+  draft: { title: string; content: string; category?: string },
+  editingId?: string,
+  nowIso = new Date().toISOString()
+): { templates: ProductNoteTemplate[]; savedTemplate: ProductNoteTemplate } {
+  const cleanContent = draft.content.trim();
+  const cleanTitle =
+    draft.title.trim() ||
+    (cleanContent.length > 42 ? `${cleanContent.slice(0, 42)}…` : cleanContent);
+  const cleanCategory = draft.category?.trim() || 'Ghi chú sản phẩm';
+
+  if (editingId) {
+    const existing = current.find((t) => t.id === editingId);
+    if (existing) {
+      const updated: ProductNoteTemplate = {
+        ...existing,
+        title: cleanTitle,
+        content: cleanContent,
+        category: cleanCategory,
+        updatedAt: nowIso,
+      };
+      return {
+        templates: current.map((t) => (t.id === editingId ? updated : t)),
+        savedTemplate: updated,
+      };
+    }
+  }
+
+  const created: ProductNoteTemplate = {
+    id: `pnote_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    title: cleanTitle,
+    content: cleanContent,
+    category: cleanCategory,
+    updatedAt: nowIso,
+  };
+  return {
+    templates: [created, ...current],
+    savedTemplate: created,
+  };
+}
+
+export function deleteProductNoteTemplate(
+  current: ProductNoteTemplate[],
+  templateId: string
+): ProductNoteTemplate[] {
+  return current.filter((t) => t.id !== templateId);
+}
+
+/**
+ * Persists a chosen/edited product note directly onto the product (`dosageGuide`)
+ * so future selections of that product automatically attach the remembered note.
+ */
+export function bindProductNoteToProduct(
+  products: ProductItem[],
+  productId: string,
+  noteContent: string,
+  nowIso = new Date().toISOString()
+): { updatedProducts: ProductItem[]; updatedProduct: ProductItem | null } {
+  let updatedProduct: ProductItem | null = null;
+  const clean = noteContent.trim();
+  const updatedProducts = products.map((p) => {
+    if (p.id !== productId) return p;
+    const next: ProductItem = {
+      ...p,
+      dosageGuide: clean || undefined,
+      updatedAt: nowIso,
+    };
+    updatedProduct = next;
+    return next;
+  });
+  return { updatedProducts, updatedProduct };
+}
 
 export interface PosCartDraftItem {
   id: string;
