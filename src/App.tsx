@@ -5991,34 +5991,35 @@ export default function App() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 max-w-full">
-        {/* Top Bar Contract: Always pinned at top when scrolling vertically down */}
+        {/* Top Bar Contract: Always pinned at top & automatically balanced across Desktop, Tablet, and all Smartphones */}
         <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200 sticky top-0 z-40 shadow-2xs w-full max-w-full">
-          <div className="px-2.5 sm:px-3.5 lg:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-2 sm:gap-2.5">
-            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1 overflow-hidden">
+          {/* Primary Row: Hamburger + Brand/Title on Left, Core Actions on Right */}
+          <div className="px-2.5 sm:px-4 lg:px-6 py-2 sm:py-2.5 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen((prev) => !prev)}
                 aria-label="Mở menu điều hướng"
-                className="lg:hidden p-1.5 text-slate-600 hover:text-slate-900 rounded-lg border border-slate-200 shrink-0"
+                className="lg:hidden p-1.5 text-slate-700 hover:text-slate-950 hover:bg-slate-100 rounded-lg border border-slate-200 shrink-0 transition-colors"
               >
                 {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
               </button>
 
-              <div className="flex items-center gap-1.5 text-xs sm:text-sm min-w-0 overflow-hidden">
+              <div className="flex items-center gap-1.5 text-xs sm:text-sm min-w-0">
                 <span className="font-bold text-emerald-800 whitespace-nowrap shrink-0">
                   VTNN Tâm An
                 </span>
-                <span className="hidden lg:inline text-slate-300 shrink-0" aria-hidden="true">
+                <span className="hidden xs:inline sm:inline text-slate-300 shrink-0" aria-hidden="true">
                   /
                 </span>
-                <span className="hidden lg:inline font-semibold text-slate-900 whitespace-nowrap truncate">
+                <span className="hidden xs:inline sm:inline font-semibold text-slate-900 truncate">
                   {activeNavLabel}
                 </span>
               </div>
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-              {/* Live Firebase Storage & Realtime Database 1-Click Cloud Sync Button */}
+              {/* Desktop/Tablet Live Firebase Storage & Realtime Database 1-Click Cloud Sync Button */}
               {isGoogleAuthenticated && (
                 <button
                   type="button"
@@ -6076,7 +6077,7 @@ export default function App() {
                     }
                   }}
                   title="Bấm để đồng bộ tức thì dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime Database"
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors ${
+                  className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors shrink-0 ${
                     rtdbSyncState === 'live'
                       ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
                       : rtdbSyncState === 'connecting'
@@ -6085,7 +6086,7 @@ export default function App() {
                   }`}
                 >
                   <span
-                    className={`w-2 h-2 rounded-full ${
+                    className={`w-2 h-2 rounded-full shrink-0 ${
                       rtdbSyncState === 'live'
                         ? 'bg-emerald-500'
                         : rtdbSyncState === 'connecting'
@@ -6105,8 +6106,8 @@ export default function App() {
                 </button>
               )}
 
-              {/* Desktop Multi-Warehouse Selector for Primary Manager & Deputy General Manager */}
-              <div className="hidden md:block">
+              {/* Desktop/Tablet Multi-Warehouse Selector */}
+              <div className="hidden md:block shrink-0">
                 <MultiWarehouseFilterPopover
                   triggerId="desktop-multi-warehouse-filter"
                   allWarehouses={warehouses}
@@ -6119,7 +6120,7 @@ export default function App() {
                 />
               </div>
 
-              {/* Staff / Warehouse Quick Switcher — ONLY for Primary Manager */}
+              {/* Staff / Warehouse Quick Switcher — ONLY for Primary Manager on XL Desktop */}
               {canAccountCreateStaff(currentStaff) && (
                 <select
                   aria-label="Chuyển đổi tài khoản nhân viên hoặc quản lý"
@@ -6136,7 +6137,7 @@ export default function App() {
                       );
                     }
                   }}
-                  className="hidden xl:block px-2 py-1.5 text-xs font-semibold bg-slate-100 border border-slate-200 rounded-lg text-slate-800 max-w-[200px] truncate"
+                  className="hidden 2xl:block px-2 py-1.5 text-xs font-semibold bg-slate-100 border border-slate-200 rounded-lg text-slate-800 max-w-[190px] truncate shrink-0"
                 >
                   {staffList.map((st) => (
                     <option key={st.uid} value={st.uid}>
@@ -6146,13 +6147,13 @@ export default function App() {
                 </select>
               )}
 
-              {/* Install App (PWA) Trigger — Hidden once running as installed standalone App */}
+              {/* Desktop/Tablet Install App (PWA) Trigger */}
               {!isStandaloneInstalled && (
                 <button
                   type="button"
                   onClick={() => setIsPwaInstallModalOpen(true)}
                   title="Cài đặt VTNN Tâm An thành ứng dụng trên Điện thoại & Máy tính"
-                  className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
+                  className="hidden md:flex px-2.5 py-1.5 lg:px-3 lg:py-2 text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg transition-colors items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <Smartphone className="w-3.5 h-3.5 shrink-0" />
                   <span>Cài App</span>
@@ -6166,8 +6167,8 @@ export default function App() {
                 className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
               >
                 <LogOut className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden lg:inline">Thoát đăng nhập</span>
-                <span className="lg:hidden">Thoát</span>
+                <span className="hidden xl:inline">Thoát đăng nhập</span>
+                <span className="xl:hidden">Thoát</span>
               </button>
 
               {/* Push Notification Center Trigger */}
@@ -6178,7 +6179,7 @@ export default function App() {
                 className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-semibold text-slate-800 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
               >
                 <Bell className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                <span className="hidden sm:inline">Thông báo</span>
+                <span className="hidden lg:inline">Thông báo</span>
                 <span className="font-mono font-bold text-red-600">({unreadNotifCount})</span>
               </button>
 
@@ -6193,7 +6194,7 @@ export default function App() {
                     setMobileMenuOpen(false);
                     scrollToTopOfPage();
                   }}
-                  className="px-2.5 py-1.5 lg:px-3.5 lg:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 lg:px-3.5 lg:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-2xs"
                 >
                   <span className="sm:hidden">+ Đơn bán</span>
                   <span className="hidden sm:inline">+ Tạo đơn bán</span>
@@ -6202,20 +6203,123 @@ export default function App() {
             </div>
           </div>
 
-          {/* Mobile Sub-Bar showing current screen & interactive multi-warehouse filter clearly */}
-          <div className="md:hidden px-3 py-1.5 bg-slate-50 border-t border-slate-200/80 flex items-center justify-between gap-2 text-[11px]">
-            <span className="font-semibold text-slate-800 truncate">{activeNavLabel}</span>
-            <MultiWarehouseFilterPopover
-              triggerId="mobile-multi-warehouse-filter"
-              allWarehouses={warehouses}
-              selectedWarehouses={selectedFilterWarehouses}
-              onChangeSelectedWarehouses={(next) => {
-                setSelectedFilterWarehouses(next);
-              }}
-              canFilterMultiWarehouses={canFilterMultiWarehouses}
-              lockedWarehouseLabel={activeWarehouseLabel}
-              compact
-            />
+          {/* Mobile Smart Sub-Bar (< md): Balances Cloud Sync, Install App, Screen Label & Active Warehouse Filter across all smartphone widths */}
+          <div className="md:hidden px-2.5 py-1.5 bg-slate-50/95 border-t border-slate-200/80 flex items-center justify-between gap-1.5 text-[11px]">
+            <div className="flex items-center gap-1.5 min-w-0 shrink-0">
+              {isGoogleAuthenticated ? (
+                <button
+                  type="button"
+                  disabled={isManualCloudSyncing}
+                  onClick={async () => {
+                    const fbUser = auth.currentUser;
+                    if (!fbUser || isManualCloudSyncing) return;
+                    setIsManualCloudSyncing(true);
+                    try {
+                      const isPrimary = isCurrentUserAdmin(fbUser);
+                      const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
+                      const storageWs = await readWorkspaceFromFirebaseStorage({
+                        uid: activeUid,
+                        email: fbUser.email || currentStaff.email,
+                        assignedWarehouse: currentStaff.assignedWarehouse,
+                      });
+                      if (storageWs && !isPrimary) {
+                        storageCachedWorkspaceRef.current[activeUid] = storageWs;
+                        const merged = mergeWorkspacePayloads(
+                          rtdbLastPayloadRef.current[activeUid] || null,
+                          storageWs,
+                          activeUid
+                        );
+                        if (merged && countWorkspaceBusinessRecords(merged) > 0) {
+                          setProducts((prev) => dedupeRecordsById([...prev, ...merged.products]));
+                          setCustomers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.customers])
+                          );
+                          setSuppliers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.suppliers])
+                          );
+                          setSales((prev) => dedupeRecordsById([...prev, ...merged.sales]));
+                          setImports((prev) => dedupeRecordsById([...prev, ...merged.imports]));
+                          setReceiptVouchers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.receiptVouchers])
+                          );
+                          setPaymentVouchers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.paymentVouchers])
+                          );
+                          setSavedVouchers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.savedVouchers])
+                          );
+                          setStockAdjustments((prev) =>
+                            dedupeRecordsById([...prev, ...(merged.stockAdjustments || [])])
+                          );
+                        }
+                      }
+                      rtdbSuppressNextWriteRef.current = false;
+                      setRtdbWriteTrigger((n) => n + 1);
+                      showToast(
+                        `Đã đồng bộ dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime DB (${visibleProducts.length} vật tư, ${visibleSales.length} đơn bán, ${visibleCustomers.length} khách hàng)!`
+                      );
+                    } finally {
+                      setIsManualCloudSyncing(false);
+                    }
+                  }}
+                  title="Bấm để đồng bộ tức thì dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime Database"
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors shrink-0 ${
+                    rtdbSyncState === 'live'
+                      ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
+                      : rtdbSyncState === 'connecting'
+                      ? 'bg-amber-50 text-amber-800 border-amber-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      rtdbSyncState === 'live'
+                        ? 'bg-emerald-500'
+                        : rtdbSyncState === 'connecting'
+                        ? 'bg-amber-500'
+                        : 'bg-slate-400'
+                    }`}
+                  />
+                  <span>
+                    {isManualCloudSyncing
+                      ? 'Đồng bộ...'
+                      : rtdbSyncState === 'live'
+                      ? 'Realtime DB'
+                      : rtdbSyncState === 'connecting'
+                      ? 'Kết nối...'
+                      : 'Ngoại tuyến'}
+                  </span>
+                </button>
+              ) : (
+                <span className="font-semibold text-slate-800 truncate">{activeNavLabel}</span>
+              )}
+
+              {!isStandaloneInstalled && (
+                <button
+                  type="button"
+                  onClick={() => setIsPwaInstallModalOpen(true)}
+                  title="Cài đặt VTNN Tâm An thành ứng dụng trên Điện thoại & Máy tính"
+                  className="px-2 py-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                >
+                  <Smartphone className="w-3 h-3 shrink-0" />
+                  <span>Cài App</span>
+                </button>
+              )}
+            </div>
+
+            <div className="min-w-0 flex items-center justify-end">
+              <MultiWarehouseFilterPopover
+                triggerId="mobile-multi-warehouse-filter"
+                allWarehouses={warehouses}
+                selectedWarehouses={selectedFilterWarehouses}
+                onChangeSelectedWarehouses={(next) => {
+                  setSelectedFilterWarehouses(next);
+                }}
+                canFilterMultiWarehouses={canFilterMultiWarehouses}
+                lockedWarehouseLabel={activeWarehouseLabel}
+                compact
+              />
+            </div>
           </div>
 
           {/* Mobile Navigation Drawer — Kept inside sticky header so it opens at top even when scrolled down */}
@@ -6332,27 +6436,27 @@ export default function App() {
         )}
 
         {/* Main Workspace Content Viewport */}
-        <main className="flex-1 p-3.5 sm:p-6 max-w-[1400px] w-full mx-auto space-y-6 overflow-x-hidden">
+        <main className="flex-1 p-3 sm:p-6 max-w-[1400px] w-full mx-auto space-y-5 sm:space-y-6 overflow-x-hidden">
           {activeTab === 'dashboard' && (
-            <div className="space-y-6">
+            <div className="space-y-5 sm:space-y-6">
               {/* Brand Hero Banner + Admin / Single-Warehouse Status Indicator */}
-              <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                <div className="flex items-start sm:items-center gap-3.5 sm:gap-4">
+              <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 sm:gap-4">
+                <div className="flex items-center gap-3 sm:gap-4 min-w-0">
                   <img
                     src="/assets/logo-taman.png?v=3"
                     alt="Logo Vật tư Nông nghiệp Tâm An"
                     referrerPolicy="no-referrer"
-                    className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-contain border border-slate-200 p-1 shrink-0 bg-white"
+                    className="w-13 h-13 sm:w-16 sm:h-16 rounded-xl object-contain border border-slate-200 p-1 shrink-0 bg-white"
                   />
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       {isAdminAccount ? (
-                        <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
+                        <span className="px-2.5 py-1 text-xs font-bold bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1.5 leading-snug">
                           <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
                           <span>Quản lý chính · Toàn bộ các kho</span>
                         </span>
                       ) : (
-                        <span className="px-2.5 py-0.5 text-xs font-bold bg-emerald-700 text-white rounded-md flex items-center gap-1">
+                        <span className="px-2.5 py-1 text-xs font-bold bg-emerald-700 text-white rounded-lg inline-flex items-center gap-1.5 leading-snug break-words">
                           <Warehouse className="w-3.5 h-3.5 shrink-0" />
                           <span>Quản lý 1 kho: {currentStaff.assignedWarehouse}</span>
                         </span>
@@ -6377,7 +6481,7 @@ export default function App() {
                     className="w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-bold rounded-lg border transition-colors flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-300"
                   >
                     <ShieldCheck className="w-4 h-4 shrink-0" />
-                    <span>
+                    <span className="truncate">
                       {isAdminAccount
                         ? 'Mở Bảng Phân Quyền Kho'
                         : `Đổi tên hiển thị kho (${currentStaff.assignedWarehouse})`}
@@ -6389,8 +6493,8 @@ export default function App() {
               {/* Quick Warehouse Assignment Dashboard (Visible when Primary Manager Gu6OYdsdiWbRvbEINqaWZXj3LV83 is logged in) */}
               {isAdminAccount && (
                 <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-2xs">
-                  <div className="px-4 sm:px-5 py-3 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
+                  <div className="px-3.5 sm:px-5 py-3 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
                       <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0" />
                       <h2 className="text-xs sm:text-sm font-bold text-slate-900">
                         Bảng Phân Quyền Quản Lý Kho Cho Người Dùng

@@ -47,12 +47,12 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
     return (
       <span
         title={lockedWarehouseLabel}
-        className={`inline-flex items-center gap-1.5 font-semibold text-emerald-800 bg-emerald-50/90 border border-emerald-200 rounded-lg whitespace-nowrap shrink-0 ${
-          compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1.5 text-xs'
+        className={`inline-flex items-center gap-1.5 font-semibold text-emerald-800 bg-emerald-50/90 border border-emerald-200 rounded-lg whitespace-nowrap shrink-0 max-w-full ${
+          compact ? 'px-2 py-1 text-[11px]' : 'px-2.5 py-1.5 text-xs'
         }`}
       >
         <Warehouse className="w-3.5 h-3.5 shrink-0 text-emerald-700" />
-        <span className="truncate max-w-[210px] lg:max-w-[240px] xl:max-w-[280px]">
+        <span className="truncate max-w-[155px] sm:max-w-[210px] lg:max-w-[240px] xl:max-w-[280px]">
           {lockedWarehouseLabel}
         </span>
       </span>
@@ -92,14 +92,14 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
   };
 
   return (
-    <div ref={containerRef} className="relative inline-block text-left shrink-0">
+    <div ref={containerRef} className="relative inline-block text-left shrink-0 max-w-full">
       <button
         id={triggerId}
         type="button"
         onClick={() => setIsOpen((prev) => !prev)}
         aria-expanded={isOpen}
         aria-label={`Chọn lọc kho xem dữ liệu: ${badgeText}`}
-        className={`inline-flex items-center gap-1 font-semibold rounded-lg border transition-colors whitespace-nowrap ${
+        className={`inline-flex items-center gap-1 font-semibold rounded-lg border transition-colors whitespace-nowrap max-w-full ${
           compact
             ? 'px-2 py-1 text-[11px]'
             : 'px-2.5 py-1.5 text-xs'
@@ -110,14 +110,14 @@ export const MultiWarehouseFilterPopover: React.FC<MultiWarehouseFilterPopoverPr
         }`}
       >
         <Warehouse className="w-3.5 h-3.5 shrink-0" />
-        <span className="max-w-[165px] sm:max-w-[220px] truncate">{badgeText}</span>
+        <span className="max-w-[145px] sm:max-w-[220px] truncate">{badgeText}</span>
         <ChevronDown
           className={`w-3.5 h-3.5 shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`}
         />
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 mt-1.5 w-72 sm:w-80 bg-white rounded-xl border border-slate-200 shadow-xl z-50 p-3 space-y-2.5 text-xs">
+        <div className="absolute right-0 mt-1.5 w-[min(20rem,calc(100vw-1.5rem))] bg-white rounded-xl border border-slate-200 shadow-xl z-50 p-3 space-y-2.5 text-xs">
           <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
             <span className="font-bold text-slate-900 flex items-center gap-1.5">
               <Warehouse className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
