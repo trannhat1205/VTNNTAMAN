@@ -1041,36 +1041,43 @@ export default function App() {
         const dirMap = rtdbUsersDirMapRef.current;
         const agg = aggregateAdminWorkspacesFromRtdb(wsMap, dirMap);
 
-        // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if its RTDB workspace was wiped to 0 records
+        // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if its RTDB workspace has fewer than the 8 original products
         const v99Norm = agg.normalizedWorkspaces[VTNNTAMAN99_UID];
         if (
           !v99AutoRecoveredRef.current &&
-          (!v99Norm || countWorkspaceBusinessRecords(v99Norm) === 0)
+          (!v99Norm || (v99Norm.products?.length || 0) < 8)
         ) {
           v99AutoRecoveredRef.current = true;
           const v99Wh =
             dirMap[VTNNTAMAN99_UID]?.assignedWarehouse ||
             v99Norm?.meta?.assignedWarehouse ||
             'TÂM AN VTNNTAMAN99';
-          const recoveredV99 = buildRecoveredVtnnTamAn99Workspace(v99Wh);
-          rtdbLastPayloadRef.current[VTNNTAMAN99_UID] = recoveredV99;
+          const baseRecovered = buildRecoveredVtnnTamAn99Workspace(v99Wh);
+          const mergedRecovered =
+            mergeWorkspacePayloads(v99Norm, baseRecovered, VTNNTAMAN99_UID) || baseRecovered;
+          rtdbLastPayloadRef.current[VTNNTAMAN99_UID] = mergedRecovered;
           rtdbLastFingerprintsRef.current[VTNNTAMAN99_UID] =
-            computeWorkspaceFingerprint(recoveredV99);
+            computeWorkspaceFingerprint(mergedRecovered);
           adminWorkspacesMapRef.current = {
             ...wsMap,
-            [VTNNTAMAN99_UID]: recoveredV99,
+            [VTNNTAMAN99_UID]: mergedRecovered,
           };
-          void writeRealtimeWorkspace(VTNNTAMAN99_UID, recoveredV99, null);
+          void writeRealtimeWorkspace(VTNNTAMAN99_UID, mergedRecovered, null);
           applyAdminAggregate();
           return;
         }
 
-        setAdminWorkspaceSummaries(agg.adminSummaries);
+        setAdminWorkspaceSummaries((prev) =>
+          JSON.stringify(prev) === JSON.stringify(agg.adminSummaries) ? prev : agg.adminSummaries
+        );
         void writeAdminWorkspacesIndexToFirebaseStorage(agg.adminSummaries);
 
         const dirProfiles = Object.values(dirMap);
         if (dirProfiles.length > 0) {
-          setStaffList((prev) => mergeDirectoryIntoStaffList(prev, dirProfiles));
+          setStaffList((prev) => {
+            const merged = mergeDirectoryIntoStaffList(prev, dirProfiles);
+            return JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged;
+          });
         }
 
         const wsKeys = Object.keys(wsMap);
@@ -1090,9 +1097,6 @@ export default function App() {
         let hasLegacyBucket = false;
         for (const [uid, normPayload] of Object.entries(agg.normalizedWorkspaces)) {
           rtdbLastPayloadRef.current[uid] = normPayload;
-          if (countWorkspaceBusinessRecords(normPayload) > 0) {
-            void writeWorkspaceToFirebaseStorage(uid, normPayload);
-          }
           if (isRealtimeWorkspaceLegacyLayout(uid)) {
             rtdbLastFingerprintsRef.current[uid] = '';
             hasLegacyBucket = true;
@@ -1112,67 +1116,110 @@ export default function App() {
           rtdbSuppressNextWriteRef.current = true;
 
           const cur = latestWorkspaceRef.current;
-          setProducts(
-            firstHydration ? dedupeRecordsById([...cur.products, ...agg.products]) : agg.products
+          const nextProds = firstHydration
+            ? dedupeRecordsById([...cur.products, ...agg.products])
+            : agg.products;
+          const nextCusts = firstHydration
+            ? dedupeRecordsById([...cur.customers, ...agg.customers])
+            : agg.customers;
+          const nextSups = firstHydration
+            ? dedupeRecordsById([...cur.suppliers, ...agg.suppliers])
+            : agg.suppliers;
+          const nextSales = firstHydration
+            ? dedupeRecordsById([...cur.sales, ...agg.sales])
+            : agg.sales;
+          const nextImps = firstHydration
+            ? dedupeRecordsById([...cur.imports, ...agg.imports])
+            : agg.imports;
+          const nextRvs = firstHydration
+            ? dedupeRecordsById([...cur.receiptVouchers, ...agg.receiptVouchers])
+            : agg.receiptVouchers;
+          const nextPvs = firstHydration
+            ? dedupeRecordsById([...cur.paymentVouchers, ...agg.paymentVouchers])
+            : agg.paymentVouchers;
+          const nextSvs = firstHydration
+            ? dedupeRecordsById([...cur.savedVouchers, ...agg.savedVouchers])
+            : agg.savedVouchers;
+          const nextAdjs = firstHydration
+            ? dedupeRecordsById([...cur.stockAdjustments, ...agg.stockAdjustments])
+            : agg.stockAdjustments;
+          const nextLogs = firstHydration
+            ? dedupeRecordsById([...cur.auditLogs, ...agg.auditLogs])
+            : agg.auditLogs;
+          const nextBks = firstHydration
+            ? dedupeRecordsById([...cur.backups, ...agg.backups])
+            : agg.backups;
+          const nextWhs = Array.from(new Set([...cur.warehouses, ...agg.warehouses]));
+          const nextCGs = Array.from(new Set([...cur.customerGroups, ...agg.customerGroups]));
+          const nextPCs = Array.from(
+            new Set([...cur.productCategories, ...agg.productCategories])
           );
-          setCustomers(
-            firstHydration
-              ? dedupeRecordsById([...cur.customers, ...agg.customers])
-              : agg.customers
-          );
-          setSuppliers(
-            firstHydration
-              ? dedupeRecordsById([...cur.suppliers, ...agg.suppliers])
-              : agg.suppliers
-          );
-          setSales(
-            firstHydration ? dedupeRecordsById([...cur.sales, ...agg.sales]) : agg.sales
-          );
-          setImports(
-            firstHydration ? dedupeRecordsById([...cur.imports, ...agg.imports]) : agg.imports
-          );
-          setReceiptVouchers(
-            firstHydration
-              ? dedupeRecordsById([...cur.receiptVouchers, ...agg.receiptVouchers])
-              : agg.receiptVouchers
-          );
-          setPaymentVouchers(
-            firstHydration
-              ? dedupeRecordsById([...cur.paymentVouchers, ...agg.paymentVouchers])
-              : agg.paymentVouchers
-          );
-          setSavedVouchers(
-            firstHydration
-              ? dedupeRecordsById([...cur.savedVouchers, ...agg.savedVouchers])
-              : agg.savedVouchers
-          );
-          setStockAdjustments(
-            firstHydration
-              ? dedupeRecordsById([...cur.stockAdjustments, ...agg.stockAdjustments])
-              : agg.stockAdjustments
-          );
-          setAuditLogs(
-            firstHydration
-              ? dedupeRecordsById([...cur.auditLogs, ...agg.auditLogs])
-              : agg.auditLogs
-          );
-          setBackups(
-            firstHydration ? dedupeRecordsById([...cur.backups, ...agg.backups]) : agg.backups
-          );
-          setWarehouses(Array.from(new Set([...cur.warehouses, ...agg.warehouses])));
-          setCustomerGroups(
-            Array.from(new Set([...cur.customerGroups, ...agg.customerGroups]))
-          );
-          setProductCategories(
-            Array.from(new Set([...cur.productCategories, ...agg.productCategories]))
-          );
-          setReceiptGroups(Array.from(new Set([...cur.receiptGroups, ...agg.receiptGroups])));
-          setPaymentGroups(Array.from(new Set([...cur.paymentGroups, ...agg.paymentGroups])));
+          const nextRGs = Array.from(new Set([...cur.receiptGroups, ...agg.receiptGroups]));
+          const nextPGs = Array.from(new Set([...cur.paymentGroups, ...agg.paymentGroups]));
 
-          if (firstHydration || hasLegacyBucket) {
-            if (hasLegacyBucket) {
-              rtdbSuppressNextWriteRef.current = false;
+          // Baseline the partitioned fingerprints so hydrating from RTDB never triggers an echo write loop
+          const baselinePartitioned = partitionAdminStateByWorkspace({
+            products: nextProds,
+            customers: nextCusts,
+            suppliers: nextSups,
+            sales: nextSales,
+            imports: nextImps,
+            receiptVouchers: nextRvs,
+            paymentVouchers: nextPvs,
+            savedVouchers: nextSvs,
+            stockAdjustments: nextAdjs,
+            auditLogs: nextLogs,
+            backups: nextBks,
+            settings: {
+              warehouses: nextWhs,
+              customerGroups: nextCGs,
+              productCategories: nextPCs,
+              receiptGroups: nextRGs,
+              paymentGroups: nextPGs,
+              notificationPrefs: cur.notificationPrefs,
+              autoDailyBackupEnabled: cur.autoDailyBackupEnabled,
+            },
+            staffList: cur.staffList,
+            knownOwnerUids: Array.from(rtdbKnownOwnerUidsRef.current),
+            adminUid: PRIMARY_ADMIN_UID,
+            nowIso: new Date().toISOString(),
+          });
+          for (const [bUid, bPayload] of Object.entries(baselinePartitioned)) {
+            if (!isRealtimeWorkspaceLegacyLayout(bUid)) {
+              rtdbLastFingerprintsRef.current[bUid] = computeWorkspaceFingerprint(bPayload);
             }
+          }
+
+          productsRef.current = nextProds;
+          setProducts(nextProds);
+          setCustomers(nextCusts);
+          setSuppliers(nextSups);
+          setSales(nextSales);
+          setImports(nextImps);
+          setReceiptVouchers(nextRvs);
+          setPaymentVouchers(nextPvs);
+          setSavedVouchers(nextSvs);
+          setStockAdjustments(nextAdjs);
+          setAuditLogs(nextLogs);
+          setBackups(nextBks);
+          setWarehouses((prev) =>
+            JSON.stringify(prev) === JSON.stringify(nextWhs) ? prev : nextWhs
+          );
+          setCustomerGroups((prev) =>
+            JSON.stringify(prev) === JSON.stringify(nextCGs) ? prev : nextCGs
+          );
+          setProductCategories((prev) =>
+            JSON.stringify(prev) === JSON.stringify(nextPCs) ? prev : nextPCs
+          );
+          setReceiptGroups((prev) =>
+            JSON.stringify(prev) === JSON.stringify(nextRGs) ? prev : nextRGs
+          );
+          setPaymentGroups((prev) =>
+            JSON.stringify(prev) === JSON.stringify(nextPGs) ? prev : nextPGs
+          );
+
+          if (hasLegacyBucket) {
+            rtdbSuppressNextWriteRef.current = false;
             setRtdbWriteTrigger((n) => n + 1);
           }
         }
@@ -1202,14 +1249,14 @@ export default function App() {
       if (cancelled) return;
       let mergedWs = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid);
 
-      // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if cloud workspace was wiped to 0 records
+      // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if cloud workspace has fewer than the 8 original products
       const isV99User =
         activeUid === VTNNTAMAN99_UID ||
         (fbUser.email || '').trim().toLowerCase() === VTNNTAMAN99_EMAIL;
       if (
         isV99User &&
         !v99AutoRecoveredRef.current &&
-        countWorkspaceBusinessRecords(mergedWs) === 0
+        (!mergedWs || (mergedWs.products?.length || 0) < 8)
       ) {
         v99AutoRecoveredRef.current = true;
         const activeStaffEntry = latestWorkspaceRef.current.staffList.find(
@@ -1219,7 +1266,8 @@ export default function App() {
           mergedWs?.meta?.assignedWarehouse ||
           activeStaffEntry?.assignedWarehouse ||
           'TÂM AN VTNNTAMAN99';
-        mergedWs = buildRecoveredVtnnTamAn99Workspace(preferredWh);
+        const baseRecovered = buildRecoveredVtnnTamAn99Workspace(preferredWh);
+        mergedWs = mergeWorkspacePayloads(mergedWs, baseRecovered, activeUid) || baseRecovered;
         void writeRealtimeWorkspace(activeUid, mergedWs, null);
       }
 
@@ -1380,40 +1428,49 @@ export default function App() {
           ? dedupeRecordsById([...ownOnly(cur.backups), ...unifiedWs.backups])
           : unifiedWs.backups
       );
-      setWarehouses((prev) =>
-        Array.from(
+      setWarehouses((prev) => {
+        const next = Array.from(
           new Set([
             ...prev.filter((w) => w !== 'Kho VTNN Tâm An'),
             ...(unifiedWs.settings.warehouses || []),
             ...(resolvedWh ? [resolvedWh] : []),
           ])
-        )
-      );
-      if (unifiedWs.settings.customerGroups.length > 0) {
-        setCustomerGroups((prev) =>
-          Array.from(new Set([...prev, ...unifiedWs.settings.customerGroups]))
         );
+        return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+      });
+      if (unifiedWs.settings.customerGroups.length > 0) {
+        setCustomerGroups((prev) => {
+          const next = Array.from(new Set([...prev, ...unifiedWs.settings.customerGroups]));
+          return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+        });
       }
       if (unifiedWs.settings.productCategories.length > 0) {
-        setProductCategories((prev) =>
-          Array.from(new Set([...prev, ...unifiedWs.settings.productCategories]))
-        );
+        setProductCategories((prev) => {
+          const next = Array.from(new Set([...prev, ...unifiedWs.settings.productCategories]));
+          return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+        });
       }
       if (unifiedWs.settings.receiptGroups.length > 0) {
-        setReceiptGroups((prev) =>
-          Array.from(new Set([...prev, ...unifiedWs.settings.receiptGroups]))
-        );
+        setReceiptGroups((prev) => {
+          const next = Array.from(new Set([...prev, ...unifiedWs.settings.receiptGroups]));
+          return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+        });
       }
       if (unifiedWs.settings.paymentGroups.length > 0) {
-        setPaymentGroups((prev) =>
-          Array.from(new Set([...prev, ...unifiedWs.settings.paymentGroups]))
-        );
+        setPaymentGroups((prev) => {
+          const next = Array.from(new Set([...prev, ...unifiedWs.settings.paymentGroups]));
+          return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+        });
       }
       if (unifiedWs.settings.notificationPrefs) {
-        setNotificationPrefs(unifiedWs.settings.notificationPrefs);
+        setNotificationPrefs((prev) =>
+          JSON.stringify(prev) === JSON.stringify(unifiedWs.settings.notificationPrefs)
+            ? prev
+            : unifiedWs.settings.notificationPrefs
+        );
       }
 
-      if (firstHydration || isLegacy || rtdbNeedsHeal) {
+      if (isLegacy || rtdbNeedsHeal) {
         setRtdbWriteTrigger((n) => n + 1);
       }
     };
@@ -1443,7 +1500,10 @@ export default function App() {
     const unsubUserDir = subscribeToRealtimeUsersDirectory(activeUid, false, (dirMap) => {
       const profiles = Object.values(dirMap);
       if (profiles.length > 0) {
-        setStaffList((prev) => mergeDirectoryIntoStaffList(prev, profiles));
+        setStaffList((prev) => {
+          const merged = mergeDirectoryIntoStaffList(prev, profiles);
+          return JSON.stringify(prev) === JSON.stringify(merged) ? prev : merged;
+        });
         const ownDir = dirMap[activeUid];
         if (ownDir?.assignedWarehouse && ownDir.assignedWarehouse !== 'Kho VTNN Tâm An') {
           setWarehouses((prev) =>

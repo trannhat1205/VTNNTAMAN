@@ -87,6 +87,7 @@ import {
   buildFullKeyedWorkspace,
   buildStorageWorkspacePaths,
   buildWorkspaceDiffUpdates,
+  computeWorkspaceFingerprint,
   countWorkspaceBusinessRecords,
   isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
@@ -1959,12 +1960,22 @@ export function isRealtimeWorkspaceLegacyLayout(uid: string): boolean {
   return legacyLayoutOwnerUids.has(sanitizeFirestoreId(uid));
 }
 
+const lastStorageWorkspaceFpByUid = new Map<string, string>();
+const lastStorageWriteAtByUid = new Map<string, number>();
+const inFlightStorageWriteByUid = new Set<string>();
+const STORAGE_WRITE_COOLDOWN_MS = 25000;
+
+let lastAdminSummaryFp = '';
+let lastAdminSummaryWriteAt = 0;
+let inFlightAdminSummaryWrite = false;
+
 export async function writeWorkspaceToFirebaseStorage(
   ownerUid: string,
   payload: RtdbWorkspacePayload,
   options?: {
     prevPayload?: RtdbWorkspacePayload | null;
     allowIntentionalWipe?: boolean;
+    force?: boolean;
   }
 ): Promise<boolean> {
   const user = auth.currentUser;
@@ -1993,6 +2004,21 @@ export async function writeWorkspaceToFirebaseStorage(
     return false;
   }
 
+  const fp = computeWorkspaceFingerprint(normalizedPayload);
+  const nowMs = Date.now();
+  if (!options?.force) {
+    if (lastStorageWorkspaceFpByUid.get(safeUid) === fp) {
+      return true;
+    }
+    if (inFlightStorageWriteByUid.has(safeUid)) {
+      return false;
+    }
+    const lastWrite = lastStorageWriteAtByUid.get(safeUid) || 0;
+    if (nowMs - lastWrite < STORAGE_WRITE_COOLDOWN_MS) {
+      return false;
+    }
+  }
+
   const recordCount = countWorkspaceBusinessRecords(normalizedPayload);
   const paths = buildStorageWorkspacePaths({
     uid: safeUid,
@@ -2005,29 +2031,38 @@ export async function writeWorkspaceToFirebaseStorage(
     return false;
   }
 
-  const metadata = {
-    contentType: 'application/json;charset=utf-8',
-    customMetadata: {
-      ownerUid: safeUid,
-      ownerEmail: (normalizedPayload.meta?.ownerEmail || '').slice(0, 120),
-      assignedWarehouse: (normalizedPayload.meta?.assignedWarehouse || '').slice(0, 120),
-      recordCount: String(recordCount),
-      updatedAt: normalizedPayload.meta?.updatedAt || new Date().toISOString(),
-    },
-  };
+  lastStorageWorkspaceFpByUid.set(safeUid, fp);
+  lastStorageWriteAtByUid.set(safeUid, nowMs);
+  inFlightStorageWriteByUid.add(safeUid);
 
-  const targetPaths: string[] = [paths.uidPath];
-  if (paths.emailPath) targetPaths.push(paths.emailPath);
-  if (paths.warehousePath) targetPaths.push(paths.warehousePath);
-  // Keep a protected non-empty rolling backup file inside /backups/{uid}/
-  if (recordCount > 0) {
-    targetPaths.push(paths.backupPath);
+  try {
+    const metadata = {
+      contentType: 'application/json;charset=utf-8',
+      customMetadata: {
+        ownerUid: safeUid,
+        ownerEmail: (normalizedPayload.meta?.ownerEmail || '').slice(0, 120),
+        assignedWarehouse: (normalizedPayload.meta?.assignedWarehouse || '').slice(0, 120),
+        recordCount: String(recordCount),
+        updatedAt: normalizedPayload.meta?.updatedAt || new Date().toISOString(),
+      },
+    };
+
+    const targetPaths: string[] = [paths.uidPath];
+    if (paths.emailPath) targetPaths.push(paths.emailPath);
+    if (paths.warehousePath) targetPaths.push(paths.warehousePath);
+    if (recordCount > 0) {
+      targetPaths.push(paths.backupPath);
+    }
+
+    const results = await Promise.allSettled(
+      targetPaths.map((storagePath) =>
+        uploadString(ref(storage, storagePath), jsonBody, 'raw', metadata)
+      )
+    );
+    return results.some((r) => r.status === 'fulfilled');
+  } finally {
+    inFlightStorageWriteByUid.delete(safeUid);
   }
-
-  const results = await Promise.allSettled(
-    targetPaths.map((storagePath) => uploadString(ref(storage, storagePath), jsonBody, 'raw', metadata))
-  );
-  return results.some((r) => r.status === 'fulfilled');
 }
 
 export async function readWorkspaceFromFirebaseStorage(params: {
@@ -2043,37 +2078,29 @@ export async function readWorkspaceFromFirebaseStorage(params: {
     assignedWarehouse: params.assignedWarehouse,
   });
 
-  const canReadBackup =
-    auth.currentUser.uid === safeUid || isCurrentUserAdmin(auth.currentUser);
-
-  const candidatePaths = Array.from(
-    new Set(
-      [
-        paths.uidPath,
-        paths.emailPath,
-        paths.warehousePath,
-        canReadBackup ? paths.backupPath : null,
-      ].filter((p): p is string => Boolean(p))
-    )
-  );
-
-  const fetched = await Promise.all(
-    candidatePaths.map((p) => readJsonFromFirebaseStoragePath<unknown>(p))
-  );
-
-  let merged: RtdbWorkspacePayload | null = null;
-  for (const raw of fetched) {
-    if (!raw || typeof raw !== 'object') continue;
-    const norm = normalizeWorkspaceFromRtdb(raw, safeUid);
-    if (
-      countWorkspaceBusinessRecords(norm) > 0 ||
-      (norm.auditLogs && norm.auditLogs.length > 0) ||
-      (norm.meta && norm.meta.assignedWarehouse)
-    ) {
-      merged = mergeWorkspacePayloads(merged, norm, safeUid);
+  // Read primary uidPath first to avoid unnecessary 404 console warnings on secondary paths
+  const rawPrimary = await readJsonFromFirebaseStoragePath<unknown>(paths.uidPath);
+  if (rawPrimary && typeof rawPrimary === 'object') {
+    const normPrimary = normalizeWorkspaceFromRtdb(rawPrimary, safeUid);
+    lastStorageWorkspaceFpByUid.set(safeUid, computeWorkspaceFingerprint(normPrimary));
+    if (countWorkspaceBusinessRecords(normPrimary) > 0) {
+      return normPrimary;
     }
   }
-  return merged;
+
+  // Fallback to emailPath only if uidPath was missing or empty
+  if (paths.emailPath) {
+    const rawEmail = await readJsonFromFirebaseStoragePath<unknown>(paths.emailPath);
+    if (rawEmail && typeof rawEmail === 'object') {
+      const normEmail = normalizeWorkspaceFromRtdb(rawEmail, safeUid);
+      lastStorageWorkspaceFpByUid.set(safeUid, computeWorkspaceFingerprint(normEmail));
+      if (countWorkspaceBusinessRecords(normEmail) > 0) {
+        return normEmail;
+      }
+    }
+  }
+
+  return null;
 }
 
 export async function writeAdminWorkspacesIndexToFirebaseStorage(
@@ -2081,6 +2108,31 @@ export async function writeAdminWorkspacesIndexToFirebaseStorage(
 ): Promise<boolean> {
   const user = auth.currentUser;
   if (!user || !isCurrentUserAdmin(user)) return false;
+
+  const comparableFp = JSON.stringify(
+    summaries.map((s) => ({
+      uid: s.uid,
+      assignedWarehouse: s.assignedWarehouse,
+      productsCount: s.productsCount,
+      customersCount: s.customersCount,
+      salesCount: s.salesCount,
+      salesRevenue: s.salesRevenue,
+      importsCount: s.importsCount,
+    }))
+  );
+  const nowMs = Date.now();
+  if (
+    comparableFp === lastAdminSummaryFp ||
+    inFlightAdminSummaryWrite ||
+    nowMs - lastAdminSummaryWriteAt < 30000
+  ) {
+    return true;
+  }
+
+  lastAdminSummaryFp = comparableFp;
+  lastAdminSummaryWriteAt = nowMs;
+  inFlightAdminSummaryWrite = true;
+
   try {
     const body = JSON.stringify(
       {
@@ -2106,6 +2158,8 @@ export async function writeAdminWorkspacesIndexToFirebaseStorage(
     return true;
   } catch {
     return false;
+  } finally {
+    inFlightAdminSummaryWrite = false;
   }
 }
 
