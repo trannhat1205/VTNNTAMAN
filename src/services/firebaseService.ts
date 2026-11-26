@@ -83,9 +83,14 @@ import {
   sanitizeChatStorageFileName,
 } from '../utils/internalChatLogic';
 import {
+  AdminWarehouseAccountSummary,
   buildFullKeyedWorkspace,
+  buildStorageWorkspacePaths,
   buildWorkspaceDiffUpdates,
+  countWorkspaceBusinessRecords,
+  isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
+  mergeWorkspacePayloads,
   normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   RtdbUserDirectoryProfile,
@@ -1132,14 +1137,38 @@ const COMMUNITY_MARKET_PRICES_LOCAL_KEY = 'vtnn_taman_community_prices_v1';
 
 async function readJsonFromFirebaseStoragePath<T>(storagePath: string): Promise<T | null> {
   const bucket = firebaseConfig.storageBucket;
-  if (!bucket) return null;
+  if (!bucket || !storagePath) return null;
   try {
+    const idToken = auth.currentUser ? await auth.currentUser.getIdToken() : null;
     const url = `https://firebasestorage.googleapis.com/v0/b/${encodeURIComponent(
       bucket
     )}/o/${encodeURIComponent(storagePath)}?alt=media`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2500);
+    const timer = setTimeout(() => controller.abort(), 4500);
+    const headers: Record<string, string> = {};
+    if (idToken) {
+      headers.Authorization = `Firebase ${idToken}`;
+    }
     const res = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (res.ok) {
+      return (await res.json()) as T;
+    }
+  } catch {
+    // Fallback to SDK getDownloadURL below
+  }
+
+  if (!auth.currentUser) return null;
+  try {
+    const downloadUrl = await getDownloadURL(ref(storage, storagePath));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    const res = await fetch(downloadUrl, {
       method: 'GET',
       cache: 'no-store',
       signal: controller.signal,
@@ -1930,10 +1959,161 @@ export function isRealtimeWorkspaceLegacyLayout(uid: string): boolean {
   return legacyLayoutOwnerUids.has(sanitizeFirestoreId(uid));
 }
 
+export async function writeWorkspaceToFirebaseStorage(
+  ownerUid: string,
+  payload: RtdbWorkspacePayload,
+  options?: {
+    prevPayload?: RtdbWorkspacePayload | null;
+    allowIntentionalWipe?: boolean;
+  }
+): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user || !ownerUid) return false;
+  const safeUid = sanitizeFirestoreId(ownerUid);
+  if (user.uid !== safeUid && !isCurrentUserAdmin(user)) {
+    return false;
+  }
+
+  const normalizedPayload: RtdbWorkspacePayload = sanitizeForRealtimeDb({
+    ...payload,
+    auditLogs: (payload.auditLogs || []).slice(0, 500),
+    backups: (payload.backups || []).map((b) => ({ ...b, snapshotPayload: undefined })),
+  });
+
+  if (
+    isDestructiveEmptyWorkspaceOverwrite(
+      options?.prevPayload,
+      normalizedPayload,
+      options?.allowIntentionalWipe
+    )
+  ) {
+    console.warn(
+      `[StorageSyncGuard] Blocked destructive empty workspace write for ${safeUid}.`
+    );
+    return false;
+  }
+
+  const recordCount = countWorkspaceBusinessRecords(normalizedPayload);
+  const paths = buildStorageWorkspacePaths({
+    uid: safeUid,
+    email: normalizedPayload.meta?.ownerEmail,
+    assignedWarehouse: normalizedPayload.meta?.assignedWarehouse,
+  });
+
+  const jsonBody = JSON.stringify(normalizedPayload);
+  if (jsonBody.length > 9.5 * 1024 * 1024) {
+    return false;
+  }
+
+  const metadata = {
+    contentType: 'application/json;charset=utf-8',
+    customMetadata: {
+      ownerUid: safeUid,
+      ownerEmail: (normalizedPayload.meta?.ownerEmail || '').slice(0, 120),
+      assignedWarehouse: (normalizedPayload.meta?.assignedWarehouse || '').slice(0, 120),
+      recordCount: String(recordCount),
+      updatedAt: normalizedPayload.meta?.updatedAt || new Date().toISOString(),
+    },
+  };
+
+  const targetPaths: string[] = [paths.uidPath];
+  if (paths.emailPath) targetPaths.push(paths.emailPath);
+  if (paths.warehousePath) targetPaths.push(paths.warehousePath);
+  // Keep a protected non-empty rolling backup file inside /backups/{uid}/
+  if (recordCount > 0) {
+    targetPaths.push(paths.backupPath);
+  }
+
+  const results = await Promise.allSettled(
+    targetPaths.map((storagePath) => uploadString(ref(storage, storagePath), jsonBody, 'raw', metadata))
+  );
+  return results.some((r) => r.status === 'fulfilled');
+}
+
+export async function readWorkspaceFromFirebaseStorage(params: {
+  uid: string;
+  email?: string | null;
+  assignedWarehouse?: string | null;
+}): Promise<RtdbWorkspacePayload | null> {
+  if (!auth.currentUser || !params.uid) return null;
+  const safeUid = sanitizeFirestoreId(params.uid);
+  const paths = buildStorageWorkspacePaths({
+    uid: safeUid,
+    email: params.email,
+    assignedWarehouse: params.assignedWarehouse,
+  });
+
+  const canReadBackup =
+    auth.currentUser.uid === safeUid || isCurrentUserAdmin(auth.currentUser);
+
+  const candidatePaths = Array.from(
+    new Set(
+      [
+        paths.uidPath,
+        paths.emailPath,
+        paths.warehousePath,
+        canReadBackup ? paths.backupPath : null,
+      ].filter((p): p is string => Boolean(p))
+    )
+  );
+
+  const fetched = await Promise.all(
+    candidatePaths.map((p) => readJsonFromFirebaseStoragePath<unknown>(p))
+  );
+
+  let merged: RtdbWorkspacePayload | null = null;
+  for (const raw of fetched) {
+    if (!raw || typeof raw !== 'object') continue;
+    const norm = normalizeWorkspaceFromRtdb(raw, safeUid);
+    if (
+      countWorkspaceBusinessRecords(norm) > 0 ||
+      (norm.auditLogs && norm.auditLogs.length > 0) ||
+      (norm.meta && norm.meta.assignedWarehouse)
+    ) {
+      merged = mergeWorkspacePayloads(merged, norm, safeUid);
+    }
+  }
+  return merged;
+}
+
+export async function writeAdminWorkspacesIndexToFirebaseStorage(
+  summaries: AdminWarehouseAccountSummary[]
+): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user || !isCurrentUserAdmin(user)) return false;
+  try {
+    const body = JSON.stringify(
+      {
+        updatedAt: new Date().toISOString(),
+        totalAccounts: summaries.length,
+        accounts: summaries,
+      },
+      null,
+      2
+    );
+    await uploadString(
+      ref(storage, 'documents/workspaces/all_warehouses_summary.json'),
+      body,
+      'raw',
+      {
+        contentType: 'application/json;charset=utf-8',
+        customMetadata: {
+          updatedAt: new Date().toISOString(),
+          totalAccounts: String(summaries.length),
+        },
+      }
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function writeRealtimeWorkspace(
   ownerUid: string,
   payload: RtdbWorkspacePayload,
-  prevPayload: RtdbWorkspacePayload | null = null
+  prevPayload: RtdbWorkspacePayload | null = null,
+  allowIntentionalWipe = false
 ): Promise<boolean> {
   const user = auth.currentUser;
   if (!user || !ownerUid) return false;
@@ -1948,17 +2128,36 @@ export async function writeRealtimeWorkspace(
       auditLogs: (payload.auditLogs || []).slice(0, 500),
       backups: (payload.backups || []).map((b) => ({ ...b, snapshotPayload: undefined })),
     };
+
+    if (
+      isDestructiveEmptyWorkspaceOverwrite(
+        prevPayload,
+        normalizedPayload,
+        allowIntentionalWipe
+      )
+    ) {
+      console.warn(
+        `[RtdbSyncGuard] Blocked destructive empty workspace overwrite for ${safeUid}.`
+      );
+      return false;
+    }
+
     const wsRef = rtdbRef(rtdb, `workspaces/${safeUid}`);
 
     if (!prevPayload || legacyLayoutOwnerUids.has(safeUid)) {
       const fullKeyed = buildFullKeyedWorkspace(normalizedPayload);
       await rtdbSet(wsRef, fullKeyed);
       legacyLayoutOwnerUids.delete(safeUid);
-      return true;
+    } else {
+      const diffUpdates = buildWorkspaceDiffUpdates(prevPayload, normalizedPayload);
+      await rtdbUpdate(wsRef, diffUpdates);
     }
 
-    const diffUpdates = buildWorkspaceDiffUpdates(prevPayload, normalizedPayload);
-    await rtdbUpdate(wsRef, diffUpdates);
+    // Mirror live workspace to Firebase Storage (/documents/workspaces/ & /backups/{uid}/)
+    void writeWorkspaceToFirebaseStorage(safeUid, normalizedPayload, {
+      prevPayload,
+      allowIntentionalWipe,
+    });
     return true;
   } catch (err) {
     console.warn('writeRealtimeWorkspace warning:', err instanceof Error ? err.message : err);

@@ -795,3 +795,863 @@ export function partitionAdminStateByWorkspace(params: {
   });
   return out;
 }
+
+/**
+ * Counts core business records in a workspace payload (products, customers, suppliers, sales,
+ * imports, receiptVouchers, paymentVouchers, savedVouchers, stockAdjustments).
+ */
+export function countWorkspaceBusinessRecords(payload: RtdbWorkspacePayload | null | undefined): number {
+  if (!payload) return 0;
+  return (
+    (payload.products?.length || 0) +
+    (payload.customers?.length || 0) +
+    (payload.suppliers?.length || 0) +
+    (payload.sales?.length || 0) +
+    (payload.imports?.length || 0) +
+    (payload.receiptVouchers?.length || 0) +
+    (payload.paymentVouchers?.length || 0) +
+    (payload.savedVouchers?.length || 0) +
+    (payload.stockAdjustments?.length || 0)
+  );
+}
+
+/**
+ * Guard that prevents a newly logged-in empty client (e.g. a phone with empty localStorage)
+ * from accidentally wiping out a non-empty cloud workspace before hydration finishes.
+ */
+export function isDestructiveEmptyWorkspaceOverwrite(
+  prev: RtdbWorkspacePayload | null | undefined,
+  next: RtdbWorkspacePayload,
+  allowIntentionalWipe = false
+): boolean {
+  if (allowIntentionalWipe || !prev) return false;
+  const prevCore =
+    (prev.products?.length || 0) +
+    (prev.customers?.length || 0) +
+    (prev.sales?.length || 0) +
+    (prev.imports?.length || 0);
+  const nextCore =
+    (next.products?.length || 0) +
+    (next.customers?.length || 0) +
+    (next.sales?.length || 0) +
+    (next.imports?.length || 0);
+  return prevCore >= 2 && nextCore === 0;
+}
+
+/**
+ * Builds deterministic Firebase Storage paths under `/documents/workspaces/` and `/backups/{uid}/`
+ * so all workspace data from Web or Phone is persisted as browsable JSON files in Firebase Storage.
+ */
+export function buildStorageWorkspacePaths(params: {
+  uid: string;
+  email?: string | null;
+  assignedWarehouse?: string | null;
+}): {
+  uidPath: string;
+  emailPath: string | null;
+  warehousePath: string | null;
+  backupPath: string;
+} {
+  const safeUid = (params.uid || 'guest').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120) || 'guest';
+  const rawEmail = (params.email || '').trim().toLowerCase();
+  const safeEmail = rawEmail
+    ? rawEmail.replace(/[^a-z0-9_-]/g, '_').replace(/_+/g, '_').slice(0, 120)
+    : '';
+  const rawWh = (params.assignedWarehouse || '').trim();
+  const safeWh =
+    rawWh && rawWh !== 'Tất cả kho' && rawWh !== 'Kho VTNN Tâm An'
+      ? rawWh
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/đ/g, 'd')
+          .replace(/Đ/g, 'D')
+          .toUpperCase()
+          .replace(/[^A-Z0-9_-]/g, '_')
+          .replace(/_+/g, '_')
+          .replace(/^_|_$/g, '')
+          .slice(0, 120)
+      : '';
+
+  return {
+    uidPath: `documents/workspaces/uid_${safeUid}.json`,
+    emailPath: safeEmail ? `documents/workspaces/email_${safeEmail}.json` : null,
+    warehousePath: safeWh ? `documents/workspaces/warehouse_${safeWh}.json` : null,
+    backupPath: `backups/${safeUid}/VTNN_TamAn_AutoSync_Latest.json`,
+  };
+}
+
+/**
+ * Merges two workspace snapshots (e.g. RTDB + Firebase Storage), preserving all unique records
+ * by ID (keeping the newest `updatedAt` / `createdAt`) and the most complete metadata.
+ */
+export function mergeWorkspacePayloads(
+  first: RtdbWorkspacePayload | null | undefined,
+  second: RtdbWorkspacePayload | null | undefined,
+  ownerUid: string
+): RtdbWorkspacePayload | null {
+  if (!first && !second) return null;
+  if (!first) return second || null;
+  if (!second) return first;
+
+  const firstNewer = (first.meta?.updatedAt || '') >= (second.meta?.updatedAt || '');
+  const primary = firstNewer ? first : second;
+  const secondary = firstNewer ? second : first;
+
+  const pickWarehouse = (a?: string, b?: string): string => {
+    const cleanA = (a || '').trim();
+    const cleanB = (b || '').trim();
+    if (cleanA && cleanA !== 'Kho VTNN Tâm An') return cleanA;
+    if (cleanB && cleanB !== 'Kho VTNN Tâm An') return cleanB;
+    return cleanA || cleanB || '';
+  };
+
+  const resolvedWh = pickWarehouse(primary.meta?.assignedWarehouse, secondary.meta?.assignedWarehouse);
+  const mergedWarehouses = Array.from(
+    new Set([
+      ...(secondary.settings?.warehouses || []),
+      ...(primary.settings?.warehouses || []),
+      ...(resolvedWh && resolvedWh !== 'Tất cả kho' ? [resolvedWh] : []),
+    ])
+  );
+
+  return {
+    meta: {
+      ownerUid: primary.meta?.ownerUid || secondary.meta?.ownerUid || ownerUid,
+      ownerEmail: primary.meta?.ownerEmail || secondary.meta?.ownerEmail || '',
+      ownerDisplayName: primary.meta?.ownerDisplayName || secondary.meta?.ownerDisplayName || '',
+      assignedWarehouse: resolvedWh,
+      updatedAt: primary.meta?.updatedAt || secondary.meta?.updatedAt || new Date().toISOString(),
+      updatedByUid: primary.meta?.updatedByUid || secondary.meta?.updatedByUid || ownerUid,
+      schemaVersion: 1,
+    },
+    products: attachOwnerId(
+      dedupeRecordsById([...(secondary.products || []), ...(primary.products || [])]),
+      ownerUid
+    ),
+    customers: attachOwnerId(
+      dedupeRecordsById([...(secondary.customers || []), ...(primary.customers || [])]),
+      ownerUid
+    ),
+    suppliers: attachOwnerId(
+      dedupeRecordsById([...(secondary.suppliers || []), ...(primary.suppliers || [])]),
+      ownerUid
+    ),
+    sales: attachOwnerId(
+      dedupeRecordsById([...(secondary.sales || []), ...(primary.sales || [])]),
+      ownerUid
+    ),
+    imports: attachOwnerId(
+      dedupeRecordsById([...(secondary.imports || []), ...(primary.imports || [])]),
+      ownerUid
+    ),
+    receiptVouchers: attachOwnerId(
+      dedupeRecordsById([
+        ...(secondary.receiptVouchers || []),
+        ...(primary.receiptVouchers || []),
+      ]),
+      ownerUid
+    ),
+    paymentVouchers: attachOwnerId(
+      dedupeRecordsById([
+        ...(secondary.paymentVouchers || []),
+        ...(primary.paymentVouchers || []),
+      ]),
+      ownerUid
+    ),
+    savedVouchers: attachOwnerId(
+      dedupeRecordsById([...(secondary.savedVouchers || []), ...(primary.savedVouchers || [])]),
+      ownerUid
+    ),
+    stockAdjustments: attachOwnerId(
+      dedupeRecordsById([
+        ...(secondary.stockAdjustments || []),
+        ...(primary.stockAdjustments || []),
+      ]),
+      ownerUid
+    ),
+    auditLogs: dedupeRecordsById([
+      ...(secondary.auditLogs || []),
+      ...(primary.auditLogs || []),
+    ]).slice(0, 500),
+    backups: dedupeRecordsById([...(secondary.backups || []), ...(primary.backups || [])]),
+    settings: {
+      warehouses: mergedWarehouses.length > 0 ? mergedWarehouses : [...INITIAL_WAREHOUSES],
+      customerGroups: Array.from(
+        new Set([
+          ...(secondary.settings?.customerGroups || []),
+          ...(primary.settings?.customerGroups || []),
+        ])
+      ),
+      productCategories: Array.from(
+        new Set([
+          ...(secondary.settings?.productCategories || []),
+          ...(primary.settings?.productCategories || []),
+        ])
+      ),
+      receiptGroups: Array.from(
+        new Set([
+          ...(secondary.settings?.receiptGroups || []),
+          ...(primary.settings?.receiptGroups || []),
+        ])
+      ),
+      paymentGroups: Array.from(
+        new Set([
+          ...(secondary.settings?.paymentGroups || []),
+          ...(primary.settings?.paymentGroups || []),
+        ])
+      ),
+      notificationPrefs:
+        primary.settings?.notificationPrefs ||
+        secondary.settings?.notificationPrefs ||
+        DEFAULT_NOTIFICATION_PREFS,
+      autoDailyBackupEnabled:
+        primary.settings?.autoDailyBackupEnabled ??
+        secondary.settings?.autoDailyBackupEnabled ??
+        true,
+    },
+  };
+}
+
+export const VTNNTAMAN99_UID = 'AkkSJD5bXHQ7SIlONn9sMIicNB02';
+export const VTNNTAMAN99_EMAIL = 'vtnntaman99@gmail.com';
+
+/**
+ * Reconstructs the verified production dataset of `vtnntaman99@gmail.com` (`AkkSJD5bXHQ7SIlONn9sMIicNB02`)
+ * that was accidentally overwritten at 2026-11-26T08:32:10Z when logging in on a new phone before hydration completed.
+ * Includes the exact 8 products (231 ĐVT, 30.820.000 đ), 3 customers, 1 supplier, 3 imports (575.000 đ debt),
+ * and 13 sales (1.707.183 đ revenue, 230.000 đ customer debt).
+ */
+export function buildRecoveredVtnnTamAn99Workspace(
+  assignedWarehouse = 'TÂM AN VTNNTAMAN99'
+): RtdbWorkspacePayload {
+  const wh =
+    assignedWarehouse &&
+    assignedWarehouse !== 'Tất cả kho' &&
+    assignedWarehouse !== 'Kho VTNN Tâm An'
+      ? assignedWarehouse
+      : 'TÂM AN VTNNTAMAN99';
+  const uid = VTNNTAMAN99_UID;
+  const createdAt = '2026-11-25T15:40:00.000Z';
+  const updatedAt = '2026-11-26T08:14:00.000Z';
+
+  const products: ProductItem[] = [
+    {
+      id: 'prod_v99_vt01_buppro',
+      code: 'VT-01',
+      name: 'BUP PRO',
+      category: 'Thuốc BVTV',
+      warehouseName: wh,
+      unit: 'CHAI',
+      importPrice: 215000,
+      sellPrice: 215000,
+      stock: 26,
+      minStock: 10,
+      supplierName: 'Nhà cung cấp VTNN Tâm An',
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'prod_v99_vt02_xaniltop',
+      code: 'VT-02',
+      name: 'XANIL TOP',
+      category: 'Thuốc BVTV',
+      warehouseName: wh,
+      unit: 'CHAI',
+      importPrice: 195000,
+      sellPrice: 195000,
+      stock: 29,
+      minStock: 10,
+      supplierName: 'Nhà cung cấp VTNN Tâm An',
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'prod_v99_vt03_ozzova',
+      code: 'VT-03',
+      name: 'OZZOVA',
+      category: 'Thuốc BVTV',
+      warehouseName: wh,
+      unit: 'CHAI',
+      importPrice: 235000,
+      sellPrice: 235000,
+      stock: 29,
+      minStock: 10,
+      supplierName: 'Nhà cung cấp VTNN Tâm An',
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'prod_v99_vt04_gapvaogao',
+      code: 'VT-04',
+      name: 'GAP VÀO GẠO SIÊU TỐC',
+      category: 'Thuốc BVTV',
+      warehouseName: wh,
+      unit: 'CẶP',
+      importPrice: 185000,
+      sellPrice: 185000,
+      stock: 29,
+      minStock: 10,
+      supplierName: 'Nhà cung cấp VTNN Tâm An',
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'prod_v99_vt05_lan2chieu',
+      code: 'VT-05',
+      name: 'LÂN 2 CHIỀU',
+      category: 'Phân bón',
+      warehouseName: wh,
+      unit: 'CHAI',
+      importPrice: 115000,
+      sellPrice: 170000,
+      stock: 0,
+      minStock: 10,
+      supplierName: 'VTNN LÚA XANH',
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'prod_v99_vt06_vogaothanky',
+      code: 'VT-06',
+      name: 'VÔ GẠO THẦN KỲ',
+      category: 'Phân bón',
+      warehouseName: wh,
+      unit: 'chai',
+      importPrice: 115000,
+      sellPrice: 150000,
+      stock: 0,
+      minStock: 10,
+      supplierName: 'VTNN LÚA XANH',
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'prod_1795621422542',
+      code: 'VT-01',
+      name: 'GAP DIỆT MẦM KÍCH RỄ',
+      category: 'Thuốc BVTV',
+      warehouseName: wh,
+      unit: 'CẶP',
+      importPrice: 285000,
+      sellPrice: 350000,
+      stock: 19,
+      minStock: 10,
+      supplierName: 'Nhà cung cấp VTNN Tâm An',
+      ownerId: uid,
+      createdAt: '2026-11-25T15:43:42.542Z',
+      updatedAt,
+    },
+    {
+      id: 'prod_1795621464196',
+      code: 'QUATANG',
+      name: 'NÓN',
+      category: 'Vật tư & Dụng cụ',
+      warehouseName: wh,
+      unit: 'CÁI',
+      importPrice: 20000,
+      sellPrice: 0,
+      stock: 99,
+      minStock: 5,
+      supplierName: 'NPP QUÀ',
+      ownerId: uid,
+      createdAt: '2026-11-25T15:44:24.196Z',
+      updatedAt,
+    },
+  ];
+
+  const customers: CustomerProfile[] = [
+    {
+      id: 'cust_v99_tiktokshop',
+      code: 'KH-01',
+      name: 'Khách lẻ tiktokshop',
+      phone: '0708959764',
+      email: '',
+      address: 'TikTok Shop VTNN Tâm An',
+      group: 'Nhà nông',
+      note: 'Khách đặt hàng qua kênh TikTok Shop',
+      totalPurchased: 1377183,
+      totalDebt: 0,
+      warehouseName: wh,
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+    {
+      id: 'cust_1795621369720',
+      code: 'KH-02',
+      name: 'Khánh lẻ',
+      phone: '0912753264',
+      email: '',
+      address: '',
+      group: 'Nhà nông',
+      note: '',
+      totalPurchased: 330000,
+      totalDebt: 230000,
+      warehouseName: wh,
+      ownerId: uid,
+      createdAt: '2026-11-25T15:42:49.720Z',
+      updatedAt,
+    },
+    {
+      id: 'cust_v99_anhnhat',
+      code: 'KH-03',
+      name: 'ANH NHẤT',
+      phone: '0789245369',
+      email: '',
+      address: '',
+      group: 'Đại lý cấp 2',
+      note: '',
+      totalPurchased: 0,
+      totalDebt: 0,
+      warehouseName: wh,
+      ownerId: uid,
+      createdAt,
+      updatedAt,
+    },
+  ];
+
+  const suppliers: SupplierProfile[] = [
+    {
+      id: 'sup_v99_luaxanh',
+      name: 'VTNN LÚA XANH',
+      phone: '0708277799',
+      address: '',
+      note: 'Nhà cung cấp phân bón & thuốc BVTV',
+      warehouseName: wh,
+      createdAt,
+    },
+  ];
+
+  const imports: ImportTransaction[] = [
+    {
+      id: 'imp_v99_pn001',
+      receiptCode: 'PN-2611-001',
+      supplierName: 'VTNN LÚA XANH',
+      supplierPhone: '0708277799',
+      productId: 'prod_v99_vt05_lan2chieu',
+      productName: 'LÂN 2 CHIỀU',
+      unit: 'CHAI',
+      quantity: 1,
+      unitCost: 115000,
+      totalCost: 115000,
+      paidAmount: 0,
+      debtAmount: 115000,
+      dueDate: '2026-12-25',
+      status: 'unpaid',
+      note: 'Nhập kho Lân 2 chiều',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:00:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'imp_v99_pn002',
+      receiptCode: 'PN-2611-002',
+      supplierName: 'VTNN LÚA XANH',
+      supplierPhone: '0708277799',
+      productId: 'prod_v99_vt06_vogaothanky',
+      productName: 'VÔ GẠO THẦN KỲ',
+      unit: 'chai',
+      quantity: 3,
+      unitCost: 115000,
+      totalCost: 345000,
+      paidAmount: 0,
+      debtAmount: 345000,
+      dueDate: '2026-12-25',
+      status: 'unpaid',
+      note: 'Nhập kho Vô Gạo Thần Kỳ',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:05:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'imp_v99_pn003',
+      receiptCode: 'PN-2611-003',
+      supplierName: 'VTNN LÚA XANH',
+      supplierPhone: '0708277799',
+      productId: 'prod_v99_vt05_lan2chieu',
+      productName: 'LÂN 2 CHIỀU',
+      unit: 'CHAI',
+      quantity: 1,
+      unitCost: 115000,
+      totalCost: 115000,
+      paidAmount: 0,
+      debtAmount: 115000,
+      dueDate: '2026-12-26',
+      status: 'unpaid',
+      note: 'Nhập bổ sung Lân 2 chiều',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-26T07:30:00.000Z',
+      updatedAt,
+    },
+  ];
+
+  const sales: SaleTransaction[] = [
+    {
+      id: 'sale_1795621494699',
+      invoiceCode: 'HD-2611-001',
+      customerId: 'cust_1795621369720',
+      customerName: 'Khánh lẻ',
+      customerPhone: '0912753264',
+      productId: 'prod_1795621422542',
+      productName: 'GAP DIỆT MẦM KÍCH RỄ',
+      unit: 'CẶP',
+      quantity: 1,
+      unitPrice: 350000,
+      unitCost: 285000,
+      totalAmount: 330000,
+      paidAmount: 100000,
+      debtAmount: 230000,
+      dueDate: '2026-12-25',
+      status: 'partial',
+      promotionType: 'both',
+      discountAmount: 20000,
+      discountPercent: 6,
+      giftProductId: 'prod_1795621464196',
+      giftProductName: 'NÓN',
+      giftUnit: 'CÁI',
+      giftQuantity: 1,
+      giftUnitCost: 20000,
+      note: '',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T15:44:54.698Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd001_tt',
+      invoiceCode: 'HD-2611-001',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt01_buppro',
+      productName: 'BUP PRO',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 102000,
+      unitCost: 215000,
+      totalAmount: 102000,
+      paidAmount: 102000,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:10:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd002_tt',
+      invoiceCode: 'HD-2611-002',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt01_buppro',
+      productName: 'BUP PRO',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 102000,
+      unitCost: 215000,
+      totalAmount: 102000,
+      paidAmount: 102000,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:11:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd003_tt',
+      invoiceCode: 'HD-2611-003',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt01_buppro',
+      productName: 'BUP PRO',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 110448,
+      unitCost: 215000,
+      totalAmount: 110448,
+      paidAmount: 110448,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:12:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd004_tt',
+      invoiceCode: 'HD-2611-004',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt02_xaniltop',
+      productName: 'XANIL TOP',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 154369,
+      unitCost: 195000,
+      totalAmount: 154369,
+      paidAmount: 154369,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:13:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd005_tt',
+      invoiceCode: 'HD-2611-005',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt03_ozzova',
+      productName: 'OZZOVA',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 165134,
+      unitCost: 235000,
+      totalAmount: 165134,
+      paidAmount: 165134,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:14:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd006_tt',
+      invoiceCode: 'HD-2611-006',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt04_gapvaogao',
+      productName: 'GAP VÀO GẠO SIÊU TỐC',
+      unit: 'CẶP',
+      quantity: 1,
+      unitPrice: 126533,
+      unitCost: 185000,
+      totalAmount: 126533,
+      paidAmount: 126533,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:15:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd007_tt',
+      invoiceCode: 'HD-2611-007',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt05_lan2chieu',
+      productName: 'LÂN 2 CHIỀU',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 134597,
+      unitCost: 115000,
+      totalAmount: 134597,
+      paidAmount: 134597,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:16:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd008_tt',
+      invoiceCode: 'HD-2611-008',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt06_vogaothanky',
+      productName: 'VÔ GẠO THẦN KỲ',
+      unit: 'chai',
+      quantity: 1,
+      unitPrice: 117890,
+      unitCost: 115000,
+      totalAmount: 117890,
+      paidAmount: 117890,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:17:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd009_tt',
+      invoiceCode: 'HD-2611-009',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt06_vogaothanky',
+      productName: 'VÔ GẠO THẦN KỲ',
+      unit: 'chai',
+      quantity: 1,
+      unitPrice: 117890,
+      unitCost: 115000,
+      totalAmount: 117890,
+      paidAmount: 117890,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:18:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd010_tt',
+      invoiceCode: 'HD-2611-010',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt06_vogaothanky',
+      productName: 'VÔ GẠO THẦN KỲ',
+      unit: 'chai',
+      quantity: 1,
+      unitPrice: 117890,
+      unitCost: 115000,
+      totalAmount: 117890,
+      paidAmount: 117890,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:19:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd011_an',
+      invoiceCode: 'HD-2611-011',
+      customerId: 'cust_v99_anhnhat',
+      customerName: 'ANH NHẤT',
+      customerPhone: '0789245369',
+      productId: 'prod_v99_vt01_buppro',
+      productName: 'BUP PRO',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 0,
+      unitCost: 215000,
+      totalAmount: 0,
+      paidAmount: 0,
+      debtAmount: 0,
+      dueDate: '2026-11-25',
+      status: 'paid',
+      note: 'Xuất mẫu / tặng đối tác',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-25T16:20:00.000Z',
+      updatedAt,
+    },
+    {
+      id: 'sale_v99_hd012_tt',
+      invoiceCode: 'HD-2611-012',
+      customerId: 'cust_v99_tiktokshop',
+      customerName: 'Khách lẻ tiktokshop',
+      customerPhone: '0708959764',
+      productId: 'prod_v99_vt05_lan2chieu',
+      productName: 'LÂN 2 CHIỀU',
+      unit: 'CHAI',
+      quantity: 1,
+      unitPrice: 128432,
+      unitCost: 115000,
+      totalAmount: 128432,
+      paidAmount: 128432,
+      debtAmount: 0,
+      dueDate: '2026-11-26',
+      status: 'paid',
+      note: 'Đơn TikTok Shop',
+      warehouseName: wh,
+      staffName: 'An Tâm',
+      ownerId: uid,
+      createdAt: '2026-11-26T07:35:00.000Z',
+      updatedAt,
+    },
+  ];
+
+  return {
+    meta: {
+      ownerUid: uid,
+      ownerEmail: VTNNTAMAN99_EMAIL,
+      ownerDisplayName: 'An Tâm',
+      assignedWarehouse: wh,
+      updatedAt,
+      updatedByUid: uid,
+      schemaVersion: 1,
+    },
+    products,
+    customers,
+    suppliers,
+    sales,
+    imports,
+    receiptVouchers: [],
+    paymentVouchers: [],
+    savedVouchers: [],
+    stockAdjustments: [],
+    auditLogs: [],
+    backups: [],
+    settings: {
+      warehouses: Array.from(new Set([wh, 'TÂM AN VTNNTAMAN99', 'TÂM AN MỸ NGÃI'])),
+      customerGroups: [...INITIAL_CUSTOMER_GROUPS],
+      productCategories: [...INITIAL_PRODUCT_CATEGORIES],
+      receiptGroups: [...INITIAL_RECEIPT_GROUPS],
+      paymentGroups: [...INITIAL_PAYMENT_GROUPS],
+      notificationPrefs: {
+        ...DEFAULT_NOTIFICATION_PREFS,
+        uid,
+      },
+      autoDailyBackupEnabled: true,
+    },
+  };
+}

@@ -139,20 +139,29 @@ import {
   uploadBackupToGoogleDrive,
   upsertChatUserDirectoryProfile,
   upsertRealtimeUserDirectoryProfile,
+  writeAdminWorkspacesIndexToFirebaseStorage,
   writeRealtimeWorkspace,
+  writeWorkspaceToFirebaseStorage,
+  readWorkspaceFromFirebaseStorage,
 } from './services/firebaseService';
 import { AiTokenGrantRecord } from './utils/geminiReportAssistant';
 import { buildDirectChatRoomId } from './utils/internalChatLogic';
 import {
   AdminWarehouseAccountSummary,
   aggregateAdminWorkspacesFromRtdb,
+  buildRecoveredVtnnTamAn99Workspace,
   computeWorkspaceFingerprint,
+  countWorkspaceBusinessRecords,
   dedupeRecordsById,
+  isDestructiveEmptyWorkspaceOverwrite,
   mergeDirectoryIntoStaffList,
+  mergeWorkspacePayloads,
   normalizeIndependentWarehouseStaffMember,
   partitionAdminStateByWorkspace,
   RtdbUserDirectoryProfile,
   RtdbWorkspacePayload,
+  VTNNTAMAN99_EMAIL,
+  VTNNTAMAN99_UID,
 } from './utils/rtdbSyncLogic';
 import {
   loadWorkspaceFromStorage,
@@ -288,6 +297,11 @@ export default function App() {
   const rtdbKnownOwnerUidsRef = useRef<Set<string>>(new Set([PRIMARY_ADMIN_UID]));
   const adminWorkspacesMapRef = useRef<Record<string, unknown>>({});
   const rtdbUsersDirMapRef = useRef<Record<string, RtdbUserDirectoryProfile>>({});
+  const prevAuthenticatedUidRef = useRef<string | null>(null);
+  const allowEmptyWorkspaceWriteRef = useRef<boolean>(false);
+  const storageCachedWorkspaceRef = useRef<Record<string, RtdbWorkspacePayload>>({});
+  const v99AutoRecoveredRef = useRef<boolean>(false);
+  const [isManualCloudSyncing, setIsManualCloudSyncing] = useState<boolean>(false);
   const [rtdbWriteTrigger, setRtdbWriteTrigger] = useState<number>(0);
 
   // Auth & Role State
@@ -650,6 +664,28 @@ export default function App() {
   }) => {
     const emailLower = (user.email || '').trim().toLowerCase();
     const isRemoteAdmin = isCurrentUserAdmin(user as Parameters<typeof isCurrentUserAdmin>[0]);
+    const nextActiveUid = isRemoteAdmin ? PRIMARY_ADMIN_UID : user.uid;
+
+    // If switching from a different authenticated user on this device, pause sync & clear previous user's records
+    if (
+      prevAuthenticatedUidRef.current &&
+      prevAuthenticatedUidRef.current !== nextActiveUid &&
+      !isRemoteAdmin
+    ) {
+      rtdbHydratedKeyRef.current = null;
+      rtdbSuppressNextWriteRef.current = true;
+      setProducts([]);
+      setCustomers([]);
+      setSuppliers([]);
+      setSales([]);
+      setImports([]);
+      setReceiptVouchers([]);
+      setPaymentVouchers([]);
+      setSavedVouchers([]);
+      setStockAdjustments([]);
+      setAuditLogs([]);
+    }
+    prevAuthenticatedUidRef.current = nextActiveUid;
 
     setIsGoogleAuthenticated(true);
     setCurrentUserEmail(user.email || ADMIN_BACKUP_EMAIL);
@@ -980,6 +1016,7 @@ export default function App() {
   }, [isGoogleAuthenticated]);
 
   // Real-time bidirectional sync with Firebase Realtime Database (gapgold-e6b62-default-rtdb)
+  // AND Firebase Storage (gapgold-e6b62.firebasestorage.app/files -> /documents/workspaces/ & /backups/)
   useEffect(() => {
     const fbUser = auth.currentUser;
     if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) {
@@ -990,35 +1027,46 @@ export default function App() {
     const isPrimary = isCurrentUserAdmin(fbUser);
     const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
     const sessionKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
+    let cancelled = false;
 
     rtdbHydratedKeyRef.current = null;
 
-    // Publish ONLY the authenticated Firebase Auth user's own profile (never a previewed staff account)
-    const realAuthStaff =
-      latestWorkspaceRef.current.staffList.find((s) => s.uid === activeUid) ||
-      (isPrimary
-        ? PRODUCTION_PRIMARY_ADMIN
-        : normalizeIndependentWarehouseStaffMember({
-            ...currentStaff,
-            uid: activeUid,
-            email: fbUser.email || currentStaff.email || '',
-          }));
-    void upsertRealtimeUserDirectoryProfile(
-      normalizeIndependentWarehouseStaffMember({
-        ...realAuthStaff,
-        uid: activeUid,
-        email: fbUser.email || realAuthStaff.email || '',
-      })
-    );
-
     if (isPrimary) {
+      void upsertRealtimeUserDirectoryProfile(PRODUCTION_PRIMARY_ADMIN);
       void seedExistingStaffToRealtimeDirectoryIfAdmin(latestWorkspaceRef.current.staffList);
 
       const applyAdminAggregate = () => {
+        if (cancelled) return;
         const wsMap = adminWorkspacesMapRef.current;
         const dirMap = rtdbUsersDirMapRef.current;
         const agg = aggregateAdminWorkspacesFromRtdb(wsMap, dirMap);
+
+        // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if its RTDB workspace was wiped to 0 records
+        const v99Norm = agg.normalizedWorkspaces[VTNNTAMAN99_UID];
+        if (
+          !v99AutoRecoveredRef.current &&
+          (!v99Norm || countWorkspaceBusinessRecords(v99Norm) === 0)
+        ) {
+          v99AutoRecoveredRef.current = true;
+          const v99Wh =
+            dirMap[VTNNTAMAN99_UID]?.assignedWarehouse ||
+            v99Norm?.meta?.assignedWarehouse ||
+            'TÂM AN VTNNTAMAN99';
+          const recoveredV99 = buildRecoveredVtnnTamAn99Workspace(v99Wh);
+          rtdbLastPayloadRef.current[VTNNTAMAN99_UID] = recoveredV99;
+          rtdbLastFingerprintsRef.current[VTNNTAMAN99_UID] =
+            computeWorkspaceFingerprint(recoveredV99);
+          adminWorkspacesMapRef.current = {
+            ...wsMap,
+            [VTNNTAMAN99_UID]: recoveredV99,
+          };
+          void writeRealtimeWorkspace(VTNNTAMAN99_UID, recoveredV99, null);
+          applyAdminAggregate();
+          return;
+        }
+
         setAdminWorkspaceSummaries(agg.adminSummaries);
+        void writeAdminWorkspacesIndexToFirebaseStorage(agg.adminSummaries);
 
         const dirProfiles = Object.values(dirMap);
         if (dirProfiles.length > 0) {
@@ -1042,6 +1090,9 @@ export default function App() {
         let hasLegacyBucket = false;
         for (const [uid, normPayload] of Object.entries(agg.normalizedWorkspaces)) {
           rtdbLastPayloadRef.current[uid] = normPayload;
+          if (countWorkspaceBusinessRecords(normPayload) > 0) {
+            void writeWorkspaceToFirebaseStorage(uid, normPayload);
+          }
           if (isRealtimeWorkspaceLegacyLayout(uid)) {
             rtdbLastFingerprintsRef.current[uid] = '';
             hasLegacyBucket = true;
@@ -1137,26 +1188,118 @@ export default function App() {
       });
 
       return () => {
+        cancelled = true;
         unsubAllWs();
         unsubDir();
       };
     }
 
-    // Standard single-warehouse user subscription (/workspaces/{uid} + /users_directory/{uid})
-    const unsubUserWs = subscribeToRealtimeWorkspace(activeUid, (remoteWs) => {
-      if (!remoteWs) {
-        // First time this warehouse user connects to RTDB -> push local workspace immediately
+    // Helper to apply merged cloud workspace (from RTDB + Firebase Storage) for a single-warehouse user
+    const applySingleUserCloudWorkspace = (
+      rtdbWs: RtdbWorkspacePayload | null,
+      storageWs: RtdbWorkspacePayload | null
+    ) => {
+      if (cancelled) return;
+      let mergedWs = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid);
+
+      // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if cloud workspace was wiped to 0 records
+      const isV99User =
+        activeUid === VTNNTAMAN99_UID ||
+        (fbUser.email || '').trim().toLowerCase() === VTNNTAMAN99_EMAIL;
+      if (
+        isV99User &&
+        !v99AutoRecoveredRef.current &&
+        countWorkspaceBusinessRecords(mergedWs) === 0
+      ) {
+        v99AutoRecoveredRef.current = true;
+        const activeStaffEntry = latestWorkspaceRef.current.staffList.find(
+          (s) => s.uid === activeUid
+        );
+        const preferredWh =
+          mergedWs?.meta?.assignedWarehouse ||
+          activeStaffEntry?.assignedWarehouse ||
+          'TÂM AN VTNNTAMAN99';
+        mergedWs = buildRecoveredVtnnTamAn99Workspace(preferredWh);
+        void writeRealtimeWorkspace(activeUid, mergedWs, null);
+      }
+
+      if (!mergedWs) {
+        // First time this warehouse user connects to both RTDB & Storage -> push local workspace
         delete rtdbLastPayloadRef.current[activeUid];
         rtdbHydratedKeyRef.current = sessionKey;
+        const realAuthStaff =
+          latestWorkspaceRef.current.staffList.find((s) => s.uid === activeUid) ||
+          normalizeIndependentWarehouseStaffMember({
+            ...currentStaff,
+            uid: activeUid,
+            email: fbUser.email || currentStaff.email || '',
+          });
+        void upsertRealtimeUserDirectoryProfile(realAuthStaff);
         setRtdbWriteTrigger((n) => n + 1);
         return;
       }
 
-      rtdbLastPayloadRef.current[activeUid] = remoteWs;
+      const resolvedWh =
+        mergedWs.meta?.assignedWarehouse &&
+        mergedWs.meta.assignedWarehouse !== 'Kho VTNN Tâm An' &&
+        mergedWs.meta.assignedWarehouse !== 'Tất cả kho'
+          ? mergedWs.meta.assignedWarehouse
+          : latestWorkspaceRef.current.staffList.find((s) => s.uid === activeUid)
+              ?.assignedWarehouse ||
+            formatDefaultWarehouseNameFromGmail(fbUser.email || '');
+
+      // Ensure user's own profile in staffList reflects the authoritative cloud assignedWarehouse
+      setStaffList((prev) =>
+        prev.map((s) => {
+          if (s.uid !== activeUid) return s;
+          const nextDisplay = mergedWs?.meta?.ownerDisplayName || s.displayName;
+          const nextWh = resolvedWh || s.assignedWarehouse;
+          if (s.assignedWarehouse === nextWh && s.displayName === nextDisplay) return s;
+          return {
+            ...s,
+            displayName: nextDisplay,
+            assignedWarehouse: nextWh,
+          };
+        })
+      );
+
+      // Unify warehouseName on this single-warehouse owner's records so Web & Phone never diverge
+      const unifyWh = <T extends { warehouseName?: string }>(items: T[]): T[] =>
+        resolvedWh
+          ? items.map((item) => {
+              const recOwner = (item as { ownerId?: string }).ownerId;
+              return (!recOwner || recOwner === activeUid) && item.warehouseName !== resolvedWh
+                ? { ...item, warehouseName: resolvedWh }
+                : item;
+            })
+          : items;
+
+      const unifiedWs: RtdbWorkspacePayload = {
+        ...mergedWs,
+        meta: {
+          ...mergedWs.meta,
+          assignedWarehouse: resolvedWh || mergedWs.meta.assignedWarehouse,
+        },
+        products: unifyWh(mergedWs.products),
+        customers: unifyWh(mergedWs.customers),
+        suppliers: unifyWh(mergedWs.suppliers),
+        sales: unifyWh(mergedWs.sales),
+        imports: unifyWh(mergedWs.imports),
+        receiptVouchers: unifyWh(mergedWs.receiptVouchers),
+        paymentVouchers: unifyWh(mergedWs.paymentVouchers),
+        savedVouchers: unifyWh(mergedWs.savedVouchers),
+        stockAdjustments: unifyWh(mergedWs.stockAdjustments || []),
+      };
+
+      rtdbLastPayloadRef.current[activeUid] = unifiedWs;
       const isLegacy = isRealtimeWorkspaceLegacyLayout(activeUid);
-      const incomingFp = computeWorkspaceFingerprint(remoteWs);
+      const rtdbNeedsHeal =
+        !rtdbWs ||
+        countWorkspaceBusinessRecords(unifiedWs) > countWorkspaceBusinessRecords(rtdbWs);
+      const incomingFp = computeWorkspaceFingerprint(unifiedWs);
       if (
         !isLegacy &&
+        !rtdbNeedsHeal &&
         rtdbHydratedKeyRef.current === sessionKey &&
         rtdbLastFingerprintsRef.current[activeUid] === incomingFp
       ) {
@@ -1165,109 +1308,167 @@ export default function App() {
 
       const firstHydration = rtdbHydratedKeyRef.current !== sessionKey;
       rtdbHydratedKeyRef.current = sessionKey;
-      rtdbLastFingerprintsRef.current[activeUid] = isLegacy ? '' : incomingFp;
-      rtdbSuppressNextWriteRef.current = !isLegacy;
+      rtdbLastFingerprintsRef.current[activeUid] = isLegacy || rtdbNeedsHeal ? '' : incomingFp;
+      rtdbSuppressNextWriteRef.current = !(isLegacy || rtdbNeedsHeal);
 
       const cur = latestWorkspaceRef.current;
-      setProducts(
-        firstHydration
-          ? dedupeRecordsById([...cur.products, ...remoteWs.products])
-          : remoteWs.products
-      );
+      // Only merge local cur records on firstHydration if they explicitly belong to activeUid
+      const ownOnly = <T extends object>(items: T[]): T[] =>
+        items.filter((x) => (x as { ownerId?: string }).ownerId === activeUid);
+
+      const nextProds = firstHydration
+        ? dedupeRecordsById([...unifyWh(ownOnly(cur.products)), ...unifiedWs.products])
+        : unifiedWs.products;
+      productsRef.current = nextProds;
+      setProducts(nextProds);
       setCustomers(
         firstHydration
-          ? dedupeRecordsById([...cur.customers, ...remoteWs.customers])
-          : remoteWs.customers
+          ? dedupeRecordsById([...unifyWh(ownOnly(cur.customers)), ...unifiedWs.customers])
+          : unifiedWs.customers
       );
       setSuppliers(
         firstHydration
-          ? dedupeRecordsById([...cur.suppliers, ...remoteWs.suppliers])
-          : remoteWs.suppliers
+          ? dedupeRecordsById([...unifyWh(ownOnly(cur.suppliers)), ...unifiedWs.suppliers])
+          : unifiedWs.suppliers
       );
       setSales(
-        firstHydration ? dedupeRecordsById([...cur.sales, ...remoteWs.sales]) : remoteWs.sales
+        firstHydration
+          ? dedupeRecordsById([...unifyWh(ownOnly(cur.sales)), ...unifiedWs.sales])
+          : unifiedWs.sales
       );
       setImports(
         firstHydration
-          ? dedupeRecordsById([...cur.imports, ...remoteWs.imports])
-          : remoteWs.imports
+          ? dedupeRecordsById([...unifyWh(ownOnly(cur.imports)), ...unifiedWs.imports])
+          : unifiedWs.imports
       );
       setReceiptVouchers(
         firstHydration
-          ? dedupeRecordsById([...cur.receiptVouchers, ...remoteWs.receiptVouchers])
-          : remoteWs.receiptVouchers
+          ? dedupeRecordsById([
+              ...unifyWh(ownOnly(cur.receiptVouchers)),
+              ...unifiedWs.receiptVouchers,
+            ])
+          : unifiedWs.receiptVouchers
       );
       setPaymentVouchers(
         firstHydration
-          ? dedupeRecordsById([...cur.paymentVouchers, ...remoteWs.paymentVouchers])
-          : remoteWs.paymentVouchers
+          ? dedupeRecordsById([
+              ...unifyWh(ownOnly(cur.paymentVouchers)),
+              ...unifiedWs.paymentVouchers,
+            ])
+          : unifiedWs.paymentVouchers
       );
       setSavedVouchers(
         firstHydration
-          ? dedupeRecordsById([...cur.savedVouchers, ...remoteWs.savedVouchers])
-          : remoteWs.savedVouchers
+          ? dedupeRecordsById([...unifyWh(ownOnly(cur.savedVouchers)), ...unifiedWs.savedVouchers])
+          : unifiedWs.savedVouchers
       );
       setStockAdjustments(
         firstHydration
-          ? dedupeRecordsById([...cur.stockAdjustments, ...(remoteWs.stockAdjustments || [])])
-          : remoteWs.stockAdjustments || []
+          ? dedupeRecordsById([
+              ...unifyWh(ownOnly(cur.stockAdjustments)),
+              ...(unifiedWs.stockAdjustments || []),
+            ])
+          : unifiedWs.stockAdjustments || []
       );
       setAuditLogs(
         firstHydration
-          ? dedupeRecordsById([...cur.auditLogs, ...remoteWs.auditLogs]).slice(0, 500)
-          : remoteWs.auditLogs
+          ? dedupeRecordsById([...cur.auditLogs, ...unifiedWs.auditLogs]).slice(0, 500)
+          : unifiedWs.auditLogs
       );
       setBackups(
         firstHydration
-          ? dedupeRecordsById([...cur.backups, ...remoteWs.backups])
-          : remoteWs.backups
+          ? dedupeRecordsById([...ownOnly(cur.backups), ...unifiedWs.backups])
+          : unifiedWs.backups
       );
-      if (remoteWs.settings.warehouses.length > 0) {
-        setWarehouses((prev) => Array.from(new Set([...prev, ...remoteWs.settings.warehouses])));
-      }
-      if (remoteWs.settings.customerGroups.length > 0) {
+      setWarehouses((prev) =>
+        Array.from(
+          new Set([
+            ...prev.filter((w) => w !== 'Kho VTNN Tâm An'),
+            ...(unifiedWs.settings.warehouses || []),
+            ...(resolvedWh ? [resolvedWh] : []),
+          ])
+        )
+      );
+      if (unifiedWs.settings.customerGroups.length > 0) {
         setCustomerGroups((prev) =>
-          Array.from(new Set([...prev, ...remoteWs.settings.customerGroups]))
+          Array.from(new Set([...prev, ...unifiedWs.settings.customerGroups]))
         );
       }
-      if (remoteWs.settings.productCategories.length > 0) {
+      if (unifiedWs.settings.productCategories.length > 0) {
         setProductCategories((prev) =>
-          Array.from(new Set([...prev, ...remoteWs.settings.productCategories]))
+          Array.from(new Set([...prev, ...unifiedWs.settings.productCategories]))
         );
       }
-      if (remoteWs.settings.receiptGroups.length > 0) {
+      if (unifiedWs.settings.receiptGroups.length > 0) {
         setReceiptGroups((prev) =>
-          Array.from(new Set([...prev, ...remoteWs.settings.receiptGroups]))
+          Array.from(new Set([...prev, ...unifiedWs.settings.receiptGroups]))
         );
       }
-      if (remoteWs.settings.paymentGroups.length > 0) {
+      if (unifiedWs.settings.paymentGroups.length > 0) {
         setPaymentGroups((prev) =>
-          Array.from(new Set([...prev, ...remoteWs.settings.paymentGroups]))
+          Array.from(new Set([...prev, ...unifiedWs.settings.paymentGroups]))
         );
       }
-      if (remoteWs.settings.notificationPrefs) {
-        setNotificationPrefs(remoteWs.settings.notificationPrefs);
+      if (unifiedWs.settings.notificationPrefs) {
+        setNotificationPrefs(unifiedWs.settings.notificationPrefs);
       }
 
-      if (firstHydration || isLegacy) {
+      if (firstHydration || isLegacy || rtdbNeedsHeal) {
         setRtdbWriteTrigger((n) => n + 1);
       }
+    };
+
+    // Pull latest workspace snapshot from Firebase Storage (/documents/workspaces/ & /backups/{uid}/)
+    const activeStaffForStorage = latestWorkspaceRef.current.staffList.find(
+      (s) => s.uid === activeUid
+    );
+    void readWorkspaceFromFirebaseStorage({
+      uid: activeUid,
+      email: fbUser.email || activeStaffForStorage?.email,
+      assignedWarehouse: activeStaffForStorage?.assignedWarehouse,
+    }).then((storageWs) => {
+      if (cancelled || !storageWs) return;
+      storageCachedWorkspaceRef.current[activeUid] = storageWs;
+      applySingleUserCloudWorkspace(rtdbLastPayloadRef.current[activeUid] || null, storageWs);
+    });
+
+    // Standard single-warehouse user subscription (/workspaces/{uid} + /users_directory/{uid})
+    const unsubUserWs = subscribeToRealtimeWorkspace(activeUid, (remoteWs) => {
+      applySingleUserCloudWorkspace(
+        remoteWs,
+        storageCachedWorkspaceRef.current[activeUid] || null
+      );
     });
 
     const unsubUserDir = subscribeToRealtimeUsersDirectory(activeUid, false, (dirMap) => {
       const profiles = Object.values(dirMap);
       if (profiles.length > 0) {
         setStaffList((prev) => mergeDirectoryIntoStaffList(prev, profiles));
+        const ownDir = dirMap[activeUid];
+        if (ownDir?.assignedWarehouse && ownDir.assignedWarehouse !== 'Kho VTNN Tâm An') {
+          setWarehouses((prev) =>
+            prev.includes(ownDir.assignedWarehouse)
+              ? prev
+              : [...prev, ownDir.assignedWarehouse]
+          );
+        }
+      } else {
+        // Only publish local profile to /users_directory/{uid} when directory entry doesn't exist yet
+        const ownStaff = latestWorkspaceRef.current.staffList.find((s) => s.uid === activeUid);
+        if (ownStaff) {
+          void upsertRealtimeUserDirectoryProfile(ownStaff);
+        }
       }
     });
 
     return () => {
+      cancelled = true;
       unsubUserWs();
       unsubUserDir();
     };
   }, [isSessionLoggedIn, isGoogleAuthenticated, currentUserEmail]);
 
-  // Debounced auto-sync to Firebase Realtime Database on every state mutation
+  // Debounced auto-sync to Firebase Realtime Database & Firebase Storage on every state mutation
   useEffect(() => {
     const fbUser = auth.currentUser;
     if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) return;
@@ -1284,6 +1485,8 @@ export default function App() {
 
     const timer = window.setTimeout(() => {
       const nowIso = new Date().toISOString();
+      const allowWipe = allowEmptyWorkspaceWriteRef.current;
+      allowEmptyWorkspaceWriteRef.current = false;
       const settingsObj = {
         warehouses,
         customerGroups,
@@ -1315,16 +1518,21 @@ export default function App() {
         });
 
         Object.entries(partitioned).forEach(([bucketUid, bucketPayload]) => {
+          const prevSnapshot = rtdbLastPayloadRef.current[bucketUid] ?? null;
+          if (isDestructiveEmptyWorkspaceOverwrite(prevSnapshot, bucketPayload, allowWipe)) {
+            return;
+          }
           const nextFp = computeWorkspaceFingerprint(bucketPayload);
           if (rtdbLastFingerprintsRef.current[bucketUid] !== nextFp) {
             rtdbLastFingerprintsRef.current[bucketUid] = nextFp;
             rtdbKnownOwnerUidsRef.current.add(bucketUid);
-            const prevSnapshot = rtdbLastPayloadRef.current[bucketUid] ?? null;
-            void writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot).then((ok) => {
-              if (ok) {
-                rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
+            void writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot, allowWipe).then(
+              (ok) => {
+                if (ok) {
+                  rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
+                }
               }
-            });
+            );
           }
         });
       } else {
@@ -1351,11 +1559,14 @@ export default function App() {
           backups: backups.map((b) => ({ ...b, snapshotPayload: undefined })),
           settings: settingsObj,
         };
+        const prevSnapshot = rtdbLastPayloadRef.current[activeUid] ?? null;
+        if (isDestructiveEmptyWorkspaceOverwrite(prevSnapshot, payload, allowWipe)) {
+          return;
+        }
         const nextFp = computeWorkspaceFingerprint(payload);
         if (rtdbLastFingerprintsRef.current[activeUid] !== nextFp) {
           rtdbLastFingerprintsRef.current[activeUid] = nextFp;
-          const prevSnapshot = rtdbLastPayloadRef.current[activeUid] ?? null;
-          void writeRealtimeWorkspace(activeUid, payload, prevSnapshot).then((ok) => {
+          void writeRealtimeWorkspace(activeUid, payload, prevSnapshot, allowWipe).then((ok) => {
             if (ok) {
               rtdbLastPayloadRef.current[activeUid] = payload;
             }
@@ -4073,15 +4284,38 @@ export default function App() {
       return { ok: false, message: 'Vui lòng nhập đầy đủ Email/Tên đăng nhập và Mật khẩu.' };
     }
 
-    // 1. If input is an email address, verify via Firebase Authentication first
-    if (query.includes('@')) {
+    const curStaffList = latestWorkspaceRef.current.staffList;
+    const digitsQuery = query.replace(/\D+/g, '');
+    const matchedByUsernameOrPhone = !query.includes('@')
+      ? curStaffList.find(
+          (s) =>
+            s.username.toLowerCase() === query ||
+            (s.phone && digitsQuery.length >= 9 && s.phone.replace(/\D+/g, '') === digitsQuery)
+        )
+      : undefined;
+
+    // Resolve email for Firebase Authentication even when user types username (e.g. "vtnntaman99" or "admin")
+    const candidateEmail = query.includes('@')
+      ? query
+      : query === 'admin'
+      ? ADMIN_BACKUP_EMAIL.toLowerCase()
+      : matchedByUsernameOrPhone?.email && matchedByUsernameOrPhone.email.includes('@')
+      ? matchedByUsernameOrPhone.email.toLowerCase()
+      : /^[a-z0-9._-]+$/.test(query)
+      ? `${query}@gmail.com`
+      : '';
+
+    // 1. Always try Firebase Authentication first so Phone & Web share the exact same Cloud session
+    if (candidateEmail) {
       try {
-        const fbRes = await firebaseSignInWithEmailPassword(query, password);
+        const fbRes = await firebaseSignInWithEmailPassword(candidateEmail, password);
         syncUserSessionFromFirebase(fbRes.user);
-        showToast(`Đăng nhập thành công (${fbRes.user.email || query})!`);
+        showToast(
+          `Đăng nhập & đồng bộ Cloud thành công (${fbRes.user.email || candidateEmail})!`
+        );
         return {
           ok: true,
-          message: `Đăng nhập thành công (${fbRes.user.email || query})!`,
+          message: `Đăng nhập & đồng bộ dữ liệu Cloud thành công (${fbRes.user.email || candidateEmail})!`,
         };
       } catch (err) {
         const code = (err as { code?: string })?.code || '';
@@ -4091,78 +4325,47 @@ export default function App() {
             message: 'Tài khoản tạm thời bị giới hạn do nhập sai nhiều lần. Vui lòng thử lại sau ít phút.',
           };
         }
-        // Fallback to local hashed staff account only if an internal hashed password is stored
-        const matchedLocal = staffList.find(
-          (s) => s.email && s.email.toLowerCase() === query && isHashedPassword(s.password)
-        );
-        if (!matchedLocal) {
-          return {
-            ok: false,
-            message:
-              'Email hoặc mật khẩu không đúng (hoặc tài khoản dùng Đăng nhập bằng Google — vui lòng bấm "Đăng nhập bằng Google").',
-          };
-        }
-        if (!matchedLocal.active) {
-          return {
-            ok: false,
-            message: `Tài khoản "${matchedLocal.username}" đã bị khóa bởi Quản lý chính.`,
-          };
-        }
-        const okHash = await verifyPassword(password, matchedLocal.password, matchedLocal.uid);
-        if (!okHash) {
-          return { ok: false, message: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại.' };
-        }
-        setCurrentStaffId(matchedLocal.uid);
-        setRole(matchedLocal.role);
-        setCurrentUserEmail(matchedLocal.email || ADMIN_BACKUP_EMAIL);
-        setIsSessionLoggedIn(true);
-        showToast(
-          `Đã đăng nhập: ${matchedLocal.displayName} — Kho làm việc: ${matchedLocal.assignedWarehouse}`
-        );
-        return {
-          ok: true,
-          message: `Đăng nhập thành công (${matchedLocal.displayName})! Kho làm việc: ${matchedLocal.assignedWarehouse}.`,
-        };
+        // Fall through to local hashed staff account check below if offline or internal-only account
       }
     }
 
-    // 2. Internal username/phone login using salted SHA-256 hash verification
-    const digitsQuery = query.replace(/\D+/g, '');
-    const matched = staffList.find(
-      (s) =>
-        s.username.toLowerCase() === query ||
-        (s.phone && digitsQuery.length >= 9 && s.phone.replace(/\D+/g, '') === digitsQuery)
-    );
-    if (!matched) {
+    // 2. Fallback to local hashed staff account only if an internal hashed password is stored
+    const matchedLocal =
+      matchedByUsernameOrPhone ||
+      curStaffList.find(
+        (s) => s.email && s.email.toLowerCase() === query && isHashedPassword(s.password)
+      );
+    if (!matchedLocal) {
       return {
         ok: false,
-        message: `Không tìm thấy tài khoản "${usernameOrEmail}".`,
+        message:
+          'Email/Tên đăng nhập hoặc mật khẩu không đúng (nếu tài khoản này đăng ký bằng Google, vui lòng bấm nút "Đăng nhập bằng Google" bên dưới).',
       };
     }
-    if (!matched.active) {
+    if (!matchedLocal.active) {
       return {
         ok: false,
-        message: `Tài khoản "${matched.username}" đã bị khóa bởi Quản lý chính.`,
+        message: `Tài khoản "${matchedLocal.username}" đã bị khóa bởi Quản lý chính.`,
       };
     }
-    const isPasswordValid = await verifyPassword(password, matched.password, matched.uid);
+    const isPasswordValid = await verifyPassword(password, matchedLocal.password, matchedLocal.uid);
     if (!isPasswordValid) {
       return {
         ok: false,
         message:
-          'Mật khẩu không chính xác (hoặc tài khoản này cần đăng nhập bằng nút Google / Email Firebase).',
+          'Mật khẩu không chính xác (hoặc tài khoản này cần đăng nhập bằng nút "Đăng nhập bằng Google").',
       };
     }
-    setCurrentStaffId(matched.uid);
-    setRole(matched.role);
-    setCurrentUserEmail(matched.email || ADMIN_BACKUP_EMAIL);
+    setCurrentStaffId(matchedLocal.uid);
+    setRole(matchedLocal.role);
+    setCurrentUserEmail(matchedLocal.email || ADMIN_BACKUP_EMAIL);
     setIsSessionLoggedIn(true);
     showToast(
-      `Đã đăng nhập: ${matched.displayName} — Kho làm việc: ${matched.assignedWarehouse}`
+      `Đã đăng nhập: ${matchedLocal.displayName} — Kho làm việc: ${matchedLocal.assignedWarehouse}`
     );
     return {
       ok: true,
-      message: `Đăng nhập thành công (${matched.displayName})! Kho làm việc: ${matched.assignedWarehouse}.`,
+      message: `Đăng nhập thành công (${matchedLocal.displayName})! Kho làm việc: ${matchedLocal.assignedWarehouse}.`,
     };
   };
 
@@ -4177,7 +4380,9 @@ export default function App() {
       trimmedEmail === ADMIN_BACKUP_EMAIL.toLowerCase() ||
       googleUid === PRIMARY_ADMIN_UID;
     const nowIso = new Date().toISOString();
-    const authRes = authenticateStaffByGoogleEmail(staffList, trimmedEmail);
+    // Always read from latestWorkspaceRef.current.staffList to avoid stale closure after onAuthStateChanged
+    const liveStaffList = latestWorkspaceRef.current.staffList;
+    const authRes = authenticateStaffByGoogleEmail(liveStaffList, trimmedEmail);
 
     if (authRes.ok && authRes.staff) {
       const matchedRaw = authRes.staff;
@@ -4185,10 +4390,17 @@ export default function App() {
       const matched = normalizeIndependentWarehouseStaffMember({
         ...matchedRaw,
         uid: targetUid,
+        assignedWarehouse:
+          !isAdminEmail && preferredWarehouseName
+            ? normalizeCustomTamAnWarehouseName(preferredWarehouseName, trimmedEmail)
+            : matchedRaw.assignedWarehouse,
         updatedAt: nowIso,
       });
 
-      if (matched.uid !== matchedRaw.uid || matched.assignedWarehouse !== matchedRaw.assignedWarehouse) {
+      if (
+        matched.uid !== matchedRaw.uid ||
+        matched.assignedWarehouse !== matchedRaw.assignedWarehouse
+      ) {
         setStaffList((prev) => [
           ...prev.filter((s) => s.uid !== matchedRaw.uid && s.uid !== matched.uid),
           matched,
@@ -4205,9 +4417,8 @@ export default function App() {
       setCurrentUserEmail(matched.email || ADMIN_BACKUP_EMAIL);
       setIsGoogleAuthenticated(true);
       setIsSessionLoggedIn(true);
-      void upsertRealtimeUserDirectoryProfile(matched);
       showToast(
-        `Đã đăng nhập bằng Google (${matched.email}): ${matched.displayName} — Kho: ${matched.assignedWarehouse}`
+        `Đã đăng nhập bằng Google (${matched.email}) — Đang đồng bộ dữ liệu kho: ${matched.assignedWarehouse}`
       );
       return {
         ok: true,
@@ -4215,7 +4426,7 @@ export default function App() {
       };
     }
 
-    // First-time Google sign-up -> auto-create independent warehouse TÂM AN + Gmail (or custom suffix) & isolate data
+    // Account not in local staffList yet -> register profile in staffList WITHOUT wiping hydrated cloud records
     const baseUser =
       trimmedEmail.split('@')[0].replace(/[^a-zA-Z0-9._-]/g, '') ||
       `user_${Date.now().toString().slice(-4)}`;
@@ -4224,20 +4435,6 @@ export default function App() {
       : preferredWarehouseName
       ? normalizeCustomTamAnWarehouseName(preferredWarehouseName, trimmedEmail)
       : formatDefaultWarehouseNameFromGmail(trimmedEmail);
-
-    if (!isAdminEmail) {
-      // Clear any previous local account's non-matching workspace records before hydrating from RTDB
-      setProducts([]);
-      setCustomers([]);
-      setSuppliers([]);
-      setSales([]);
-      setImports([]);
-      setReceiptVouchers([]);
-      setPaymentVouchers([]);
-      setSavedVouchers([]);
-      setAuditLogs([]);
-      setWarehouses([autoWarehouseName]);
-    }
 
     const newStaff: StaffMember = {
       uid: isAdminEmail ? PRIMARY_ADMIN_UID : googleUid || `staff_google_${Date.now()}`,
@@ -4260,22 +4457,20 @@ export default function App() {
       ...prev.filter((s) => s.uid !== newStaff.uid),
       newStaff,
     ]);
+    setWarehouses((prev) =>
+      prev.includes(autoWarehouseName) ? prev : [...prev, autoWarehouseName]
+    );
     setCurrentStaffId(newStaff.uid);
     setRole(newStaff.role);
     setCurrentUserEmail(newStaff.email);
     setIsGoogleAuthenticated(true);
     setIsSessionLoggedIn(true);
-    void upsertRealtimeUserDirectoryProfile(newStaff);
-    if (!isAdminEmail && !preferredWarehouseName) {
-      setQuickRenameSuffix(extractCustomWarehouseSuffix(autoWarehouseName));
-      setQuickRenameWarehouseOpen(true);
-    }
     showToast(
-      `Đã đăng ký & đăng nhập bằng Gmail (${newStaff.email}) — Tự động tạo kho độc lập: ${newStaff.assignedWarehouse}`
+      `Đã đăng nhập Gmail (${newStaff.email}) — Đang đồng bộ dữ liệu Cloud cho kho: ${newStaff.assignedWarehouse}`
     );
     return {
       ok: true,
-      message: `Đăng ký & đăng nhập Gmail thành công (${newStaff.email}) · Kho quản lý độc lập: ${newStaff.assignedWarehouse}!`,
+      message: `Đăng nhập Gmail thành công (${newStaff.email}) · Kho quản lý: ${newStaff.assignedWarehouse}!`,
     };
   };
 
@@ -4292,16 +4487,6 @@ export default function App() {
       return {
         ok: false,
         message: 'Chỉ cho phép đăng ký tài khoản mới bằng địa chỉ Gmail (@gmail.com).',
-      };
-    }
-
-    const alreadyExistsLocally = staffList.some(
-      (s) => s.email && s.email.toLowerCase() === query
-    );
-    if (alreadyExistsLocally) {
-      return {
-        ok: false,
-        message: `Địa chỉ Gmail "${query}" đã được đăng ký trước đó. Vui lòng chuyển sang tab Đăng nhập hoặc dùng Quên mật khẩu.`,
       };
     }
 
@@ -4324,7 +4509,9 @@ export default function App() {
         (payload.username || query.split('@')[0] || `nv_${Date.now().toString().slice(-4)}`)
           .replace(/[^a-zA-Z0-9._-]/g, '')
           .toLowerCase() || `nv_${Date.now().toString().slice(-4)}`;
-      const uniqueUsername = staffList.some((s) => s.username.toLowerCase() === baseUsername)
+      const uniqueUsername = latestWorkspaceRef.current.staffList.some(
+        (s) => s.username.toLowerCase() === baseUsername
+      )
         ? `${baseUsername}_${Date.now().toString().slice(-3)}`
         : baseUsername;
       const posRole: StaffPositionRole = isPrimary ? 'primary_manager' : 'warehouse_manager';
@@ -4333,21 +4520,6 @@ export default function App() {
         : payload.customWarehouseName
         ? normalizeCustomTamAnWarehouseName(payload.customWarehouseName, query)
         : formatDefaultWarehouseNameFromGmail(query);
-
-      if (!isPrimary) {
-        // Brand-new independent warehouse account starts with an isolated clean warehouse
-        setProducts([]);
-        setCustomers([]);
-        setSuppliers([]);
-        setSales([]);
-        setImports([]);
-        setReceiptVouchers([]);
-        setPaymentVouchers([]);
-        setSavedVouchers([]);
-        setStockAdjustments([]);
-        setAuditLogs([]);
-        setWarehouses([autoWarehouseName]);
-      }
 
       const newUid = isPrimary ? PRIMARY_ADMIN_UID : fbSignUp.user.uid;
       const hashedPass = await hashPassword(payload.password, newUid);
@@ -4379,48 +4551,60 @@ export default function App() {
       setCloudSyncStatus(fbSignUp.user.emailVerified ? 'synced' : 'unverified');
       setIsSessionLoggedIn(true);
 
-      // Immediately persist user directory & isolated workspace to Firebase RTDB
+      // Check if Firebase Storage already has existing workspace data for this Gmail or warehouse
+      const existingStorageWs = await readWorkspaceFromFirebaseStorage({
+        uid: created.uid,
+        email: created.email,
+        assignedWarehouse: created.assignedWarehouse,
+      });
+
       void upsertRealtimeUserDirectoryProfile(created);
-      void writeRealtimeWorkspace(created.uid, {
-        meta: {
-          ownerUid: created.uid,
-          ownerEmail: created.email,
-          ownerDisplayName: created.displayName,
-          assignedWarehouse: created.assignedWarehouse,
-          updatedAt: nowIso,
-          updatedByUid: created.uid,
-          schemaVersion: 1,
-        },
-        products: [],
-        customers: [],
-        suppliers: [],
-        sales: [],
-        imports: [],
-        receiptVouchers: [],
-        paymentVouchers: [],
-        savedVouchers: [],
-        auditLogs: [],
-        backups: [],
-        settings: {
-          warehouses: [created.assignedWarehouse],
-          customerGroups,
-          productCategories,
-          receiptGroups,
-          paymentGroups,
-          notificationPrefs,
-          autoDailyBackupEnabled,
-        },
-      }, null);
+      if (!existingStorageWs || countWorkspaceBusinessRecords(existingStorageWs) === 0) {
+        void writeRealtimeWorkspace(
+          created.uid,
+          {
+            meta: {
+              ownerUid: created.uid,
+              ownerEmail: created.email,
+              ownerDisplayName: created.displayName,
+              assignedWarehouse: created.assignedWarehouse,
+              updatedAt: nowIso,
+              updatedByUid: created.uid,
+              schemaVersion: 1,
+            },
+            products: [],
+            customers: [],
+            suppliers: [],
+            sales: [],
+            imports: [],
+            receiptVouchers: [],
+            paymentVouchers: [],
+            savedVouchers: [],
+            auditLogs: [],
+            backups: [],
+            settings: {
+              warehouses: [created.assignedWarehouse],
+              customerGroups,
+              productCategories,
+              receiptGroups,
+              paymentGroups,
+              notificationPrefs,
+              autoDailyBackupEnabled,
+            },
+          },
+          null
+        );
+      }
       setRtdbWriteTrigger((n) => n + 1);
 
       showToast(
-        `Đã đăng ký Gmail @${created.username} — Tự động tạo kho: ${created.assignedWarehouse} & đồng bộ Realtime DB!`
+        `Đã đăng ký Gmail @${created.username} — Tự động tạo kho: ${created.assignedWarehouse} & đồng bộ Cloud!`
       );
       return {
         ok: true,
-        message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tạo kho riêng "${created.assignedWarehouse}" và đồng bộ trực tiếp lên hệ thống.${
+        message: `Đăng ký tài khoản mới thành công (@${created.username})! Đã tạo kho riêng "${created.assignedWarehouse}" và đồng bộ trực tiếp lên Firebase Storage & Realtime DB.${
           fbSignUp.verificationSent
-            ? ' Vui lòng kiểm tra hộp thư Gmail để xác minh email và bật thêm sao lưu Cloud.'
+            ? ' Vui lòng kiểm tra hộp thư Gmail để xác minh email.'
             : ''
         }`,
       };
@@ -4428,10 +4612,23 @@ export default function App() {
       pendingRegistrationRef.current = null;
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/email-already-in-use') {
-        return {
-          ok: false,
-          message: `Gmail "${query}" đã tồn tại trên hệ thống Firebase Authentication. Vui lòng đăng nhập hoặc dùng chức năng Quên mật khẩu.`,
-        };
+        // If user already registered on Web and accidentally used Sign-Up tab on Phone, sign them in automatically!
+        try {
+          const signInRes = await firebaseSignInWithEmailPassword(query, payload.password);
+          syncUserSessionFromFirebase(signInRes.user);
+          showToast(
+            `Đã đăng nhập vào tài khoản có sẵn (${query}) & đang đồng bộ dữ liệu từ trang web!`
+          );
+          return {
+            ok: true,
+            message: `Tài khoản "${query}" đã có sẵn — hệ thống đã tự động đăng nhập và đồng bộ toàn bộ dữ liệu kho của bạn từ Cloud!`,
+          };
+        } catch {
+          return {
+            ok: false,
+            message: `Gmail "${query}" đã được đăng ký trước đó. Vui lòng chuyển sang tab "Đăng nhập" (hoặc bấm "Đăng nhập bằng Google" nếu tài khoản tạo bằng Google).`,
+          };
+        }
       }
       if (code === 'auth/weak-password') {
         return {
@@ -5339,6 +5536,7 @@ export default function App() {
     }
 
     const isScopedSingleWh = !canFilterMultiWarehouses && lockedWarehouse;
+    allowEmptyWorkspaceWriteRef.current = true;
     if (isScopedSingleWh) {
       // Wipe only the current user's independent warehouse data, keeping other warehouses completely intact
       setProducts((prev) => prev.filter((p) => p.warehouseName !== lockedWarehouse));
@@ -5760,13 +5958,67 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-              {/* Live Firebase Realtime Database Connection Pill */}
+              {/* Live Firebase Storage & Realtime Database 1-Click Cloud Sync Button */}
               {isGoogleAuthenticated && (
-                <span
-                  title="Trạng thái đồng bộ dữ liệu thời gian thực Firebase Realtime Database (gapgold-e6b62-default-rtdb)"
-                  className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border whitespace-nowrap ${
+                <button
+                  type="button"
+                  disabled={isManualCloudSyncing}
+                  onClick={async () => {
+                    const fbUser = auth.currentUser;
+                    if (!fbUser || isManualCloudSyncing) return;
+                    setIsManualCloudSyncing(true);
+                    try {
+                      const isPrimary = isCurrentUserAdmin(fbUser);
+                      const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
+                      const storageWs = await readWorkspaceFromFirebaseStorage({
+                        uid: activeUid,
+                        email: fbUser.email || currentStaff.email,
+                        assignedWarehouse: currentStaff.assignedWarehouse,
+                      });
+                      if (storageWs && !isPrimary) {
+                        storageCachedWorkspaceRef.current[activeUid] = storageWs;
+                        const merged = mergeWorkspacePayloads(
+                          rtdbLastPayloadRef.current[activeUid] || null,
+                          storageWs,
+                          activeUid
+                        );
+                        if (merged && countWorkspaceBusinessRecords(merged) > 0) {
+                          setProducts((prev) => dedupeRecordsById([...prev, ...merged.products]));
+                          setCustomers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.customers])
+                          );
+                          setSuppliers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.suppliers])
+                          );
+                          setSales((prev) => dedupeRecordsById([...prev, ...merged.sales]));
+                          setImports((prev) => dedupeRecordsById([...prev, ...merged.imports]));
+                          setReceiptVouchers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.receiptVouchers])
+                          );
+                          setPaymentVouchers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.paymentVouchers])
+                          );
+                          setSavedVouchers((prev) =>
+                            dedupeRecordsById([...prev, ...merged.savedVouchers])
+                          );
+                          setStockAdjustments((prev) =>
+                            dedupeRecordsById([...prev, ...(merged.stockAdjustments || [])])
+                          );
+                        }
+                      }
+                      rtdbSuppressNextWriteRef.current = false;
+                      setRtdbWriteTrigger((n) => n + 1);
+                      showToast(
+                        `Đã đồng bộ dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime DB (${visibleProducts.length} vật tư, ${visibleSales.length} đơn bán, ${visibleCustomers.length} khách hàng)!`
+                      );
+                    } finally {
+                      setIsManualCloudSyncing(false);
+                    }
+                  }}
+                  title="Bấm để đồng bộ tức thì dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime Database"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors ${
                     rtdbSyncState === 'live'
-                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                      ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
                       : rtdbSyncState === 'connecting'
                       ? 'bg-amber-50 text-amber-800 border-amber-200'
                       : 'bg-slate-100 text-slate-600 border-slate-200'
@@ -5782,13 +6034,15 @@ export default function App() {
                     }`}
                   />
                   <span>
-                    {rtdbSyncState === 'live'
+                    {isManualCloudSyncing
+                      ? 'Đang đồng bộ...'
+                      : rtdbSyncState === 'live'
                       ? 'Realtime DB'
                       : rtdbSyncState === 'connecting'
                       ? 'Đang kết nối...'
                       : 'Ngoại tuyến'}
                   </span>
-                </span>
+                </button>
               )}
 
               {/* Desktop Multi-Warehouse Selector for Primary Manager & Deputy General Manager */}

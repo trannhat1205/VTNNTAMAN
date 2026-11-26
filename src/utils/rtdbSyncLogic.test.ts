@@ -4,13 +4,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   buildFullKeyedWorkspace,
+  buildRecoveredVtnnTamAn99Workspace,
+  buildStorageWorkspacePaths,
   buildWorkspaceDiffUpdates,
+  countWorkspaceBusinessRecords,
+  isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
+  mergeWorkspacePayloads,
   normalizeWorkspaceFromRtdb,
   RTDB_RECORD_COLLECTIONS,
   RtdbWorkspacePayload,
   toRtdbRecordKey,
+  VTNNTAMAN99_UID,
 } from './rtdbSyncLogic';
+import { filterRecordsBySelectedWarehouses, getIndependentWarehouseFullPermissions } from './businessLogic';
 import type { AuditLogEntry, BackupEntry, SaleTransaction } from '../types';
 
 function makeBasePayload(): RtdbWorkspacePayload {
@@ -268,4 +275,75 @@ test('RTDB legacy array layout detection and database.rules.json schema validati
   const normAdj = normalizeWorkspaceFromRtdb(serverWithAdj, 'uid_kho_1');
   assert.equal(normAdj.stockAdjustments?.length, 1);
   assert.equal(normAdj.stockAdjustments?.[0].diffQty, 2);
+});
+
+test('Web <-> Phone dual Cloud sync: destructive empty-overwrite guard, Firebase Storage paths, merge & vtnntaman99 recovery', () => {
+  const recovered = buildRecoveredVtnnTamAn99Workspace('TÂM AN VTNNTAMAN99');
+  assert.equal(recovered.products.length, 8);
+  assert.equal(recovered.customers.length, 3);
+  assert.equal(recovered.imports.length, 3);
+  assert.equal(recovered.sales.length, 13);
+
+  const totalStock = recovered.products.reduce((s, p) => s + p.stock, 0);
+  const totalInvCost = recovered.products.reduce((s, p) => s + p.stock * p.importPrice, 0);
+  const totalSalesRev = recovered.sales.reduce((s, r) => s + r.totalAmount, 0);
+  const totalCustDebt = recovered.sales.reduce((s, r) => s + r.debtAmount, 0);
+  const totalSupDebt = recovered.imports.reduce((s, i) => s + i.debtAmount, 0);
+
+  assert.equal(totalStock, 231);
+  assert.equal(totalInvCost, 30820000);
+  assert.equal(totalSalesRev, 1707183);
+  assert.equal(totalCustDebt, 230000);
+  assert.equal(totalSupDebt, 575000);
+  assert.equal(countWorkspaceBusinessRecords(recovered), 28);
+
+  // Guard blocks empty phone state from overwriting non-empty cloud workspace unless allowIntentionalWipe is true
+  const emptyPhonePayload = makeBasePayload();
+  assert.equal(isDestructiveEmptyWorkspaceOverwrite(recovered, emptyPhonePayload, false), true);
+  assert.equal(isDestructiveEmptyWorkspaceOverwrite(recovered, emptyPhonePayload, true), false);
+
+  // Storage paths under /documents/workspaces/ and /backups/{uid}/
+  const paths = buildStorageWorkspacePaths({
+    uid: VTNNTAMAN99_UID,
+    email: 'vtnntaman99@gmail.com',
+    assignedWarehouse: 'TÂM AN MỸ NGÃI',
+  });
+  assert.equal(paths.uidPath, `documents/workspaces/uid_${VTNNTAMAN99_UID}.json`);
+  assert.equal(paths.emailPath, 'documents/workspaces/email_vtnntaman99_gmail_com.json');
+  assert.equal(paths.warehousePath, 'documents/workspaces/warehouse_TAM_AN_MY_NGAI.json');
+  assert.equal(paths.backupPath, `backups/${VTNNTAMAN99_UID}/VTNN_TamAn_AutoSync_Latest.json`);
+
+  // Merge empty RTDB with populated Storage payload restores all records
+  const merged = mergeWorkspacePayloads(emptyPhonePayload, recovered, VTNNTAMAN99_UID);
+  assert.ok(merged);
+  assert.equal(merged.sales.length, 13);
+  assert.equal(merged.products.length, 8);
+
+  // Single-warehouse owner sees records owned by their UID even if warehouseName was renamed on another device
+  const staffOnPhone = {
+    uid: VTNNTAMAN99_UID,
+    username: 'vtnntaman99',
+    password: '',
+    displayName: 'An Tâm',
+    phone: '',
+    email: 'vtnntaman99@gmail.com',
+    role: 'manager' as const,
+    positionRole: 'warehouse_manager' as const,
+    permissions: getIndependentWarehouseFullPermissions(),
+    assignedWarehouse: 'TÂM AN VTNNTAMAN99',
+    active: true,
+    createdAt: '2026-11-26T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+  const recordsWithOldWhName = recovered.sales.map((s) => ({
+    ...s,
+    warehouseName: 'TÂM AN MỸ NGÃI',
+  }));
+  const visibleOnPhone = filterRecordsBySelectedWarehouses(
+    recordsWithOldWhName,
+    staffOnPhone,
+    ['TÂM AN VTNNTAMAN99'],
+    []
+  );
+  assert.equal(visibleOnPhone.length, 13);
 });

@@ -3657,8 +3657,12 @@ export function resolveActiveWarehouses(
 
 /**
  * Filters records with an optional warehouseName field by the currently selected warehouses.
+ * For independent single-warehouse owners, also includes records explicitly owned by their UID
+ * so renaming a warehouse on one device never hides their own records on another device.
  */
-export function filterRecordsBySelectedWarehouses<T extends { warehouseName?: string }>(
+export function filterRecordsBySelectedWarehouses<
+  T extends { warehouseName?: string; ownerId?: string }
+>(
   records: T[],
   staff: StaffMember,
   allWarehouses: string[],
@@ -3669,7 +3673,16 @@ export function filterRecordsBySelectedWarehouses<T extends { warehouseName?: st
   if (canStaffFilterMultiWarehouses(staff) && activeSet.size >= allWarehouses.length) {
     return records;
   }
-  return records.filter((rec) => activeSet.has(rec.warehouseName || defaultWarehouse));
+  const isSingleWarehouseOwner =
+    !canStaffFilterMultiWarehouses(staff) &&
+    Boolean(staff.uid) &&
+    staff.uid !== PRIMARY_ADMIN_UID &&
+    !staff.uid.startsWith('staff_');
+  return records.filter(
+    (rec) =>
+      activeSet.has(rec.warehouseName || defaultWarehouse) ||
+      (isSingleWarehouseOwner && Boolean(rec.ownerId) && rec.ownerId === staff.uid)
+  );
 }
 
 /**
