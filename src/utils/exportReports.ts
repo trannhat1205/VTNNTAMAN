@@ -2482,6 +2482,9 @@ export function exportProductStockCardExcel(
     ['Tổng nhập kho trong kỳ (+)', ledger.periodImportQty, `${ledger.periodImportValue.toLocaleString('vi-VN')} VNĐ`],
     ['Tổng xuất bán trong kỳ (-)', ledger.periodExportSaleQty, `${ledger.periodExportRevenue.toLocaleString('vi-VN')} VNĐ`],
     ['Tổng xuất quà tặng KM (-)', ledger.periodExportGiftQty, product.unit],
+    ...(ledger.periodExportAdjustmentQty
+      ? [['Kiểm kê điều chỉnh giảm (-)', ledger.periodExportAdjustmentQty, product.unit]]
+      : []),
     ['Tồn cuối kỳ', ledger.closingStock, product.unit],
     ['Tồn kho thực tế hiện tại', product.stock, product.unit],
   ];
@@ -2493,6 +2496,10 @@ export function exportProductStockCardExcel(
     'Loại Nghiệp Vụ':
       m.type === 'import'
         ? 'Nhập kho (+)'
+        : m.type === 'stocktake_in'
+        ? 'Kiểm kê dôi (+)'
+        : m.type === 'stocktake_out'
+        ? 'Kiểm kê hao hụt (-)'
         : m.type === 'gift_export'
         ? 'Xuất quà tặng KM (-)'
         : 'Xuất bán hàng (-)',
@@ -2524,6 +2531,42 @@ export function exportProductStockCardExcel(
 
   const today = getTodayVietnamDateStr();
   const fileName = `TheKho_XuatNhapTon_${safeCode}_${today}.xlsx`;
+  XLSX.writeFile(wb, fileName);
+  return fileName;
+}
+
+// 12. Xuất Danh Sách Đề Xuất Nhập Hàng Thông Minh — Excel
+export function exportSmartReorderExcel(
+  items: import('./businessLogic').SmartReorderSuggestionItem[],
+  warehouseLabel = 'Tất cả kho'
+): string {
+  const wb = XLSX.utils.book_new();
+  const today = getTodayVietnamDateStr();
+  const rows = items.map((item, idx) => ({
+    STT: idx + 1,
+    'Mã VT': item.product.code,
+    'Tên Vật Tư': item.product.name,
+    'ĐVT': item.product.unit,
+    'Kho': item.product.warehouseName || warehouseLabel,
+    'Tồn Hiện Tại': item.product.stock,
+    'Tồn Tối Thiểu': item.product.minStock,
+    'Bán 30 Ngày': item.soldQtyLookback,
+    'Tốc Độ/Ngày': Number(item.dailyVelocity.toFixed(2)),
+    'Còn Đủ Bán (Ngày)': item.daysOfStockLeft !== null ? item.daysOfStockLeft : '—',
+    'Đề Xuất Đặt': item.suggestedOrderQty,
+    'Đơn Giá Nhập (VNĐ)': item.product.importPrice,
+    'Dự Kiến Tiền Hàng (VNĐ)': item.estimatedCost,
+    'Nhà Cung Cấp': item.product.supplierName,
+    'Lý Do Đề Xuất': item.reason,
+  }));
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(
+      rows.length > 0 ? rows : [{ 'Thông báo': 'Chưa có vật tư cần đề xuất nhập thêm.' }]
+    ),
+    'De_Xuat_Nhap_Hang'
+  );
+  const fileName = `DeXuat_DatHang_NCC_${today}.xlsx`;
   XLSX.writeFile(wb, fileName);
   return fileName;
 }

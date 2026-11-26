@@ -8,6 +8,7 @@ import {
   applySupplierFifoDebtSettlement,
   authenticateStaffByGoogleEmail,
   buildBackupSnapshotPayload,
+  buildZaloDebtReminderMessage,
   calculateImportSummary,
   calculateSaleSummary,
   canAccountCreateStaff,
@@ -17,16 +18,19 @@ import {
   computeCashflowAndFinancialReport,
   computeCustomerLedger,
   computeCustomerOldDebtSummary,
+  computeDebtAgingSummary,
   computeDueDateAfterDays,
   computeProductStockMovementLedger,
   computeReceivedItemsAndDebtReport,
   computeSaleEditStockDeltas,
+  computeSmartReorderSuggestions,
   computeSupplierOldDebtSummary,
   computeTaxAuthorityFinancialStatement,
   computeWeightedAverageImportPrice,
   createAuditLogEntry,
   DEBT_TERM_DAY_OPTIONS,
   evaluateDebtUrgency,
+  evaluateProductExpiry,
   evaluateStaffAccessScope,
   evaluateStockAlert,
   executeFiscalYearCloseAndCleanup,
@@ -47,6 +51,7 @@ import {
   matchDebtTermDays,
   normalizeVietnameseSearch,
   parseAndValidateBackupPayload,
+  pickEarlierFefoBatch,
   previewCustomerFifoDebtSettlement,
   previewFiscalYearCloseAndCleanup,
   previewSupplierFifoDebtSettlement,
@@ -130,6 +135,7 @@ import {
   ProductItem,
   SaleTransaction,
   StaffMember,
+  StockAdjustmentRecord,
 } from '../types';
 import {
   INITIAL_CUSTOMERS,
@@ -2939,7 +2945,7 @@ test('Stage 2 P0 fixes: NaN inventory guards, readExcelNumber, backup missingCol
   if (legacyBackup.ok) {
     assert.deepEqual(
       legacyBackup.payload.missingCollections?.sort(),
-      ['paymentVouchers', 'receiptVouchers', 'savedVouchers', 'suppliers']
+      ['paymentVouchers', 'receiptVouchers', 'savedVouchers', 'stockAdjustments', 'suppliers']
     );
   }
 
@@ -3128,10 +3134,229 @@ test('Weighted average cost, SaleTransaction unitCost snapshot immutability, imp
     },
   ];
   assert.equal(findLinkedPaymentVouchersForImport({ id: 'imp_1', receiptCode: 'PN-001' }, payments).length, 1);
-  assert.equal(
-    findLinkedPaymentVouchersForImport({ id: 'imp_other', receiptCode: 'PN-001' }, payments).length,
-    0
+  assert.equal(findLinkedPaymentVouchersForImport({ id: 'imp_other', receiptCode: 'PN-001' }, payments).length, 0);
+});
+
+test('Stage 3: Stocktake ledger reconciliation, FEFO expiry, Smart Reorder, Debt Aging, Zalo reminder & BCTC carried debt 131/331', () => {
+  // 1. Stocktake (stocktake_in +5 and stocktake_out -2) in XNT ledger
+  const prod: ProductItem = {
+    id: 'p_st_1',
+    code: 'VT-ST1',
+    name: 'Amistar Top 325SC',
+    category: 'Thuốc BVTV',
+    unit: 'Chai',
+    importPrice: 180000,
+    sellPrice: 230000,
+    stock: 23, // 10 opening + 20 import - 10 sold + 5 surplus - 2 broken = 23
+    minStock: 10,
+    supplierName: 'Syngenta',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    batchNumber: 'LOT-A1',
+    expiryDate: '2026-12-10',
+    barcode: '8931234567890',
+    ownerId: 'uid_1',
+    createdAt: '2026-11-01T01:00:00Z',
+    updatedAt: '2026-11-26T01:00:00Z',
+  };
+  const impList: ImportTransaction[] = [
+    {
+      id: 'imp_st_1',
+      receiptCode: 'PN-2611-001',
+      supplierName: 'Syngenta',
+      supplierPhone: '0901',
+      productId: prod.id,
+      productName: prod.name,
+      unit: prod.unit,
+      quantity: 20,
+      unitCost: 180000,
+      totalCost: 3600000,
+      paidAmount: 1600000,
+      debtAmount: 2000000,
+      dueDate: '2026-10-01',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'uid_1',
+      createdAt: '2026-11-05T02:00:00Z',
+      updatedAt: '2026-11-05T02:00:00Z',
+    },
+  ];
+  const saleList: SaleTransaction[] = [
+    {
+      id: 'sale_st_1',
+      invoiceCode: 'HD-2611-001',
+      customerId: 'cust_1',
+      customerName: 'Chú Tám',
+      customerPhone: '0912345678',
+      productId: prod.id,
+      productName: prod.name,
+      unit: prod.unit,
+      quantity: 10,
+      unitPrice: 230000,
+      unitCost: 180000,
+      totalAmount: 2300000,
+      paidAmount: 300000,
+      debtAmount: 2000000,
+      dueDate: '2026-11-10',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'uid_1',
+      createdAt: '2026-11-15T02:00:00Z',
+      updatedAt: '2026-11-15T02:00:00Z',
+    },
+  ];
+  const adjustments: StockAdjustmentRecord[] = [
+    {
+      id: 'kk_1',
+      adjustmentCode: 'KK-2611-001',
+      productId: prod.id,
+      productCode: prod.code,
+      productName: prod.name,
+      unit: prod.unit,
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      systemStockBefore: 20,
+      actualCountedStock: 25,
+      diffQty: 5,
+      unitCost: 180000,
+      diffValue: 900000,
+      reason: 'Hàng dôi dư',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'uid_1',
+      createdAt: '2026-11-18T02:00:00Z',
+      updatedAt: '2026-11-18T02:00:00Z',
+    },
+    {
+      id: 'kk_2',
+      adjustmentCode: 'KK-2611-002',
+      productId: prod.id,
+      productCode: prod.code,
+      productName: prod.name,
+      unit: prod.unit,
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      systemStockBefore: 25,
+      actualCountedStock: 23,
+      diffQty: -2,
+      unitCost: 180000,
+      diffValue: -360000,
+      reason: 'Hư hỏng / rách bao',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'uid_1',
+      createdAt: '2026-11-20T02:00:00Z',
+      updatedAt: '2026-11-20T02:00:00Z',
+    },
+  ];
+
+  const ledger = computeProductStockMovementLedger(prod, saleList, impList, {
+    fromDate: '2026-11-01',
+    toDate: '2026-11-30',
+    stockAdjustments: adjustments,
+  });
+  assert.equal(ledger.openingStock, 10);
+  assert.equal(ledger.periodImportQty, 25); // 20 import + 5 stocktake_in
+  assert.equal(ledger.periodExportAdjustmentQty, 2);
+  assert.equal(ledger.periodExportTotalQty, 12); // 10 sale + 2 stocktake_out
+  assert.equal(ledger.closingStock, 23);
+  assert.equal(ledger.openingStock + ledger.periodImportQty - ledger.periodExportTotalQty, prod.stock);
+
+  // 2. Expiry & FEFO batch prioritization
+  assert.equal(evaluateProductExpiry('2026-11-20', '2026-11-26').status, 'expired');
+  assert.equal(evaluateProductExpiry('2026-12-10', '2026-11-26').status, 'expiring_30d');
+  assert.equal(evaluateProductExpiry('2027-01-10', '2026-11-26').status, 'expiring_60d');
+  assert.equal(evaluateProductExpiry('2027-08-01', '2026-11-26').status, 'safe');
+
+  const fefoKeepOlder = pickEarlierFefoBatch('LOT-OLD', '2026-12-10', 'LOT-NEW', '2027-12-01', 15);
+  assert.equal(fefoKeepOlder.batchNumber, 'LOT-OLD');
+  assert.equal(fefoKeepOlder.expiryDate, '2026-12-10');
+
+  const fefoAdoptNewWhenZero = pickEarlierFefoBatch('LOT-OLD', '2026-12-10', 'LOT-NEW', '2027-12-01', 0);
+  assert.equal(fefoAdoptNewWhenZero.batchNumber, 'LOT-NEW');
+  assert.equal(fefoAdoptNewWhenZero.expiryDate, '2027-12-01');
+
+  const fefoAdoptEarlierIncoming = pickEarlierFefoBatch('LOT-LATE', '2027-06-01', 'LOT-SOON', '2026-12-25', 5);
+  assert.equal(fefoAdoptEarlierIncoming.batchNumber, 'LOT-SOON');
+  assert.equal(fefoAdoptEarlierIncoming.expiryDate, '2026-12-25');
+
+  // 3. Smart Reorder velocity suggestion
+  const fastLowProd: ProductItem = { ...prod, id: 'p_fast', stock: 3, minStock: 10 };
+  const fastSales: SaleTransaction[] = [
+    { ...saleList[0], id: 's_fast', productId: 'p_fast', quantity: 30, createdAt: '2026-11-20T05:00:00Z' },
+  ];
+  const suggestions = computeSmartReorderSuggestions([fastLowProd], fastSales, {
+    lookbackDays: 30,
+    coverDays: 21,
+    todayStr: '2026-11-26',
+  });
+  assert.equal(suggestions.length, 1);
+  assert.equal(suggestions[0].dailyVelocity, 1);
+  assert.equal(suggestions[0].daysOfStockLeft, 3);
+  assert.equal(suggestions[0].urgency, 'critical');
+  assert.equal(suggestions[0].suggestedOrderQty, 18); // ceil(1*21 - 3)
+
+  // 4. Debt Aging 4 buckets + Zalo reminder link/content
+  const aging = computeDebtAgingSummary(
+    [
+      { debtAmount: 100000, dueDate: '2026-12-15' },
+      { debtAmount: 200000, dueDate: '2026-11-10' }, // -16d
+      { debtAmount: 300000, dueDate: '2026-10-10' }, // -47d
+      { debtAmount: 400000, dueDate: '2026-08-01' }, // -117d
+    ],
+    '2026-11-26'
   );
+  assert.equal(aging.currentAmount, 100000);
+  assert.equal(aging.overdue1To30Amount, 200000);
+  assert.equal(aging.overdue31To60Amount, 300000);
+  assert.equal(aging.overdue60PlusAmount, 400000);
+  assert.equal(aging.totalDebtAmount, 1000000);
+
+  const zalo = buildZaloDebtReminderMessage({
+    storeName: 'VTNN Tâm An',
+    customerName: 'Chú Tám',
+    customerPhone: '+84 912-345-678',
+    totalDebt: 2000000,
+    unpaidInvoices: saleList.map((s) => ({
+      invoiceCode: s.invoiceCode,
+      date: s.createdAt.slice(0, 10),
+      productName: s.productName,
+      debtAmount: s.debtAmount,
+      dueDate: s.dueDate,
+    })),
+    todayStr: '2026-11-26',
+  });
+  assert.equal(zalo.zaloUrl, 'https://zalo.me/0912345678');
+  assert.match(zalo.message, /HD-2611-001/);
+  assert.match(zalo.message, /VTNN Tâm An/);
+
+  // 5. BCTC Mã 131 / Mã 331 carry-over prior-period unpaid debts
+  const priorYearUnpaidSale: SaleTransaction = {
+    ...saleList[0],
+    id: 'sale_2025',
+    debtAmount: 1500000,
+    createdAt: '2025-12-20T05:00:00Z',
+    updatedAt: '2025-12-20T05:00:00Z',
+  };
+  const priorYearUnpaidImp: ImportTransaction = {
+    ...impList[0],
+    id: 'imp_2025',
+    debtAmount: 2500000,
+    createdAt: '2025-12-18T05:00:00Z',
+    updatedAt: '2025-12-18T05:00:00Z',
+  };
+  const bctc2026 = computeTaxAuthorityFinancialStatement({
+    products: [prod],
+    sales: [priorYearUnpaidSale, ...saleList],
+    imports: [priorYearUnpaidImp, ...impList],
+    receiptVouchers: [],
+    paymentVouchers: [],
+    fromDate: '2026-01-01',
+    toDate: '2026-12-31',
+  });
+  assert.equal(bctc2026.customerReceivables131, 3500000); // 1.5M (2025) + 2M (2026)
+  assert.equal(bctc2026.supplierPayables331, 4500000); // 2.5M (2025) + 2M (2026)
 });
 
 

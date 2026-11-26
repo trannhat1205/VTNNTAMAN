@@ -10,6 +10,7 @@ import {
   SaleTransaction,
   SavedVoucherRecord,
   StaffMember,
+  StockAdjustmentRecord,
   SupplierProfile,
 } from '../types';
 import {
@@ -60,6 +61,7 @@ export interface RtdbWorkspacePayload {
   receiptVouchers: CashReceiptVoucher[];
   paymentVouchers: CashPaymentVoucher[];
   savedVouchers: SavedVoucherRecord[];
+  stockAdjustments?: StockAdjustmentRecord[];
   auditLogs: AuditLogEntry[];
   backups: BackupEntry[];
   settings: RtdbWorkspaceSettings;
@@ -333,6 +335,10 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
       ownerUid
     ),
     savedVouchers: attachOwnerId(ensureArrayFromRtdb<SavedVoucherRecord>(obj.savedVouchers), ownerUid),
+    stockAdjustments: attachOwnerId(
+      ensureArrayFromRtdb<StockAdjustmentRecord>(obj.stockAdjustments),
+      ownerUid
+    ),
     auditLogs: ensureArrayFromRtdb<AuditLogEntry>(obj.auditLogs).slice(0, 500),
     backups: ensureArrayFromRtdb<BackupEntry>(obj.backups).map((b) => ({
       ...b,
@@ -372,6 +378,7 @@ export function computeWorkspaceFingerprint(payload: RtdbWorkspacePayload): stri
     receiptVouchers: payload.receiptVouchers,
     paymentVouchers: payload.paymentVouchers,
     savedVouchers: payload.savedVouchers,
+    stockAdjustments: payload.stockAdjustments || [],
     auditLogs: payload.auditLogs.slice(0, 500),
     backups: payload.backups.map((b) => ({ ...b, snapshotPayload: undefined })),
     settings: payload.settings,
@@ -393,6 +400,7 @@ export const RTDB_RECORD_COLLECTIONS = [
   'receiptVouchers',
   'paymentVouchers',
   'savedVouchers',
+  'stockAdjustments',
   'auditLogs',
   'backups',
 ] as const;
@@ -520,6 +528,7 @@ export function aggregateAdminWorkspacesFromRtdb(
   receiptVouchers: CashReceiptVoucher[];
   paymentVouchers: CashPaymentVoucher[];
   savedVouchers: SavedVoucherRecord[];
+  stockAdjustments: StockAdjustmentRecord[];
   auditLogs: AuditLogEntry[];
   backups: BackupEntry[];
   warehouses: string[];
@@ -538,6 +547,7 @@ export function aggregateAdminWorkspacesFromRtdb(
   const allReceiptVouchers: CashReceiptVoucher[] = [];
   const allPaymentVouchers: CashPaymentVoucher[] = [];
   const allSavedVouchers: SavedVoucherRecord[] = [];
+  const allStockAdjustments: StockAdjustmentRecord[] = [];
   const allAuditLogs: AuditLogEntry[] = [];
   const allBackups: BackupEntry[] = [];
   const warehouseSet = new Set<string>(INITIAL_WAREHOUSES);
@@ -566,6 +576,7 @@ export function aggregateAdminWorkspacesFromRtdb(
     allReceiptVouchers.push(...norm.receiptVouchers);
     allPaymentVouchers.push(...norm.paymentVouchers);
     allSavedVouchers.push(...norm.savedVouchers);
+    allStockAdjustments.push(...(norm.stockAdjustments || []));
     allAuditLogs.push(...norm.auditLogs);
     allBackups.push(...norm.backups);
 
@@ -646,6 +657,7 @@ export function aggregateAdminWorkspacesFromRtdb(
     receiptVouchers: dedupeRecordsById(allReceiptVouchers),
     paymentVouchers: dedupeRecordsById(allPaymentVouchers),
     savedVouchers: dedupeRecordsById(allSavedVouchers),
+    stockAdjustments: dedupeRecordsById(allStockAdjustments),
     auditLogs: sortedAuditLogs,
     backups: dedupeRecordsById(allBackups),
     warehouses: Array.from(warehouseSet),
@@ -671,6 +683,7 @@ export function partitionAdminStateByWorkspace(params: {
   receiptVouchers: CashReceiptVoucher[];
   paymentVouchers: CashPaymentVoucher[];
   savedVouchers: SavedVoucherRecord[];
+  stockAdjustments?: StockAdjustmentRecord[];
   auditLogs: AuditLogEntry[];
   backups: BackupEntry[];
   settings: RtdbWorkspaceSettings;
@@ -688,6 +701,7 @@ export function partitionAdminStateByWorkspace(params: {
     receiptVouchers,
     paymentVouchers,
     savedVouchers,
+    stockAdjustments = [],
     auditLogs,
     backups,
     settings,
@@ -739,6 +753,7 @@ export function partitionAdminStateByWorkspace(params: {
       receiptVouchers: [],
       paymentVouchers: [],
       savedVouchers: [],
+      stockAdjustments: [],
       auditLogs: [],
       backups: [],
       settings: {
@@ -766,6 +781,9 @@ export function partitionAdminStateByWorkspace(params: {
   receiptVouchers.forEach((item) => ensureBucket(resolveOwner(item)).receiptVouchers.push(item));
   paymentVouchers.forEach((item) => ensureBucket(resolveOwner(item)).paymentVouchers.push(item));
   savedVouchers.forEach((item) => ensureBucket(resolveOwner(item)).savedVouchers.push(item));
+  stockAdjustments.forEach((item) =>
+    (ensureBucket(resolveOwner(item)).stockAdjustments ||= []).push(item)
+  );
   auditLogs.slice(0, 500).forEach((item) => ensureBucket(resolveOwner(item)).auditLogs.push(item));
   backups.forEach((item) =>
     ensureBucket(adminUid).backups.push({ ...item, snapshotPayload: undefined })

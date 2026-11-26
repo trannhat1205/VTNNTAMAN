@@ -22,6 +22,7 @@ import {
   StaffFunctionalPermission,
   StaffMember,
   StaffPositionRole,
+  StockAdjustmentRecord,
   StockAlertLevel,
   SupplierProfile,
   UserRole,
@@ -696,6 +697,35 @@ export function generateSmartNotifications(
           actionTab: 'inventory',
           relatedId: product.id,
         });
+      }
+
+      if ((Number(product.stock) || 0) > 0 && product.expiryDate) {
+        const exp = evaluateProductExpiry(product.expiryDate, referenceDateStr);
+        if (exp.status === 'expired') {
+          notifications.push({
+            id: `notif-expiry-expired-${product.id}`,
+            category: 'low_stock',
+            severity: 'critical',
+            title: `Hàng đã hết hạn sử dụng: ${product.name}`,
+            message: `Lô ${product.batchNumber || 'hiện tại'} (${product.stock} ${product.unit}) đã hết hạn ngày ${product.expiryDate}. Vui lòng ngừng bán và kiểm kê tách lô!`,
+            timestamp: product.updatedAt,
+            read: false,
+            actionTab: 'inventory',
+            relatedId: product.id,
+          });
+        } else if (exp.status === 'expiring_30d') {
+          notifications.push({
+            id: `notif-expiry-soon-${product.id}`,
+            category: 'low_stock',
+            severity: 'warning',
+            title: `Sắp hết hạn sử dụng (FEFO): ${product.name}`,
+            message: `Lô ${product.batchNumber || 'hiện tại'} (${product.stock} ${product.unit}) còn ${exp.daysRemaining} ngày (HSD: ${product.expiryDate}). Hãy ưu tiên xuất bán trước!`,
+            timestamp: product.updatedAt,
+            read: false,
+            actionTab: 'inventory',
+            relatedId: product.id,
+          });
+        }
       }
     }
   }
@@ -1504,11 +1534,13 @@ export function buildBackupSnapshotPayload(params: {
   savedVouchers: SavedVoucherRecord[];
   receiptVouchers?: CashReceiptVoucher[];
   paymentVouchers?: CashPaymentVoucher[];
+  stockAdjustments?: StockAdjustmentRecord[];
   staffList: StaffMember[];
   auditLogs: AuditLogEntry[];
 }): BackupSnapshotPayload {
   const receiptVouchers = params.receiptVouchers || [];
   const paymentVouchers = params.paymentVouchers || [];
+  const stockAdjustments = params.stockAdjustments || [];
   const recordCount =
     params.products.length +
     params.customers.length +
@@ -1516,7 +1548,8 @@ export function buildBackupSnapshotPayload(params: {
     params.imports.length +
     params.savedVouchers.length +
     receiptVouchers.length +
-    paymentVouchers.length;
+    paymentVouchers.length +
+    stockAdjustments.length;
 
   return {
     version: '2.1-cashflow-fifo-enabled',
@@ -1538,6 +1571,7 @@ export function buildBackupSnapshotPayload(params: {
     savedVouchers: [...params.savedVouchers],
     receiptVouchers: [...receiptVouchers],
     paymentVouchers: [...paymentVouchers],
+    stockAdjustments: [...stockAdjustments],
     staffList: [...params.staffList],
     auditLogs: [...params.auditLogs],
   };
@@ -1569,6 +1603,7 @@ export function parseAndValidateBackupPayload(
     if (!Array.isArray(parsed.receiptVouchers)) missingCollections.push('receiptVouchers');
     if (!Array.isArray(parsed.paymentVouchers)) missingCollections.push('paymentVouchers');
     if (!Array.isArray(parsed.suppliers)) missingCollections.push('suppliers');
+    if (!Array.isArray(parsed.stockAdjustments)) missingCollections.push('stockAdjustments');
 
     const auditLogs: AuditLogEntry[] = Array.isArray(parsed.auditLogs)
       ? parsed.auditLogs
@@ -1581,6 +1616,9 @@ export function parseAndValidateBackupPayload(
       : [];
     const paymentVouchers: CashPaymentVoucher[] = Array.isArray(parsed.paymentVouchers)
       ? parsed.paymentVouchers
+      : [];
+    const stockAdjustments: StockAdjustmentRecord[] = Array.isArray(parsed.stockAdjustments)
+      ? parsed.stockAdjustments
       : [];
     const suppliers: SupplierProfile[] = Array.isArray(parsed.suppliers)
       ? parsed.suppliers
@@ -1611,7 +1649,8 @@ export function parseAndValidateBackupPayload(
       parsed.imports.length +
       savedVouchers.length +
       receiptVouchers.length +
-      paymentVouchers.length;
+      paymentVouchers.length +
+      stockAdjustments.length;
 
     return {
       ok: true,
@@ -1635,6 +1674,7 @@ export function parseAndValidateBackupPayload(
         savedVouchers,
         receiptVouchers,
         paymentVouchers,
+        stockAdjustments,
         staffList,
         auditLogs,
         ...(missingCollections.length > 0 ? { missingCollections } : {}),
@@ -3256,12 +3296,26 @@ export function computeTaxAuthorityFinancialStatement(params: {
   const profitAfterTax60 = profitBeforeTax50 - estimatedTax51;
 
   const netCashflow110 = baseReport.netCashflow;
-  const customerReceivables131 = baseReport.totalReceivableDebt;
+  const cumSalesAsOfToDate = (params.sales || []).filter((s) => {
+    if (params.warehouseName && s.warehouseName !== params.warehouseName) return false;
+    return toDate ? isDateWithinRange(s.createdAt, undefined, toDate) : true;
+  });
+  const cumImportsAsOfToDate = (params.imports || []).filter((i) => {
+    if (params.warehouseName && i.warehouseName !== params.warehouseName) return false;
+    return toDate ? isDateWithinRange(i.createdAt, undefined, toDate) : true;
+  });
+  const customerReceivables131 = cumSalesAsOfToDate.reduce(
+    (sum, s) => sum + Math.max(0, Number(s.debtAmount) || 0),
+    0
+  );
   const inventoryValue156 = inventoryValuationRows.reduce(
     (sum, r) => sum + r.totalInventoryCostValue,
     0
   );
-  const supplierPayables331 = baseReport.totalPayableDebt;
+  const supplierPayables331 = cumImportsAsOfToDate.reduce(
+    (sum, i) => sum + Math.max(0, Number(i.debtAmount) || 0),
+    0
+  );
   const netWorkingCapital400 =
     netCashflow110 + customerReceivables131 + inventoryValue156 - supplierPayables331;
 
@@ -3890,7 +3944,7 @@ export function findLinkedPaymentVouchersForImport(
 export interface StockMovementRecord {
   id: string;
   dateIso: string;
-  type: 'import' | 'sale' | 'gift_export';
+  type: 'import' | 'sale' | 'gift_export' | 'stocktake_in' | 'stocktake_out';
   voucherCode: string;
   partnerName: string;
   partnerPhone: string;
@@ -3913,6 +3967,7 @@ export interface ProductStockMovementLedger {
   periodExportCount: number;
   periodExportSaleQty: number;
   periodExportGiftQty: number;
+  periodExportAdjustmentQty?: number;
   periodExportTotalQty: number;
   periodExportRevenue: number;
   closingStock: number;
@@ -3924,13 +3979,13 @@ export interface ProductStockMovementLedger {
 /**
  * Computes the complete Stock Movement Ledger (Thẻ kho Xuất - Nhập - Tồn) for a single product,
  * reconciling opening balance, chronological imports, retail sales, promotional gift exports,
- * running stock balance after every document, and closing balance matching `product.stock`.
+ * stocktake adjustments (`stockAdjustments`), running stock balance after every document, and closing balance matching `product.stock`.
  */
 export function computeProductStockMovementLedger(
   product: ProductItem,
   sales: SaleTransaction[],
   imports: ImportTransaction[],
-  options?: { fromDate?: string; toDate?: string }
+  options?: { fromDate?: string; toDate?: string; stockAdjustments?: StockAdjustmentRecord[] }
 ): ProductStockMovementLedger {
   const prodWh = product.warehouseName || '';
   const normProdName = normalizeVietnameseSearch(product.name);
@@ -4022,6 +4077,49 @@ export function computeProductStockMovementLedger(
     }
   }
 
+  for (const adj of options?.stockAdjustments || []) {
+    if (adj.productId !== product.id) continue;
+    const diff = Math.round(Number(adj.diffQty) || 0);
+    if (diff === 0) continue;
+    const unitCost = Math.max(0, Number(adj.unitCost) || Number(product.importPrice) || 0);
+    if (diff > 0) {
+      allTimeImportQty += diff;
+      rawEvents.push({
+        id: `adj_${adj.id}`,
+        dateIso: adj.createdAt || '',
+        type: 'stocktake_in',
+        voucherCode: adj.adjustmentCode,
+        partnerName: `Kiểm kê kho (${adj.reason || 'Điều chỉnh tăng'})`,
+        partnerPhone: '',
+        warehouseName: adj.warehouseName || prodWh || 'Tâm An Mỹ Ngãi',
+        unitPriceOrCost: unitCost,
+        qtyIn: diff,
+        qtyOut: 0,
+        totalValue: Math.round(diff * unitCost),
+        note: adj.note || `Kiểm thực tế ${adj.actualCountedStock} (Hệ thống: ${adj.systemStockBefore})`,
+        staffName: adj.staffName || '',
+      });
+    } else {
+      const absDiff = Math.abs(diff);
+      allTimeExportQty += absDiff;
+      rawEvents.push({
+        id: `adj_${adj.id}`,
+        dateIso: adj.createdAt || '',
+        type: 'stocktake_out',
+        voucherCode: adj.adjustmentCode,
+        partnerName: `Kiểm kê kho (${adj.reason || 'Hao hụt / Điều chỉnh giảm'})`,
+        partnerPhone: '',
+        warehouseName: adj.warehouseName || prodWh || 'Tâm An Mỹ Ngãi',
+        unitPriceOrCost: unitCost,
+        qtyIn: 0,
+        qtyOut: absDiff,
+        totalValue: Math.round(absDiff * unitCost),
+        note: adj.note || `Kiểm thực tế ${adj.actualCountedStock} (Hệ thống: ${adj.systemStockBefore})`,
+        staffName: adj.staffName || '',
+      });
+    }
+  }
+
   rawEvents.sort((a, b) => {
     const cmp = (a.dateIso || '').localeCompare(b.dateIso || '');
     if (cmp !== 0) return cmp;
@@ -4053,6 +4151,7 @@ export function computeProductStockMovementLedger(
   let periodExportCount = 0;
   let periodExportSaleQty = 0;
   let periodExportGiftQty = 0;
+  let periodExportAdjustmentQty = 0;
   let periodExportRevenue = 0;
 
   for (const ev of eventsWithBalance) {
@@ -4066,7 +4165,7 @@ export function computeProductStockMovementLedger(
       continue;
     }
     movementsInPeriodAsc.push(ev);
-    if (ev.type === 'import') {
+    if (ev.type === 'import' || ev.type === 'stocktake_in') {
       periodImportCount += 1;
       periodImportQty += ev.qtyIn;
       periodImportValue += ev.totalValue;
@@ -4074,13 +4173,17 @@ export function computeProductStockMovementLedger(
       periodExportCount += 1;
       periodExportSaleQty += ev.qtyOut;
       periodExportRevenue += ev.totalValue;
+    } else if (ev.type === 'stocktake_out') {
+      periodExportCount += 1;
+      periodExportAdjustmentQty += ev.qtyOut;
     } else {
       periodExportCount += 1;
       periodExportGiftQty += ev.qtyOut;
     }
   }
 
-  const periodExportTotalQty = periodExportSaleQty + periodExportGiftQty;
+  const periodExportTotalQty =
+    periodExportSaleQty + periodExportGiftQty + periodExportAdjustmentQty;
   const closingStock =
     movementsInPeriodAsc.length > 0
       ? movementsInPeriodAsc[movementsInPeriodAsc.length - 1].balanceAfter
@@ -4095,6 +4198,7 @@ export function computeProductStockMovementLedger(
     periodExportCount,
     periodExportSaleQty,
     periodExportGiftQty,
+    periodExportAdjustmentQty,
     periodExportTotalQty,
     periodExportRevenue,
     closingStock,
@@ -4102,6 +4206,288 @@ export function computeProductStockMovementLedger(
     allTimeExportQty,
     movementsInPeriod: [...movementsInPeriodAsc].reverse(),
   };
+}
+
+export type ExpiryAlertStatus =
+  | 'none'
+  | 'expired'
+  | 'expiring_30d'
+  | 'expiring_60d'
+  | 'expiring_90d'
+  | 'safe';
+
+export function evaluateProductExpiry(
+  expiryDate?: string,
+  todayStr = getTodayVietnamDateStr()
+): { status: ExpiryAlertStatus; daysRemaining: number | null; badgeLabel: string } {
+  const clean = (expiryDate || '').trim().slice(0, 10);
+  if (!clean || !/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    return { status: 'none', daysRemaining: null, badgeLabel: 'Chưa có HSD' };
+  }
+  const ref = toVietnamDateStr(todayStr) || getTodayVietnamDateStr();
+  const [ey, em, ed] = clean.split('-').map(Number);
+  const [ry, rm, rd] = ref.split('-').map(Number);
+  const expMs = Date.UTC(ey, em - 1, ed);
+  const refMs = Date.UTC(ry, rm - 1, rd);
+  if (!Number.isFinite(expMs) || !Number.isFinite(refMs)) {
+    return { status: 'none', daysRemaining: null, badgeLabel: 'Chưa có HSD' };
+  }
+  const daysRemaining = Math.round((expMs - refMs) / 86_400_000);
+  if (daysRemaining < 0) {
+    return {
+      status: 'expired',
+      daysRemaining,
+      badgeLabel: `Đã hết hạn (${Math.abs(daysRemaining)} ngày)`,
+    };
+  }
+  if (daysRemaining <= 30) {
+    return {
+      status: 'expiring_30d',
+      daysRemaining,
+      badgeLabel: daysRemaining === 0 ? 'Hết hạn hôm nay' : `Hết hạn sau ${daysRemaining} ngày`,
+    };
+  }
+  if (daysRemaining <= 60) {
+    return {
+      status: 'expiring_60d',
+      daysRemaining,
+      badgeLabel: `Còn ${daysRemaining} ngày`,
+    };
+  }
+  if (daysRemaining <= 90) {
+    return {
+      status: 'expiring_90d',
+      daysRemaining,
+      badgeLabel: `Còn ${daysRemaining} ngày`,
+    };
+  }
+  return { status: 'safe', daysRemaining, badgeLabel: `Còn ${daysRemaining} ngày` };
+}
+
+export function pickEarlierFefoBatch(
+  existingBatch?: string,
+  existingExpiry?: string,
+  incomingBatch?: string,
+  incomingExpiry?: string,
+  currentStock = 0
+): { batchNumber?: string; expiryDate?: string } {
+  const curExp = (existingExpiry || '').trim().slice(0, 10);
+  const inExp = (incomingExpiry || '').trim().slice(0, 10);
+  const curValid = /^\d{4}-\d{2}-\d{2}$/.test(curExp);
+  const inValid = /^\d{4}-\d{2}-\d{2}$/.test(inExp);
+  const cleanCurBatch = existingBatch?.trim() || undefined;
+  const cleanInBatch = incomingBatch?.trim() || undefined;
+
+  if (currentStock <= 0 || !curValid) {
+    return {
+      batchNumber: cleanInBatch || cleanCurBatch,
+      expiryDate: inValid ? inExp : curValid ? curExp : undefined,
+    };
+  }
+  if (!inValid) {
+    return {
+      batchNumber: cleanCurBatch || cleanInBatch,
+      expiryDate: curExp,
+    };
+  }
+  // Both valid with existing stock > 0 -> FEFO keeps earlier expiry batch first
+  if (inExp < curExp) {
+    return {
+      batchNumber: cleanInBatch || cleanCurBatch,
+      expiryDate: inExp,
+    };
+  }
+  return {
+    batchNumber: cleanCurBatch || cleanInBatch,
+    expiryDate: curExp,
+  };
+}
+
+export interface SmartReorderSuggestionItem {
+  product: ProductItem;
+  soldQtyLookback: number;
+  dailyVelocity: number;
+  daysOfStockLeft: number | null;
+  suggestedOrderQty: number;
+  estimatedCost: number;
+  urgency: 'critical' | 'high' | 'watch';
+  reason: string;
+}
+
+export function computeSmartReorderSuggestions(
+  products: ProductItem[],
+  sales: SaleTransaction[],
+  options?: { lookbackDays?: number; coverDays?: number; todayStr?: string }
+): SmartReorderSuggestionItem[] {
+  const lookbackDays = Math.max(1, Math.round(options?.lookbackDays ?? 30));
+  const coverDays = Math.max(7, Math.round(options?.coverDays ?? 21));
+  const todayStr = toVietnamDateStr(options?.todayStr) || getTodayVietnamDateStr();
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+  const fromUtc = new Date(Date.UTC(ty, tm - 1, td - lookbackDays));
+  const fromDateStr = fromUtc.toISOString().slice(0, 10);
+
+  const soldByProduct = new Map<string, number>();
+  for (const s of sales) {
+    const saleDate = toVietnamDateStr(s.createdAt);
+    if (!saleDate || saleDate < fromDateStr || saleDate > todayStr) continue;
+    const qty = Math.max(0, Number(s.quantity) || 0);
+    if (qty > 0 && s.productId) {
+      soldByProduct.set(s.productId, (soldByProduct.get(s.productId) || 0) + qty);
+    }
+    const giftQty = Math.max(0, Number(s.giftQuantity) || 0);
+    if (giftQty > 0 && s.giftProductId) {
+      soldByProduct.set(s.giftProductId, (soldByProduct.get(s.giftProductId) || 0) + giftQty);
+    }
+  }
+
+  const suggestions: SmartReorderSuggestionItem[] = [];
+  for (const product of products) {
+    const curStock = Math.max(0, Number(product.stock) || 0);
+    const minStk = Math.max(0, Number(product.minStock) || 0);
+    const soldQtyLookback = soldByProduct.get(product.id) || 0;
+    const dailyVelocity = soldQtyLookback / lookbackDays;
+    const daysOfStockLeft = dailyVelocity > 0 ? Math.floor(curStock / dailyVelocity) : null;
+
+    const needsReorder = curStock <= minStk || (daysOfStockLeft !== null && daysOfStockLeft <= 14);
+    if (!needsReorder) continue;
+
+    const targetStock = Math.max(minStk * 1.5, dailyVelocity * coverDays);
+    const suggestedOrderQty = Math.max(1, Math.ceil(targetStock - curStock));
+    const estimatedCost = Math.round(suggestedOrderQty * Math.max(0, Number(product.importPrice) || 0));
+
+    const urgency: 'critical' | 'high' | 'watch' =
+      curStock <= 0 || (daysOfStockLeft !== null && daysOfStockLeft <= 3)
+        ? 'critical'
+        : curStock <= minStk || (daysOfStockLeft !== null && daysOfStockLeft <= 7)
+        ? 'high'
+        : 'watch';
+
+    const reason =
+      curStock <= 0
+        ? 'Đã hết tồn kho'
+        : daysOfStockLeft !== null && daysOfStockLeft <= 14
+        ? `Ước tính chỉ đủ bán ~${daysOfStockLeft} ngày (${dailyVelocity.toFixed(1)} ${product.unit}/ngày)`
+        : `Tồn (${curStock}) dưới mức tối thiểu (${minStk})`;
+
+    suggestions.push({
+      product,
+      soldQtyLookback,
+      dailyVelocity,
+      daysOfStockLeft,
+      suggestedOrderQty,
+      estimatedCost,
+      urgency,
+      reason,
+    });
+  }
+
+  const rank = { critical: 0, high: 1, watch: 2 };
+  return suggestions.sort((a, b) => {
+    if (rank[a.urgency] !== rank[b.urgency]) return rank[a.urgency] - rank[b.urgency];
+    return b.soldQtyLookback - a.soldQtyLookback;
+  });
+}
+
+export interface DebtAgingBucketSummary {
+  currentAmount: number;
+  currentCount: number;
+  overdue1To30Amount: number;
+  overdue1To30Count: number;
+  overdue31To60Amount: number;
+  overdue31To60Count: number;
+  overdue60PlusAmount: number;
+  overdue60PlusCount: number;
+  totalDebtAmount: number;
+  totalDebtCount: number;
+}
+
+export function computeDebtAgingSummary<T extends { debtAmount: number; dueDate: string }>(
+  records: T[],
+  todayStr = getTodayVietnamDateStr()
+): DebtAgingBucketSummary {
+  const summary: DebtAgingBucketSummary = {
+    currentAmount: 0,
+    currentCount: 0,
+    overdue1To30Amount: 0,
+    overdue1To30Count: 0,
+    overdue31To60Amount: 0,
+    overdue31To60Count: 0,
+    overdue60PlusAmount: 0,
+    overdue60PlusCount: 0,
+    totalDebtAmount: 0,
+    totalDebtCount: 0,
+  };
+
+  for (const r of records) {
+    const debt = Math.max(0, Math.round(Number(r.debtAmount) || 0));
+    if (debt <= 0) continue;
+    summary.totalDebtAmount += debt;
+    summary.totalDebtCount += 1;
+
+    const { daysRemaining } = evaluateDebtUrgency(r.dueDate, debt, todayStr, 3);
+    if (daysRemaining >= 0) {
+      summary.currentAmount += debt;
+      summary.currentCount += 1;
+    } else {
+      const overdueDays = Math.abs(daysRemaining);
+      if (overdueDays <= 30) {
+        summary.overdue1To30Amount += debt;
+        summary.overdue1To30Count += 1;
+      } else if (overdueDays <= 60) {
+        summary.overdue31To60Amount += debt;
+        summary.overdue31To60Count += 1;
+      } else {
+        summary.overdue60PlusAmount += debt;
+        summary.overdue60PlusCount += 1;
+      }
+    }
+  }
+  return summary;
+}
+
+export function buildZaloDebtReminderMessage(params: {
+  storeName?: string;
+  customerName: string;
+  customerPhone?: string;
+  totalDebt: number;
+  unpaidInvoices: Array<{
+    invoiceCode: string;
+    date: string;
+    productName: string;
+    debtAmount: number;
+    dueDate: string;
+  }>;
+  todayStr?: string;
+}): { message: string; zaloUrl: string | null } {
+  const storeName = params.storeName?.trim() || 'VTNN Tâm An';
+  const today = params.todayStr || getTodayVietnamDateStr();
+  const totalStr = formatVND(Math.max(0, Math.round(params.totalDebt)));
+  const lines = (params.unpaidInvoices || [])
+    .slice(0, 8)
+    .map(
+      (inv, i) =>
+        `${i + 1}. ${inv.invoiceCode} (${inv.date.slice(0, 10)}) — ${inv.productName}: còn nợ ${formatVND(
+          inv.debtAmount
+        )} (Hạn: ${inv.dueDate || '—'})`
+    );
+  if ((params.unpaidInvoices || []).length > 8) {
+    lines.push(`... và ${params.unpaidInvoices.length - 8} hóa đơn khác.`);
+  }
+
+  const message = [
+    `Kính gửi Anh/Chị ${params.customerName},`,
+    `${storeName} xin gửi bảng đối soát công nợ vật tư nông nghiệp tính đến ngày ${today}:`,
+    ...lines,
+    `=> Tổng dư nợ hiện tại: ${totalStr}.`,
+    `Rất mong Anh/Chị kiểm tra đối chiếu và thu xếp thanh toán thuận tiện. Trân trọng cảm ơn!`,
+  ].join('\n');
+
+  let digits = (params.customerPhone || '').replace(/\D+/g, '');
+  if (digits.startsWith('84') && digits.length >= 11) {
+    digits = '0' + digits.slice(2);
+  }
+  const zaloUrl = digits.length >= 9 && digits.length <= 11 ? `https://zalo.me/${digits}` : null;
+  return { message, zaloUrl };
 }
 
 

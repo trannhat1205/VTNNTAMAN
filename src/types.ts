@@ -42,6 +42,9 @@ export interface ProductItem {
   minStock: number;
   supplierName: string;
   warehouseName?: string;
+  batchNumber?: string;
+  expiryDate?: string;
+  barcode?: string;
   ownerId: string;
   createdAt: string;
   updatedAt: string;
@@ -115,6 +118,8 @@ export interface ImportTransaction {
   dueDate: string;
   status: PaymentStatus;
   warehouseName?: string;
+  batchNumber?: string;
+  expiryDate?: string;
   note: string;
   staffName: string;
   ownerId: string;
@@ -359,6 +364,27 @@ export interface AuditLogEntry {
   restoredAt?: string;
 }
 
+export interface StockAdjustmentRecord {
+  id: string;
+  adjustmentCode: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  unit: string;
+  warehouseName: string;
+  systemStockBefore: number;
+  actualCountedStock: number;
+  diffQty: number;
+  unitCost: number;
+  diffValue: number;
+  reason: string;
+  note: string;
+  staffName: string;
+  ownerId: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
 export interface BackupSnapshotPayload {
   version: string;
   exportedAt: string;
@@ -376,6 +402,7 @@ export interface BackupSnapshotPayload {
   suppliers: SupplierProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  stockAdjustments?: StockAdjustmentRecord[];
   savedVouchers: SavedVoucherRecord[];
   receiptVouchers?: CashReceiptVoucher[];
   paymentVouchers?: CashPaymentVoucher[];

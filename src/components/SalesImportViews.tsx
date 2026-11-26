@@ -42,6 +42,7 @@ import {
   computeSupplierOldDebtSummary,
   DEBT_TERM_DAY_OPTIONS,
   evaluateDebtUrgency,
+  evaluateProductExpiry,
   formatVND,
   matchDebtTermDays,
 } from '../utils/businessLogic';
@@ -1071,14 +1072,46 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   setShowNewProductBox(true);
                   if (kw) setNewProdName(kw);
                 }}
-                options={products.map((p) => ({
-                  value: p.id,
-                  label: `${p.name} [${p.warehouseName || 'Tâm An Mỹ Ngãi'}] — Tồn: ${p.stock} ${p.unit} (${formatVND(p.sellPrice)})`,
-                  subLabel: `Mã: ${p.code} · Nhóm: ${p.category} · NCC: ${p.supplierName}`,
-                  badge: formatVND(p.sellPrice),
-                  keywords: `${p.name} ${p.code} ${p.category} ${p.warehouseName || ''} ${p.supplierName}`,
-                }))}
+                options={products.map((p) => {
+                  const expInfo = evaluateProductExpiry(p.expiryDate);
+                  return {
+                    value: p.id,
+                    label: `${p.name} [${p.warehouseName || 'Tâm An Mỹ Ngãi'}] — Tồn: ${p.stock} ${p.unit} (${formatVND(p.sellPrice)})`,
+                    subLabel: `Mã: ${p.code} · Nhóm: ${p.category} · NCC: ${p.supplierName}${
+                      p.barcode ? ` · Barcode: ${p.barcode}` : ''
+                    }${p.batchNumber ? ` · Lô: ${p.batchNumber}` : ''}${
+                      p.expiryDate ? ` · HSD: ${p.expiryDate} (${expInfo.badgeLabel})` : ''
+                    }`,
+                    badge: formatVND(p.sellPrice),
+                    keywords: `${p.name} ${p.code} ${p.barcode || ''} ${p.batchNumber || ''} ${p.category} ${p.warehouseName || ''} ${p.supplierName}`,
+                  };
+                })}
               />
+
+              {currentProduct &&
+                currentProduct.expiryDate &&
+                (() => {
+                  const exp = evaluateProductExpiry(currentProduct.expiryDate);
+                  if (exp.status !== 'expired' && exp.status !== 'expiring_30d' && exp.status !== 'expiring_60d') {
+                    return null;
+                  }
+                  return (
+                    <div
+                      className={`p-2.5 rounded-lg border text-xs flex items-center gap-2 ${
+                        exp.status === 'expired'
+                          ? 'bg-red-50 border-red-200 text-red-800'
+                          : 'bg-amber-50 border-amber-200 text-amber-800'
+                      }`}
+                    >
+                      <AlertCircle className="w-4 h-4 shrink-0" />
+                      <div>
+                        <strong>Cảnh báo FEFO / Hạn sử dụng:</strong>{' '}
+                        {currentProduct.batchNumber ? `Lô ${currentProduct.batchNumber} · ` : ''}
+                        HSD {currentProduct.expiryDate} ({exp.badgeLabel}) — ưu tiên xuất lô này trước.
+                      </div>
+                    </div>
+                  );
+                })()}
 
               {showNewProductBox && (
                 <div className="p-3.5 bg-emerald-50/60 rounded-lg border border-emerald-200 space-y-3">
@@ -2428,6 +2461,8 @@ interface ImportLogViewProps {
     dueDate: string;
     note: string;
     warehouseName: string;
+    batchNumber?: string;
+    expiryDate?: string;
   }) => ImportTransaction;
   onCreateProductInline: (
     data: Omit<ProductItem, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
@@ -2505,6 +2540,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [unitCost, setUnitCost] = useState<string>('');
   const [paidAmount, setPaidAmount] = useState<string>('');
   const [dueDate, setDueDate] = useState<string>('');
+  const [batchNumber, setBatchNumber] = useState<string>('');
+  const [expiryDate, setExpiryDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(
     null
@@ -2545,6 +2582,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     setUnitCost('');
     setPaidAmount('');
     setDueDate('');
+    setBatchNumber('');
+    setExpiryDate('');
     setNote('');
     setShowNewProductBox(false);
     setNewProdCode('');
@@ -2805,6 +2844,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
           : computeDueDateAfterDays(0),
       note: note.trim(),
       warehouseName: resolvedWarehouse,
+      batchNumber: batchNumber.trim() || undefined,
+      expiryDate: expiryDate || undefined,
     });
 
     if (shouldExportPDF) {
@@ -3288,6 +3329,40 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   value={unitCost}
                   onChange={(e) => setUnitCost(e.target.value)}
                   placeholder="Nhập giá nhập..."
+                  className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label
+                  htmlFor="import-batch-input"
+                  className="block text-xs font-semibold text-slate-700 mb-1"
+                >
+                  Số lô nhập (FEFO)
+                </label>
+                <input
+                  id="import-batch-input"
+                  type="text"
+                  value={batchNumber}
+                  onChange={(e) => setBatchNumber(e.target.value)}
+                  placeholder="VD: LO-2611-A"
+                  className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="import-expiry-input"
+                  className="block text-xs font-semibold text-slate-700 mb-1"
+                >
+                  Hạn sử dụng lô (HSD)
+                </label>
+                <input
+                  id="import-expiry-input"
+                  type="date"
+                  value={expiryDate}
+                  onChange={(e) => setExpiryDate(e.target.value)}
                   className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                 />
               </div>

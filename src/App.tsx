@@ -46,6 +46,7 @@ import {
   StaffFunctionalPermission,
   StaffMember,
   StaffPositionRole,
+  StockAdjustmentRecord,
   SupplierProfile,
   UserRole,
 } from './types';
@@ -95,6 +96,7 @@ import {
   MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
+  pickEarlierFefoBatch,
   readExcelNumber,
   recalculateImportPriceOnImportMutation,
   reconcileCustomersFromSales,
@@ -240,6 +242,9 @@ export default function App() {
   const [savedVouchers, setSavedVouchers] = useState<SavedVoucherRecord[]>(
     initialWorkspace.savedVouchers
   );
+  const [stockAdjustments, setStockAdjustments] = useState<StockAdjustmentRecord[]>(
+    initialWorkspace.stockAdjustments || []
+  );
   const [backups, setBackups] = useState<BackupEntry[]>(initialWorkspace.backups);
   const [suppliers, setSuppliers] = useState<SupplierProfile[]>(initialWorkspace.suppliers);
   const [warehouses, setWarehouses] = useState<string[]>(initialWorkspace.warehouses);
@@ -332,6 +337,7 @@ export default function App() {
       receiptVouchers,
       paymentVouchers,
       savedVouchers,
+      stockAdjustments,
       backups,
       auditLogs,
       warehouses,
@@ -352,6 +358,7 @@ export default function App() {
     receiptVouchers,
     paymentVouchers,
     savedVouchers,
+    stockAdjustments,
     backups,
     auditLogs,
     warehouses,
@@ -378,6 +385,7 @@ export default function App() {
         setReceiptVouchers(parsed.receiptVouchers);
         setPaymentVouchers(parsed.paymentVouchers);
         setSavedVouchers(parsed.savedVouchers);
+        setStockAdjustments(parsed.stockAdjustments || []);
         setBackups(parsed.backups);
         setAuditLogs(parsed.auditLogs);
         setWarehouses(parsed.warehouses);
@@ -518,6 +526,17 @@ export default function App() {
         selectedFilterWarehouses
       ),
     [savedVouchers, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const visibleStockAdjustments = useMemo(
+    () =>
+      filterRecordsBySelectedWarehouses(
+        stockAdjustments,
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ),
+    [stockAdjustments, currentStaff, warehouses, selectedFilterWarehouses]
   );
 
   const isAdminAccount = useMemo(
@@ -845,6 +864,7 @@ export default function App() {
     receiptVouchers,
     paymentVouchers,
     savedVouchers,
+    stockAdjustments,
     auditLogs,
     backups,
     warehouses,
@@ -865,6 +885,7 @@ export default function App() {
     receiptVouchers,
     paymentVouchers,
     savedVouchers,
+    stockAdjustments,
     auditLogs,
     backups,
     warehouses,
@@ -1008,6 +1029,11 @@ export default function App() {
               ? dedupeRecordsById([...cur.savedVouchers, ...agg.savedVouchers])
               : agg.savedVouchers
           );
+          setStockAdjustments(
+            firstHydration
+              ? dedupeRecordsById([...cur.stockAdjustments, ...agg.stockAdjustments])
+              : agg.stockAdjustments
+          );
           setAuditLogs(
             firstHydration
               ? dedupeRecordsById([...cur.auditLogs, ...agg.auditLogs])
@@ -1115,6 +1141,11 @@ export default function App() {
           ? dedupeRecordsById([...cur.savedVouchers, ...remoteWs.savedVouchers])
           : remoteWs.savedVouchers
       );
+      setStockAdjustments(
+        firstHydration
+          ? dedupeRecordsById([...cur.stockAdjustments, ...(remoteWs.stockAdjustments || [])])
+          : remoteWs.stockAdjustments || []
+      );
       setAuditLogs(
         firstHydration
           ? dedupeRecordsById([...cur.auditLogs, ...remoteWs.auditLogs]).slice(0, 500)
@@ -1207,6 +1238,7 @@ export default function App() {
           receiptVouchers,
           paymentVouchers,
           savedVouchers,
+          stockAdjustments,
           auditLogs,
           backups,
           settings: settingsObj,
@@ -1248,6 +1280,7 @@ export default function App() {
           receiptVouchers,
           paymentVouchers,
           savedVouchers,
+          stockAdjustments,
           auditLogs: auditLogs.slice(0, 500),
           backups: backups.map((b) => ({ ...b, snapshotPayload: undefined })),
           settings: settingsObj,
@@ -1283,6 +1316,7 @@ export default function App() {
     receiptVouchers,
     paymentVouchers,
     savedVouchers,
+    stockAdjustments,
     auditLogs,
     backups,
     warehouses,
@@ -1797,14 +1831,33 @@ export default function App() {
     dueDate: string;
     note: string;
     warehouseName: string;
+    batchNumber?: string;
+    expiryDate?: string;
   }): ImportTransaction => {
     const nowIso = new Date().toISOString();
-    const { updatedProducts, updatedProduct } = applyImportToInventory(
-      productsRef.current,
-      payload.productId,
-      payload.quantity,
-      payload.unitCost,
-      nowIso
+    const { updatedProducts: baseUpdatedProducts, updatedProduct: baseUpdatedProduct } =
+      applyImportToInventory(
+        productsRef.current,
+        payload.productId,
+        payload.quantity,
+        payload.unitCost,
+        nowIso
+      );
+    const prevStock = Math.max(0, (Number(baseUpdatedProduct.stock) || 0) - payload.quantity);
+    const fefo = pickEarlierFefoBatch(
+      baseUpdatedProduct.batchNumber,
+      baseUpdatedProduct.expiryDate,
+      payload.batchNumber,
+      payload.expiryDate,
+      prevStock
+    );
+    const updatedProduct: ProductItem = {
+      ...baseUpdatedProduct,
+      batchNumber: fefo.batchNumber,
+      expiryDate: fefo.expiryDate,
+    };
+    const updatedProducts = baseUpdatedProducts.map((p) =>
+      p.id === updatedProduct.id ? updatedProduct : p
     );
     const summary = calculateImportSummary(
       payload.quantity,
@@ -1831,6 +1884,8 @@ export default function App() {
       debtAmount: summary.debtAmount,
       dueDate: payload.dueDate,
       status: summary.status,
+      batchNumber: payload.batchNumber?.trim() || undefined,
+      expiryDate: payload.expiryDate?.trim() || undefined,
       note: payload.note,
       warehouseName:
         lockedWarehouse ||
@@ -2132,6 +2187,81 @@ export default function App() {
       }
       return created;
     }
+  };
+
+  const handleExecuteStocktake = (params: {
+    productId: string;
+    actualQty: number;
+    reason: string;
+    note?: string;
+  }): StockAdjustmentRecord | null => {
+    const target = productsRef.current.find((p) => p.id === params.productId);
+    if (!target) {
+      showToast('Không tìm thấy vật tư để kiểm kê.');
+      return null;
+    }
+    const systemQty = Math.max(0, Number(target.stock) || 0);
+    const actualQty = Math.max(0, Number(params.actualQty) || 0);
+    const diffQty = actualQty - systemQty;
+    const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const resolvedWh = lockedWarehouse || target.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const adjustmentCode = generateSequentialVoucherCode(
+      'KK',
+      stockAdjustments.map((s) => s.adjustmentCode)
+    );
+    const unitCost = Math.max(0, Number(target.importPrice) || 0);
+    const record: StockAdjustmentRecord = {
+      id: `kk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      adjustmentCode,
+      productId: target.id,
+      productCode: target.code,
+      productName: target.name,
+      unit: target.unit,
+      warehouseName: resolvedWh,
+      systemStockBefore: systemQty,
+      actualCountedStock: actualQty,
+      diffQty,
+      unitCost,
+      diffValue: diffQty * unitCost,
+      reason: params.reason.trim() || 'Kiểm kê định kỳ',
+      note: params.note?.trim() || '',
+      staffName: currentStaff.displayName,
+      ownerId: target.ownerId || activeUid,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const updatedProduct: ProductItem = {
+      ...target,
+      stock: actualQty,
+      updatedAt: nowIso,
+    };
+    const nextProducts = productsRef.current.map((p) =>
+      p.id === target.id ? updatedProduct : p
+    );
+    productsRef.current = nextProducts;
+    setProducts(nextProducts);
+    setStockAdjustments((prev) => [record, ...prev]);
+
+    const signStr = diffQty > 0 ? `+${diffQty}` : `${diffQty}`;
+    recordAuditLog({
+      actionCategory: 'update',
+      targetEntity: 'product',
+      targetCode: adjustmentCode,
+      warehouseName: resolvedWh,
+      summary: `Kiểm kê kho ${adjustmentCode}: ${target.name} (${systemQty} → ${actualQty} ${target.unit}, lệch ${signStr})`,
+      details: `Lý do: ${record.reason}${record.note ? ` · Ghi chú: ${record.note}` : ''} · Giá trị lệch: ${formatVND(
+        record.diffValue
+      )}`,
+      snapshotData: JSON.stringify(record),
+    });
+    showToast(
+      `Đã lưu phiếu kiểm kê ${adjustmentCode}: ${target.name} (${signStr} ${target.unit}).`
+    );
+    if (isGoogleAuthenticated) {
+      void syncProductToFirestore(updatedProduct, false);
+    }
+    return record;
   };
 
   const handleDeleteProduct = (productId: string) => {
@@ -4006,6 +4136,7 @@ export default function App() {
         setReceiptVouchers([]);
         setPaymentVouchers([]);
         setSavedVouchers([]);
+        setStockAdjustments([]);
         setAuditLogs([]);
         setWarehouses([autoWarehouseName]);
       }
@@ -4541,6 +4672,7 @@ export default function App() {
       receiptVouchers: isScopedWarehouseUser ? visibleReceiptVouchers : receiptVouchers,
       paymentVouchers: isScopedWarehouseUser ? visiblePaymentVouchers : paymentVouchers,
       savedVouchers: isScopedWarehouseUser ? visibleSavedVouchers : savedVouchers,
+      stockAdjustments: isScopedWarehouseUser ? visibleStockAdjustments : stockAdjustments,
       staffList: isScopedWarehouseUser ? [currentStaff] : staffList,
       auditLogs: isScopedWarehouseUser ? visibleAuditLogs : auditLogs,
     });
@@ -4717,6 +4849,9 @@ export default function App() {
     }
     if (Array.isArray(payload.savedVouchers) && !missingSet.has('savedVouchers')) {
       setSavedVouchers(payload.savedVouchers);
+    }
+    if (Array.isArray(payload.stockAdjustments) && !missingSet.has('stockAdjustments')) {
+      setStockAdjustments(payload.stockAdjustments);
     }
     if (isAdminAccount && Array.isArray(payload.staffList) && payload.staffList.length > 0) {
       setStaffList(payload.staffList);
@@ -5006,6 +5141,7 @@ export default function App() {
       setReceiptVouchers((prev) => prev.filter((r) => r.warehouseName !== lockedWarehouse));
       setPaymentVouchers((prev) => prev.filter((p) => p.warehouseName !== lockedWarehouse));
       setSavedVouchers((prev) => prev.filter((v) => v.warehouseName !== lockedWarehouse));
+      setStockAdjustments((prev) => prev.filter((a) => a.warehouseName !== lockedWarehouse));
       recordAuditLog({
         actionCategory: 'delete',
         targetEntity: 'backup',
@@ -5028,6 +5164,7 @@ export default function App() {
     setReceiptVouchers(wiped.receiptVouchers);
     setPaymentVouchers(wiped.paymentVouchers);
     setSavedVouchers(wiped.savedVouchers);
+    setStockAdjustments([]);
     setStaffList(wiped.preservedStaffList);
 
     recordAuditLog({
@@ -6131,6 +6268,7 @@ export default function App() {
               customers={visibleCustomers}
               sales={visibleSales}
               imports={visibleImports}
+              stockAdjustments={visibleStockAdjustments}
               role={role}
               warehouses={warehouses}
               onAddWarehouse={handleAddWarehouse}
@@ -6139,6 +6277,7 @@ export default function App() {
               onAddProductCategory={handleAddProductCategory}
               onSaveProduct={handleSaveProduct}
               onDeleteProduct={handleDeleteProduct}
+              onExecuteStocktake={handleExecuteStocktake}
               onImportProductsFromExcel={handleImportProductsFromExcel}
               onQuickRestock={(prodId) => {
                 setPreselectedProductId(prodId);
@@ -6200,6 +6339,8 @@ export default function App() {
               onDeleteSale={handleDeleteSale}
               onUpdateImport={handleUpdateImport}
               onDeleteImport={handleDeleteImport}
+              storeName={lockedWarehouse || (selectedFilterWarehouses.length === 1 ? selectedFilterWarehouses[0] : 'VTNN Tâm An')}
+              onShowToast={showToast}
             />
           )}
 

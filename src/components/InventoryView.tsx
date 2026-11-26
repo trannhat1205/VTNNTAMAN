@@ -7,6 +7,7 @@ import {
   Boxes,
   Calendar,
   CheckCircle2,
+  ClipboardCheck,
   Eye,
   FileSpreadsheet,
   FolderPlus,
@@ -15,6 +16,7 @@ import {
   PackagePlus,
   Pencil,
   Search,
+  Sparkles,
   Trash2,
   TrendingUp,
   Warehouse,
@@ -26,18 +28,25 @@ import {
   ProductCategory,
   ProductItem,
   SaleTransaction,
+  StockAdjustmentRecord,
   UserRole,
 } from '../types';
 import {
   canPerformRoleAction,
   computeProductStockMovementLedger,
+  computeSmartReorderSuggestions,
+  evaluateProductExpiry,
   evaluateStockAlert,
   formatVND,
   getCurrentMonthRangeVietnam,
   getRecentDaysRangeVietnam,
   normalizeVietnameseSearch,
 } from '../utils/businessLogic';
-import { exportModuleDataExcel, exportProductStockCardExcel } from '../utils/exportReports';
+import {
+  exportModuleDataExcel,
+  exportProductStockCardExcel,
+  exportSmartReorderExcel,
+} from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 
@@ -46,6 +55,7 @@ interface InventoryViewProps {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  stockAdjustments?: StockAdjustmentRecord[];
   role: UserRole;
   warehouses: string[];
   onAddWarehouse: (warehouseName: string) => void;
@@ -57,6 +67,12 @@ interface InventoryViewProps {
     editingId?: string
   ) => ProductItem;
   onDeleteProduct: (productId: string) => void;
+  onExecuteStocktake?: (params: {
+    productId: string;
+    actualQty: number;
+    reason: string;
+    note?: string;
+  }) => StockAdjustmentRecord | null;
   onImportProductsFromExcel: (rows: Record<string, unknown>[]) => number;
   onQuickRestock: (productId: string) => void;
   onRequestAddNewProductInImports?: () => void;
@@ -69,6 +85,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   customers,
   sales,
   imports,
+  stockAdjustments = [],
   role,
   warehouses,
   onAddWarehouse,
@@ -77,6 +94,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onAddProductCategory,
   onSaveProduct,
   onDeleteProduct,
+  onExecuteStocktake,
   onImportProductsFromExcel,
   onQuickRestock,
   onRequestAddNewProductInImports,
@@ -86,7 +104,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
   const [categoryFilter, setCategoryFilter] = useState<ProductCategory | 'all'>('all');
-  const [stockFilter, setStockFilter] = useState<'all' | 'low_or_out' | 'out_of_stock' | 'normal'>('all');
+  const [stockFilter, setStockFilter] = useState<
+    'all' | 'low_or_out' | 'out_of_stock' | 'normal' | 'expiring'
+  >('all');
 
   // Detailed Stock Movement Ledger Modal (Chi tiết Xuất - Nhập - Tồn kho) when clicking any item
   const [detailProductId, setDetailProductId] = useState<string | null>(null);
@@ -112,6 +132,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [stock, setStock] = useState<string>('');
   const [minStock, setMinStock] = useState<string>('');
   const [supplierName, setSupplierName] = useState('');
+  const [batchNumber, setBatchNumber] = useState('');
+  const [expiryDate, setExpiryDate] = useState('');
+  const [barcode, setBarcode] = useState('');
+
+  // Stocktake Modal (Kiểm kê & Điều chỉnh tồn kho KK-YYMM-XXX)
+  const [isStocktakeModalOpen, setIsStocktakeModalOpen] = useState(false);
+  const [stocktakeProductId, setStocktakeProductId] = useState('');
+  const [stocktakeActualQty, setStocktakeActualQty] = useState('');
+  const [stocktakeReason, setStocktakeReason] = useState('Kiểm kê định kỳ');
+  const [stocktakeNote, setStocktakeNote] = useState('');
+  const [stocktakeFeedback, setStocktakeFeedback] = useState<string | null>(null);
+  const [showSmartReorderPanel, setShowSmartReorderPanel] = useState(true);
 
   // Inline New Product Category Creation inside Modal
   const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
@@ -213,8 +245,24 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     return computeProductStockMovementLedger(detailProduct, sales, imports, {
       fromDate: ledgerFromDate || undefined,
       toDate: ledgerToDate || undefined,
+      stockAdjustments,
     });
-  }, [detailProduct, sales, imports, ledgerFromDate, ledgerToDate]);
+  }, [detailProduct, sales, imports, stockAdjustments, ledgerFromDate, ledgerToDate]);
+
+  const smartReorderSuggestions = useMemo(
+    () => computeSmartReorderSuggestions(scopedBaseProducts, sales),
+    [scopedBaseProducts, sales]
+  );
+
+  const expiringOrExpiredCount = useMemo(
+    () =>
+      scopedBaseProducts.filter((p) => {
+        if ((Number(p.stock) || 0) <= 0) return false;
+        const st = evaluateProductExpiry(p.expiryDate).status;
+        return st === 'expired' || st === 'expiring_30d' || st === 'expiring_60d' || st === 'expiring_90d';
+      }).length,
+    [scopedBaseProducts]
+  );
 
   const filteredDetailMovements = useMemo(() => {
     if (!detailLedger) return [];
@@ -236,10 +284,17 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     if (stockFilter === 'low_or_out' && alert === 'normal') return false;
     if (stockFilter === 'out_of_stock' && alert !== 'out_of_stock') return false;
     if (stockFilter === 'normal' && alert !== 'normal') return false;
+    if (stockFilter === 'expiring') {
+      const exp = evaluateProductExpiry(p.expiryDate).status;
+      const isExpiring =
+        (Number(p.stock) || 0) > 0 &&
+        (exp === 'expired' || exp === 'expiring_30d' || exp === 'expiring_60d' || exp === 'expiring_90d');
+      if (!isExpiring) return false;
+    }
     const q = normalizeVietnameseSearch(searchQuery);
     if (!q) return true;
     return normalizeVietnameseSearch(
-      `${p.name} ${p.code} ${p.category} ${p.supplierName} ${pWarehouse}`
+      `${p.name} ${p.code} ${p.barcode || ''} ${p.batchNumber || ''} ${p.category} ${p.supplierName} ${pWarehouse}`
     ).includes(q);
   });
 
@@ -254,6 +309,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setStock('');
     setMinStock('');
     setSupplierName('');
+    setBatchNumber('');
+    setExpiryDate('');
+    setBarcode('');
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -278,6 +336,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setStock(String(p.stock));
     setMinStock(String(p.minStock));
     setSupplierName(p.supplierName);
+    setBatchNumber(p.batchNumber || '');
+    setExpiryDate(p.expiryDate || '');
+    setBarcode(p.barcode || '');
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -339,6 +400,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         stock: Math.max(0, Number(stock) || 0),
         minStock: Math.max(0, Number(minStock) || 10),
         supplierName: supplierName.trim() || 'Nhà cung cấp VTNN',
+        batchNumber: batchNumber.trim() || undefined,
+        expiryDate: expiryDate.trim() || undefined,
+        barcode: barcode.trim() || undefined,
       },
       editingProduct?.id
     );
@@ -434,26 +498,131 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </button>
       </div>
 
-      {/* Alert Banner for Low Stock Items */}
-      {lowStockCount > 0 && (
-        <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      {/* Alert Banner for Low Stock / Expiry */}
+      {(lowStockCount > 0 || expiringOrExpiredCount > 0) && (
+        <div className="bg-amber-50/80 border border-amber-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
             <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
-            <h3 className="text-sm font-bold text-slate-900">
-              Cảnh báo tồn kho ({lowStockCount} mặt hàng chạm hoặc dưới định mức tối thiểu)
-            </h3>
+            <div className="text-sm font-bold text-slate-900">
+              {lowStockCount > 0 && (
+                <span>Cảnh báo tồn kho ({lowStockCount} mặt hàng chạm định mức tối thiểu)</span>
+              )}
+              {lowStockCount > 0 && expiringOrExpiredCount > 0 && <span className="mx-2 text-slate-400">·</span>}
+              {expiringOrExpiredCount > 0 && (
+                <span className="text-red-700">
+                  {expiringOrExpiredCount} mặt hàng sắp hết hạn / quá hạn (FEFO)
+                </span>
+              )}
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={() =>
-              setStockFilter((prev) => (prev === 'low_or_out' ? 'all' : 'low_or_out'))
-            }
-            className="px-3.5 py-2 text-xs font-semibold bg-white text-amber-800 border border-amber-300 rounded-lg hover:bg-amber-100/50 transition-colors whitespace-nowrap shrink-0"
-          >
-            {stockFilter === 'low_or_out'
-              ? 'Xem toàn bộ kho'
-              : `Chỉ xem ${lowStockCount} mặt hàng sắp hết`}
-          </button>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {expiringOrExpiredCount > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setStockFilter((prev) => (prev === 'expiring' ? 'all' : 'expiring'))
+                }
+                className="px-3 py-1.5 text-xs font-semibold bg-white text-red-700 border border-red-200 rounded-lg hover:bg-red-50 transition-colors whitespace-nowrap"
+              >
+                {stockFilter === 'expiring'
+                  ? 'Xem toàn bộ kho'
+                  : `Lọc ${expiringOrExpiredCount} hàng sắp hết hạn`}
+              </button>
+            )}
+            {lowStockCount > 0 && (
+              <button
+                type="button"
+                onClick={() =>
+                  setStockFilter((prev) => (prev === 'low_or_out' ? 'all' : 'low_or_out'))
+                }
+                className="px-3.5 py-1.5 text-xs font-semibold bg-white text-amber-800 border border-amber-300 rounded-lg hover:bg-amber-100/50 transition-colors whitespace-nowrap"
+              >
+                {stockFilter === 'low_or_out'
+                  ? 'Xem toàn bộ kho'
+                  : `Chỉ xem ${lowStockCount} mặt hàng sắp hết`}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Smart Reorder Suggestions Panel */}
+      {smartReorderSuggestions.length > 0 && (
+        <div className="bg-white border border-emerald-200 rounded-xl p-4 space-y-3 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-emerald-700 shrink-0" />
+              <h3 className="text-xs sm:text-sm font-bold text-slate-900">
+                Đề Xuất Nhập Hàng Thông Minh ({smartReorderSuggestions.length} vật tư cần nhập theo tốc độ bán 30 ngày)
+              </h3>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() =>
+                  exportSmartReorderExcel(
+                    smartReorderSuggestions,
+                    lockedWarehouse || (warehouseFilter !== 'all' ? warehouseFilter : 'Tất cả kho')
+                  )
+                }
+                className="px-2.5 py-1 text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg flex items-center gap-1"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Xuất Excel Đề Xuất</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSmartReorderPanel((v) => !v)}
+                className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg"
+              >
+                {showSmartReorderPanel ? 'Thu gọn' : 'Mở rộng'}
+              </button>
+            </div>
+          </div>
+          {showSmartReorderPanel && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+              {smartReorderSuggestions.slice(0, 6).map((item) => (
+                <div
+                  key={item.product.id}
+                  className={`p-3 rounded-lg border flex flex-col justify-between gap-2 text-xs ${
+                    item.urgency === 'critical'
+                      ? 'bg-red-50/60 border-red-200'
+                      : 'bg-amber-50/50 border-amber-200'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-900 truncate">{item.product.name}</span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                          item.urgency === 'critical'
+                            ? 'bg-red-100 text-red-700'
+                            : 'bg-amber-100 text-amber-800'
+                        }`}
+                      >
+                        {item.urgency === 'critical' ? 'Khẩn cấp' : 'Sắp thiếu'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-600 mt-1 font-mono">
+                      Tồn: <strong>{item.product.stock}</strong> {item.product.unit} · Bán TB:{' '}
+                      <strong>{Number(item.dailyVelocity.toFixed(2))}</strong>/ngày
+                      {item.daysOfStockLeft !== null ? ` (còn ~${item.daysOfStockLeft} ngày)` : ''}
+                    </div>
+                    <div className="text-[11px] text-emerald-800 font-semibold mt-0.5 font-mono">
+                      Gợi ý nhập: +{item.suggestedOrderQty} {item.product.unit} (~{formatVND(item.estimatedCost)})
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onQuickRestock(item.product.id)}
+                    className="w-full py-1.5 text-[11px] font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md transition-colors"
+                  >
+                    Nhập ngay (+{item.suggestedOrderQty} {item.product.unit})
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -562,7 +731,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             aria-label="Lọc trạng thái tồn kho"
             value={stockFilter}
             onChange={(e) =>
-              setStockFilter(e.target.value as 'all' | 'low_or_out' | 'out_of_stock' | 'normal')
+              setStockFilter(
+                e.target.value as 'all' | 'low_or_out' | 'out_of_stock' | 'normal' | 'expiring'
+              )
             }
             className="px-3 py-2 text-xs font-medium bg-white border border-slate-200 rounded-lg text-slate-800"
           >
@@ -570,10 +741,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             <option value="normal">Đủ tồn kho</option>
             <option value="low_or_out">Sắp hết / Hết hàng</option>
             <option value="out_of_stock">Chỉ hết hàng (0)</option>
+            <option value="expiring">Sắp hết hạn / Quá hạn ({expiringOrExpiredCount})</option>
           </select>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {onExecuteStocktake && canPerformRoleAction(role, 'edit_record') && (
+            <button
+              type="button"
+              onClick={() => {
+                const firstProd = scopedBaseProducts[0];
+                setStocktakeProductId(firstProd?.id || '');
+                setStocktakeActualQty(firstProd ? String(firstProd.stock) : '');
+                setStocktakeReason('Kiểm kê định kỳ');
+                setStocktakeNote('');
+                setStocktakeFeedback(null);
+                setIsStocktakeModalOpen(true);
+              }}
+              className="px-3.5 py-2 text-xs font-semibold text-indigo-800 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors flex items-center justify-center gap-1.5 shrink-0"
+            >
+              <ClipboardCheck className="w-4 h-4" />
+              <span>Kiểm kê kho</span>
+            </button>
+          )}
           {onRequestAddNewProductInImports && (
             <button
               type="button"
@@ -631,6 +821,28 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         <span aria-hidden="true">·</span>
                         <span className="font-mono text-emerald-700">+{movCounts.qtyIn}</span>
                         <span className="font-mono text-amber-700">-{movCounts.qtyOut}</span>
+                        {p.batchNumber && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px]">
+                            Lô: {p.batchNumber}
+                          </span>
+                        )}
+                        {p.expiryDate &&
+                          (() => {
+                            const exp = evaluateProductExpiry(p.expiryDate);
+                            return (
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold ${
+                                  exp.status === 'expired'
+                                    ? 'bg-red-100 text-red-700'
+                                    : exp.status === 'expiring_30d' || exp.status === 'expiring_60d'
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : 'bg-emerald-50 text-emerald-700'
+                                }`}
+                              >
+                                HSD: {p.expiryDate}
+                              </span>
+                            );
+                          })()}
                       </div>
                     </div>
                     <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-md whitespace-nowrap shrink-0 flex items-center gap-1">
@@ -825,6 +1037,33 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         <span className="font-mono text-amber-700 font-semibold">
                           -{movCounts.qtyOut}
                         </span>
+                        {p.barcode && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-mono text-[10px]">
+                            BC: {p.barcode}
+                          </span>
+                        )}
+                        {p.batchNumber && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px]">
+                            Lô: {p.batchNumber}
+                          </span>
+                        )}
+                        {p.expiryDate &&
+                          (() => {
+                            const exp = evaluateProductExpiry(p.expiryDate);
+                            return (
+                              <span
+                                className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-semibold ${
+                                  exp.status === 'expired'
+                                    ? 'bg-red-100 text-red-700'
+                                    : exp.status === 'expiring_30d' || exp.status === 'expiring_60d'
+                                    ? 'bg-amber-100 text-amber-800'
+                                    : 'bg-emerald-50 text-emerald-700'
+                                }`}
+                              >
+                                HSD: {p.expiryDate} ({exp.badgeLabel})
+                              </span>
+                            );
+                          })()}
                       </div>
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap align-middle">
@@ -1284,6 +1523,56 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 />
               </div>
 
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                <div>
+                  <label
+                    htmlFor="prod-barcode"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Mã vạch / Barcode
+                  </label>
+                  <input
+                    id="prod-barcode"
+                    type="text"
+                    value={barcode}
+                    onChange={(e) => setBarcode(e.target.value)}
+                    placeholder="893..."
+                    className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="prod-batch"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Số lô (Batch)
+                  </label>
+                  <input
+                    id="prod-batch"
+                    type="text"
+                    value={batchNumber}
+                    onChange={(e) => setBatchNumber(e.target.value)}
+                    placeholder="LO-2611"
+                    className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="prod-expiry"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Hạn sử dụng (FEFO)
+                  </label>
+                  <input
+                    id="prod-expiry"
+                    type="date"
+                    value={expiryDate}
+                    onChange={(e) => setExpiryDate(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
+              </div>
+
               </div>
 
               <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2.5 shrink-0">
@@ -1516,6 +1805,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                                     <ArrowDownLeft className="w-3 h-3" />
                                     Nhập
                                   </span>
+                                ) : mov.type === 'stocktake_in' ? (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-teal-100 text-teal-900 font-semibold text-[11px]">
+                                    <ArrowDownLeft className="w-3 h-3" />
+                                    Kiểm kê (+)
+                                  </span>
+                                ) : mov.type === 'stocktake_out' ? (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-100 text-rose-900 font-semibold text-[11px]">
+                                    <ArrowUpRight className="w-3 h-3" />
+                                    Kiểm kê (-)
+                                  </span>
                                 ) : mov.type === 'gift_export' ? (
                                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-purple-100 text-purple-900 font-semibold text-[11px]">
                                     <ArrowUpRight className="w-3 h-3" />
@@ -1619,6 +1918,229 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   Đóng
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stocktake Modal (Kiểm kê kho & Điều chỉnh tồn KK-YYMM-XXX) */}
+      {isStocktakeModalOpen && onExecuteStocktake && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-3 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Kiểm kê & Điều chỉnh tồn kho"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="px-5 py-4 border-b border-slate-200 bg-indigo-50/70 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ClipboardCheck className="w-5 h-5 text-indigo-700" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-slate-900">
+                    Kiểm Kê Thực Tế &amp; Lập Phiếu Điều Chỉnh (KK-YYMM-XXX)
+                  </h3>
+                  <p className="text-[11px] text-slate-600">
+                    Ghi nhận chênh lệch kiểm kê vào Thẻ Kho &amp; đồng bộ Realtime Database
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsStocktakeModalOpen(false)}
+                aria-label="Đóng hộp thoại kiểm kê"
+                className="p-1.5 text-slate-400 hover:text-slate-700 bg-white rounded-lg border border-slate-200"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 overflow-y-auto flex-1">
+              {stocktakeFeedback && (
+                <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-900">
+                  {stocktakeFeedback}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  1. Chọn vật tư cần kiểm kê *
+                </label>
+                <SearchableSelect
+                  id="stocktake-product-select"
+                  value={stocktakeProductId}
+                  onChange={(val) => {
+                    setStocktakeProductId(val);
+                    const p = scopedBaseProducts.find((item) => item.id === val);
+                    setStocktakeActualQty(p ? String(p.stock) : '');
+                  }}
+                  placeholder="Tìm theo tên vật tư, mã VT hoặc barcode..."
+                  emptyOptionLabel="-- Chọn vật tư --"
+                  options={scopedBaseProducts.map((p) => ({
+                    value: p.id,
+                    label: `${p.name} [${p.warehouseName || 'Tâm An Mỹ Ngãi'}] — Hệ thống: ${p.stock} ${p.unit}`,
+                    subLabel: `Mã: ${p.code}${p.barcode ? ` · BC: ${p.barcode}` : ''}`,
+                    badge: `${p.stock} ${p.unit}`,
+                    keywords: `${p.name} ${p.code} ${p.barcode || ''} ${p.batchNumber || ''}`,
+                  }))}
+                />
+              </div>
+
+              {(() => {
+                const target = scopedBaseProducts.find((p) => p.id === stocktakeProductId);
+                if (!target) return null;
+                const sysQty = Math.max(0, Number(target.stock) || 0);
+                const actQty = Math.max(0, Number(stocktakeActualQty) || 0);
+                const diff = actQty - sysQty;
+                const unitCost = Math.max(0, Number(target.importPrice) || 0);
+                return (
+                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                    <div className="grid grid-cols-3 gap-3 text-xs">
+                      <div>
+                        <div className="text-slate-500">Tồn sổ sách</div>
+                        <div className="text-base font-bold font-mono text-slate-900">
+                          {sysQty} {target.unit}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-slate-500">Chênh lệch</div>
+                        <div
+                          className={`text-base font-bold font-mono ${
+                            diff > 0
+                              ? 'text-emerald-700'
+                              : diff < 0
+                              ? 'text-red-600'
+                              : 'text-slate-700'
+                          }`}
+                        >
+                          {diff > 0 ? `+${diff}` : diff} {target.unit}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-slate-500">Giá trị lệch (Vốn)</div>
+                        <div className="text-sm font-bold font-mono text-slate-900">
+                          {formatVND(diff * unitCost)}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label
+                          htmlFor="stocktake-actual-qty"
+                          className="block text-xs font-semibold text-slate-700 mb-1"
+                        >
+                          2. Số lượng thực tế kiểm đếm ({target.unit}) *
+                        </label>
+                        <input
+                          id="stocktake-actual-qty"
+                          type="number"
+                          min={0}
+                          value={stocktakeActualQty}
+                          onChange={(e) => setStocktakeActualQty(e.target.value)}
+                          className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-300 rounded-lg"
+                        />
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="stocktake-reason"
+                          className="block text-xs font-semibold text-slate-700 mb-1"
+                        >
+                          3. Lý do điều chỉnh
+                        </label>
+                        <select
+                          id="stocktake-reason"
+                          value={stocktakeReason}
+                          onChange={(e) => setStocktakeReason(e.target.value)}
+                          className="w-full px-3 py-2 text-xs font-medium bg-white border border-slate-300 rounded-lg"
+                        >
+                          <option value="Kiểm kê định kỳ">Kiểm kê định kỳ</option>
+                          <option value="Hư hỏng / rách bao">Hư hỏng / rách bao</option>
+                          <option value="Hết hạn sử dụng">Hết hạn sử dụng</option>
+                          <option value="Thất thoát / Nhầm lẫn">Thất thoát / Nhầm lẫn</option>
+                          <option value="Hàng dôi dư">Hàng dôi dư</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label
+                        htmlFor="stocktake-note"
+                        className="block text-xs font-semibold text-slate-700 mb-1"
+                      >
+                        Ghi chú kiểm kê
+                      </label>
+                      <input
+                        id="stocktake-note"
+                        type="text"
+                        value={stocktakeNote}
+                        onChange={(e) => setStocktakeNote(e.target.value)}
+                        placeholder="VD: Kiểm cuối tháng tại kệ A2..."
+                        className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const res = onExecuteStocktake({
+                          productId: target.id,
+                          actualQty: actQty,
+                          reason: stocktakeReason,
+                          note: stocktakeNote,
+                        });
+                        if (res) {
+                          setStocktakeFeedback(
+                            `Đã lập phiếu ${res.adjustmentCode}: ${res.productName} (${res.systemStockBefore} → ${res.actualCountedStock} ${res.unit}).`
+                          );
+                          setStocktakeNote('');
+                        }
+                      }}
+                      className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-indigo-700 hover:bg-indigo-800 rounded-lg transition-colors"
+                    >
+                      Xác nhận lưu phiếu kiểm kê &amp; Cập nhật tồn kho
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {stockAdjustments.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-slate-200">
+                  <div className="text-xs font-bold text-slate-700">
+                    Lịch sử phiếu kiểm kê gần đây ({stockAdjustments.length})
+                  </div>
+                  <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100 text-xs">
+                    {stockAdjustments.slice(0, 15).map((adj) => (
+                      <div key={adj.id} className="px-3 py-2 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-900 truncate">
+                            <span className="font-mono text-indigo-700 mr-1.5">{adj.adjustmentCode}</span>
+                            {adj.productName}
+                          </div>
+                          <div className="text-[11px] text-slate-500 truncate">
+                            {adj.createdAt.slice(0, 10)} · {adj.reason} · {adj.staffName}
+                          </div>
+                        </div>
+                        <div className="text-right font-mono shrink-0">
+                          <span
+                            className={`font-bold ${
+                              adj.diffQty > 0
+                                ? 'text-emerald-700'
+                                : adj.diffQty < 0
+                                ? 'text-red-600'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {adj.diffQty > 0 ? `+${adj.diffQty}` : adj.diffQty} {adj.unit}
+                          </span>
+                          <div className="text-[10px] text-slate-500">
+                            {adj.systemStockBefore} → {adj.actualCountedStock}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -233,5 +233,39 @@ test('RTDB legacy array layout detection and database.rules.json schema validati
   for (const col of RTDB_RECORD_COLLECTIONS) {
     assert.ok(rulesObj.rules.workspaces.$ownerUid[col]?.$recKey?.['.validate'], `Missing .validate on ${col}`);
   }
+  assert.ok(RTDB_RECORD_COLLECTIONS.includes('stockAdjustments'));
   assert.ok(rulesObj.rules.users_directory.$uid['.validate']);
+
+  // Verify stockAdjustments per-record diff & normalization
+  const baseWithAdj: RtdbWorkspacePayload = {
+    ...makeBasePayload(),
+    stockAdjustments: [
+      {
+        id: 'kk_test_1',
+        adjustmentCode: 'KK-2611-001',
+        productId: 'p1',
+        productCode: 'VT-01',
+        productName: 'NPK 20-20-15',
+        unit: 'Bao',
+        warehouseName: 'TÂM AN KHO 1',
+        systemStockBefore: 10,
+        actualCountedStock: 12,
+        diffQty: 2,
+        unitCost: 500000,
+        diffValue: 1000000,
+        reason: 'Kiểm kê định kỳ',
+        note: '',
+        staffName: 'Chủ Kho 1',
+        ownerId: 'uid_kho_1',
+        createdAt: '2026-11-26T02:00:00Z',
+        updatedAt: '2026-11-26T02:00:00Z',
+      },
+    ],
+  };
+  const adjDiff = buildWorkspaceDiffUpdates(makeBasePayload(), baseWithAdj);
+  assert.ok(adjDiff['stockAdjustments/k_kk_test_1']);
+  const serverWithAdj = applyRtdbUpdates(buildFullKeyedWorkspace(makeBasePayload()), adjDiff);
+  const normAdj = normalizeWorkspaceFromRtdb(serverWithAdj, 'uid_kho_1');
+  assert.equal(normAdj.stockAdjustments?.length, 1);
+  assert.equal(normAdj.stockAdjustments?.[0].diffQty, 2);
 });

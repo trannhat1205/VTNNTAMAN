@@ -6,6 +6,7 @@ import {
   ExternalLink,
   FileDown,
   Lock,
+  MessageCircle,
   Pencil,
   Search,
   Trash2,
@@ -21,7 +22,9 @@ import {
   UserRole,
 } from '../types';
 import {
+  buildZaloDebtReminderMessage,
   canPerformRoleAction,
+  computeDebtAgingSummary,
   computeDueDateAfterDays,
   DEBT_TERM_DAY_OPTIONS,
   evaluateDebtUrgency,
@@ -106,6 +109,8 @@ interface DebtModuleProps {
     paymentMethod: string;
     note: string;
   }) => void;
+  storeName?: string;
+  onShowToast?: (msg: string) => void;
 }
 
 export const DebtModule: React.FC<DebtModuleProps> = ({
@@ -130,11 +135,16 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   paymentGroups = ['Chi trả nợ Nhà cung cấp'],
   onSettleCustomerTotalDebtFifo,
   onSettleSupplierTotalDebtFifo,
+  storeName = 'VTNN Tâm An',
+  onShowToast,
 }) => {
   const [activeTab, setActiveTab] = useState<'supplier' | 'customer'>(
     canAccessSupplierDebts ? 'supplier' : 'customer'
   );
   const [urgencyFilter, setUrgencyFilter] = useState<'all' | 'overdue' | 'due_soon'>('all');
+  const [agingFilter, setAgingFilter] = useState<
+    'all' | 'not_due' | 'overdue_1_30' | 'overdue_31_60' | 'overdue_over_60'
+  >('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedLinkedVoucherId, setSelectedLinkedVoucherId] = useState<string | null>(null);
 
@@ -142,11 +152,26 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   const [fifoPartnerKey, setFifoPartnerKey] = useState<string>('');
   const [fifoLumpSumInput, setFifoLumpSumInput] = useState<string>('');
   const [fifoGroupName, setFifoGroupName] = useState<string>(
-    receiptGroups[0] || 'Thu nợ bán hàng khách hàng'
+    canAccessSupplierDebts
+      ? paymentGroups[0] || 'Chi trả nợ Nhà cung cấp'
+      : receiptGroups[0] || 'Thu nợ bán hàng khách hàng'
   );
   const [fifoPaymentMethod, setFifoPaymentMethod] = useState<string>('Chuyển khoản ngân hàng');
   const [fifoNote, setFifoNote] = useState<string>('');
   const [fifoFeedback, setFifoFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    const validGroups = activeTab === 'customer' ? receiptGroups : paymentGroups;
+    const defaultGroup =
+      activeTab === 'customer'
+        ? receiptGroups[0] || 'Thu nợ bán hàng khách hàng'
+        : paymentGroups[0] || 'Chi trả nợ Nhà cung cấp';
+    if (!validGroups.includes(fifoGroupName)) {
+      setFifoGroupName(defaultGroup);
+      setFifoPartnerKey('');
+      setFifoLumpSumInput('');
+    }
+  }, [activeTab, receiptGroups, paymentGroups, fifoGroupName]);
 
   useEffect(() => {
     if (!canAccessSupplierDebts && canAccessCustomerDebts && activeTab === 'supplier') {
@@ -227,10 +252,65 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
     (s) => evaluateDebtUrgency(s.dueDate, s.debtAmount, todayStr, leadDays).urgency === 'due_soon'
   );
 
+  const matchesAgingFilter = (dueDate: string): boolean => {
+    if (agingFilter === 'all') return true;
+    const { daysRemaining } = evaluateDebtUrgency(dueDate, 1, todayStr, leadDays);
+    if (agingFilter === 'not_due') return daysRemaining >= 0;
+    if (agingFilter === 'overdue_1_30') return daysRemaining < 0 && daysRemaining >= -30;
+    if (agingFilter === 'overdue_31_60') return daysRemaining < -30 && daysRemaining >= -60;
+    return daysRemaining < -60;
+  };
+
+  const activeAgingSummary = computeDebtAgingSummary(
+    activeTab === 'supplier'
+      ? (supplierDebts as Array<{ debtAmount: number; dueDate: string }>)
+      : customerDebts,
+    todayStr
+  );
+
+  const handleSendZaloReminder = (sale: SaleTransaction) => {
+    const matchingUnpaid = customerDebts.filter(
+      (s) =>
+        (sale.customerId && s.customerId === sale.customerId) ||
+        (sale.customerPhone && s.customerPhone === sale.customerPhone) ||
+        s.customerName === sale.customerName
+    );
+    const totalCustDebt = matchingUnpaid.reduce((sum, s) => sum + s.debtAmount, 0);
+    const { message, zaloUrl } = buildZaloDebtReminderMessage({
+      storeName,
+      customerName: sale.customerName,
+      customerPhone: sale.customerPhone,
+      totalDebt: totalCustDebt,
+      unpaidInvoices: matchingUnpaid.map((s) => ({
+        invoiceCode: s.invoiceCode,
+        date: s.createdAt.slice(0, 10),
+        productName: s.productName,
+        debtAmount: s.debtAmount,
+        dueDate: s.dueDate,
+      })),
+      todayStr,
+    });
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(message).catch(() => undefined);
+    }
+    const toastMsg = zaloUrl
+      ? `Đã sao chép tin nhắn nhắc nợ cho ${sale.customerName} & mở Zalo!`
+      : `Đã sao chép nội dung nhắc nợ cho ${sale.customerName} (chưa có SĐT để mở Zalo trực tiếp).`;
+    if (onShowToast) {
+      onShowToast(toastMsg);
+    } else {
+      setFifoFeedback(toastMsg);
+    }
+    if (zaloUrl && typeof window !== 'undefined') {
+      window.open(zaloUrl, '_blank', 'noopener,noreferrer');
+    }
+  };
+
   const filteredSupplierDebts = supplierDebts.filter((item) => {
     const { urgency } = evaluateDebtUrgency(item.dueDate, item.debtAmount, todayStr, leadDays);
     if (urgencyFilter === 'overdue' && urgency !== 'overdue') return false;
     if (urgencyFilter === 'due_soon' && urgency !== 'due_soon') return false;
+    if (!matchesAgingFilter(item.dueDate)) return false;
     const q = normalizeVietnameseSearch(searchTerm);
     if (!q) return true;
     const haystack = normalizeVietnameseSearch(
@@ -243,6 +323,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
     const { urgency } = evaluateDebtUrgency(item.dueDate, item.debtAmount, todayStr, leadDays);
     if (urgencyFilter === 'overdue' && urgency !== 'overdue') return false;
     if (urgencyFilter === 'due_soon' && urgency !== 'due_soon') return false;
+    if (!matchesAgingFilter(item.dueDate)) return false;
     const q = normalizeVietnameseSearch(searchTerm);
     if (!q) return true;
     const haystack = normalizeVietnameseSearch(
@@ -510,6 +591,79 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
             </div>
           </div>
         )}
+      </div>
+
+      {/* 4-Bucket Debt Aging Breakdown (Phân tích tuổi nợ theo tab đang xem) */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs font-bold text-slate-800">
+            Phân tích Tuổi Nợ ({activeTab === 'supplier' ? 'Phải trả Nhà cung cấp' : 'Phải thu Khách hàng'})
+          </div>
+          {agingFilter !== 'all' && (
+            <button
+              type="button"
+              onClick={() => setAgingFilter('all')}
+              className="text-[11px] font-semibold text-emerald-700 hover:underline"
+            >
+              Bỏ lọc tuổi nợ
+            </button>
+          )}
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+          {(
+            [
+              {
+                id: 'not_due',
+                label: 'Chưa đến hạn',
+                amount: activeAgingSummary.currentAmount,
+                count: activeAgingSummary.currentCount,
+                tone: 'border-emerald-200 bg-emerald-50/50 text-emerald-900',
+                activeTone: 'border-emerald-600 ring-2 ring-emerald-500/20 bg-emerald-50',
+              },
+              {
+                id: 'overdue_1_30',
+                label: 'Quá hạn 1–30 ngày',
+                amount: activeAgingSummary.overdue1To30Amount,
+                count: activeAgingSummary.overdue1To30Count,
+                tone: 'border-amber-200 bg-amber-50/50 text-amber-900',
+                activeTone: 'border-amber-600 ring-2 ring-amber-500/20 bg-amber-50',
+              },
+              {
+                id: 'overdue_31_60',
+                label: 'Quá hạn 31–60 ngày',
+                amount: activeAgingSummary.overdue31To60Amount,
+                count: activeAgingSummary.overdue31To60Count,
+                tone: 'border-orange-200 bg-orange-50/60 text-orange-900',
+                activeTone: 'border-orange-600 ring-2 ring-orange-500/20 bg-orange-50',
+              },
+              {
+                id: 'overdue_over_60',
+                label: 'Quá hạn >60 ngày',
+                amount: activeAgingSummary.overdue60PlusAmount,
+                count: activeAgingSummary.overdue60PlusCount,
+                tone: 'border-red-200 bg-red-50/70 text-red-900',
+                activeTone: 'border-red-600 ring-2 ring-red-500/20 bg-red-50',
+              },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() =>
+                setAgingFilter((prev) => (prev === item.id ? 'all' : item.id))
+              }
+              className={`text-left p-3 rounded-lg border transition-colors ${
+                agingFilter === item.id ? item.activeTone : item.tone
+              }`}
+            >
+              <div className="text-[11px] font-medium opacity-85">{item.label}</div>
+              <div className="text-sm font-bold font-mono tabular-nums mt-0.5">
+                {formatVND(item.amount)}
+              </div>
+              <div className="text-[11px] opacity-75">{item.count} chứng từ</div>
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* FIFO Lump-Sum Debt Settlement by Oldest Debt Date (Tự Động Trừ Quyết Toán Vào Tất Cả Các Hóa Đơn Nợ Trước Đó Theo Thứ Tự Ngày Nợ) */}
@@ -1733,6 +1887,15 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                         >
                           Phiếu PDF
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSendZaloReminder(sale)}
+                          aria-label={`Nhắc nợ Zalo khách ${sale.customerName}`}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <MessageCircle className="w-3 h-3" />
+                          <span>Nhắc nợ Zalo</span>
+                        </button>
                       </div>
 
                       {canPerformRoleAction(role, 'edit_record') ? (
@@ -1910,6 +2073,15 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                               className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap"
                             >
                               Phiếu PDF
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSendZaloReminder(sale)}
+                              aria-label={`Nhắc nợ Zalo khách ${sale.customerName}`}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg flex items-center gap-1 whitespace-nowrap"
+                            >
+                              <MessageCircle className="w-3 h-3" />
+                              <span>Nhắc nợ Zalo</span>
                             </button>
                             {canPerformRoleAction(role, 'edit_record') ? (
                               <>

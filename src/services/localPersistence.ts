@@ -10,6 +10,7 @@ import {
   SaleTransaction,
   SavedVoucherRecord,
   StaffMember,
+  StockAdjustmentRecord,
   SupplierProfile,
 } from '../types';
 import {
@@ -36,6 +37,7 @@ export interface WorkspacePersistedState {
   suppliers: SupplierProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  stockAdjustments?: StockAdjustmentRecord[];
   receiptVouchers: CashReceiptVoucher[];
   paymentVouchers: CashPaymentVoucher[];
   savedVouchers: SavedVoucherRecord[];
@@ -59,6 +61,7 @@ export function createEmptyWorkspaceState(): WorkspacePersistedState {
     suppliers: [],
     sales: [],
     imports: [],
+    stockAdjustments: [],
     receiptVouchers: [],
     paymentVouchers: [],
     savedVouchers: [],
@@ -148,6 +151,7 @@ export function loadWorkspaceFromStorage(): WorkspacePersistedState {
       suppliers: Array.isArray(parsed.suppliers) ? parsed.suppliers : [],
       sales: Array.isArray(parsed.sales) ? parsed.sales : [],
       imports: Array.isArray(parsed.imports) ? parsed.imports : [],
+      stockAdjustments: Array.isArray(parsed.stockAdjustments) ? parsed.stockAdjustments : [],
       receiptVouchers: Array.isArray(parsed.receiptVouchers) ? parsed.receiptVouchers : [],
       paymentVouchers: Array.isArray(parsed.paymentVouchers) ? parsed.paymentVouchers : [],
       savedVouchers: Array.isArray(parsed.savedVouchers) ? parsed.savedVouchers : [],

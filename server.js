@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import {
   applyGeminiCors,
   fetchVerifiedBonusTokens,
@@ -73,14 +74,37 @@ function isExternalQuerySimple(rawQuery) {
   return true;
 }
 
-function resolveApiKey() {
-  return (
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.VITE_GEMINI_API_KEY ||
-    process.env.API_KEY ||
-    ''
-  ).trim();
+function getCandidateApiKeys() {
+  const keys = [];
+  for (const candidate of [
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_API_KEY,
+    process.env.VITE_GEMINI_API_KEY,
+    process.env.API_KEY,
+  ]) {
+    const trimmed = typeof candidate === 'string' ? candidate.trim() : '';
+    if (trimmed && !keys.includes(trimmed)) {
+      keys.push(trimmed);
+    }
+  }
+  return keys;
+}
+
+function withTimeout(promise, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Gemini call timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise
+      .then((val) => {
+        clearTimeout(timer);
+        resolve(val);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 const MIME_TYPES = {
@@ -191,12 +215,12 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: authCheck.error, authRequired: true }));
         return;
       }
-      const apiKey = resolveApiKey();
+      const candidateKeys = getCandidateApiKeys();
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(
         JSON.stringify({
-          configured: Boolean(apiKey),
-          keyState: apiKey ? 'connected' : 'not_configured',
+          configured: candidateKeys.length > 0,
+          keyState: candidateKeys.length > 0 ? 'connected' : 'not_configured',
         })
       );
       return;
@@ -279,8 +303,8 @@ const server = http.createServer(async (req, res) => {
             return;
           }
 
-          const apiKey = resolveApiKey();
-          if (apiKey && message) {
+          const candidateKeys = getCandidateApiKeys();
+          if (candidateKeys.length > 0 && message) {
             const fallbackModels =
               requested === 'auto'
                 ? isExternal
@@ -303,78 +327,90 @@ const server = http.createServer(async (req, res) => {
                   .map((h) => ({ role: h.role, parts: [{ text: h.text.normalize('NFC') }] }))
               : [];
 
-            for (const candidateModel of fallbackModels) {
-              const useSearch = isExternal && candidateModel !== 'gemma-4-26b-a4b-it';
-              const body = {
-                ...(activeSys
-                  ? { systemInstruction: { parts: [{ text: activeSys }] } }
-                  : {}),
-                contents: [...historyContents, { role: 'user', parts: [{ text: message }] }],
-                generationConfig: {
-                  maxOutputTokens: candidateModel === 'gemini-4-hydrogen' ? 2048 : 1400,
-                  thinkingConfig: {
-                    thinkingLevel: candidateModel === 'gemini-4-hydrogen' ? 'LOW' : 'MINIMAL',
-                  },
-                },
-                ...(useSearch ? { tools: [{ google_search: {} }] } : {}),
-              };
-              const apiRes = await fetch(
-                `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${encodeURIComponent(apiKey)}`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify(body),
-                }
-              );
-              if (!apiRes.ok) continue;
-              const json = await apiRes.json();
-              const parts = json?.candidates?.[0]?.content?.parts || [];
-              const text = parts
-                .filter((p) => p && p.thought !== true && typeof p.text === 'string')
-                .map((p) => p.text)
-                .join('')
-                .trim();
-              if (text && !text.startsWith('google:search{') && !text.startsWith('call:google:search')) {
-                const chunks = json?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-                if (useSearch && chunks.length === 0) continue;
-                const sources = chunks
-                  .map((c) => c?.web)
-                  .filter((w) => w && w.uri)
-                  .slice(0, 6)
-                  .map((w) => ({ title: w.title || w.uri, uri: w.uri, sourceName: w.title }));
-                const totalTokens = Number(json?.usageMetadata?.totalTokenCount) || Math.ceil((message.length + text.length) / 3);
-                quota.questionsUsed += 1;
-                quota.tokensUsed += totalTokens;
-                if (candidateModel === 'gemini-4-hydrogen') quota.deepModelQuestions += 1;
-                else quota.freeModelQuestions += 1;
-                quota.updatedAt = new Date().toISOString();
+            for (let keyIdx = 0; keyIdx < candidateKeys.length; keyIdx++) {
+              const apiKey = candidateKeys[keyIdx];
+              const ai = new GoogleGenAI({
+                apiKey,
+                httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
+              });
 
-                if (SERVER_RESPONSE_CACHE.size > 150) {
-                  const oldestKey = SERVER_RESPONSE_CACHE.keys().next().value;
-                  if (oldestKey) SERVER_RESPONSE_CACHE.delete(oldestKey);
-                }
-                SERVER_RESPONSE_CACHE.set(cacheKey, {
-                  text,
-                  modelUsed: candidateModel,
-                  sources,
-                  cachedAt: Date.now(),
-                });
+              for (const candidateModel of fallbackModels) {
+                const useSearch = isExternal && candidateModel !== 'gemma-4-26b-a4b-it';
+                try {
+                  const thinkingLevel =
+                    candidateModel === 'gemini-4-hydrogen' ? ThinkingLevel.LOW : ThinkingLevel.MINIMAL;
+                  const maxOutputTokens = candidateModel === 'gemini-4-hydrogen' ? 2048 : 1400;
 
-                res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(
-                  JSON.stringify({
-                    text,
-                    modelUsed: candidateModel,
-                    queryScope: isExternal ? 'external' : 'internal',
-                    apiConnected: true,
-                    verifiedWebSearch: sources.length > 0,
-                    keyState: 'connected',
-                    sources,
-                    usage: { totalTokens },
-                    quota,
-                  })
-                );
-                return;
+                  const response = await withTimeout(
+                    ai.models.generateContent({
+                      model: candidateModel,
+                      contents: [...historyContents, { role: 'user', parts: [{ text: message }] }],
+                      config: {
+                        ...(activeSys ? { systemInstruction: activeSys } : {}),
+                        thinkingConfig: { thinkingLevel },
+                        maxOutputTokens,
+                        ...(useSearch ? { tools: [{ googleSearch: {} }] } : {}),
+                      },
+                    }),
+                    22000
+                  );
+
+                  const parts = response?.candidates?.[0]?.content?.parts || [];
+                  const visiblePartsText = parts
+                    .filter((p) => p && p.thought !== true && typeof p.text === 'string')
+                    .map((p) => p.text)
+                    .join('')
+                    .trim();
+                  const text = visiblePartsText || (response?.text ? String(response.text).trim() : '');
+
+                  if (text && !text.startsWith('google:search{') && !text.startsWith('call:google:search')) {
+                    const chunks = response?.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+                    if (useSearch && chunks.length === 0) continue;
+                    const sources = chunks
+                      .map((c) => c?.web)
+                      .filter((w) => w && w.uri)
+                      .slice(0, 6)
+                      .map((w) => ({ title: w.title || w.uri, uri: w.uri, sourceName: w.title }));
+                    const totalTokens =
+                      Number(response?.usageMetadata?.totalTokenCount) ||
+                      Math.ceil((message.length + text.length) / 3);
+                    quota.questionsUsed += 1;
+                    quota.tokensUsed += totalTokens;
+                    if (candidateModel === 'gemini-4-hydrogen') quota.deepModelQuestions += 1;
+                    else quota.freeModelQuestions += 1;
+                    quota.updatedAt = new Date().toISOString();
+
+                    if (SERVER_RESPONSE_CACHE.size > 150) {
+                      const oldestKey = SERVER_RESPONSE_CACHE.keys().next().value;
+                      if (oldestKey) SERVER_RESPONSE_CACHE.delete(oldestKey);
+                    }
+                    SERVER_RESPONSE_CACHE.set(cacheKey, {
+                      text,
+                      modelUsed: candidateModel,
+                      sources,
+                      cachedAt: Date.now(),
+                    });
+
+                    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+                    res.end(
+                      JSON.stringify({
+                        text,
+                        modelUsed: candidateModel,
+                        queryScope: isExternal ? 'external' : 'internal',
+                        apiConnected: true,
+                        verifiedWebSearch: sources.length > 0,
+                        keyState: 'connected',
+                        sources,
+                        usage: { totalTokens },
+                        quota,
+                      })
+                    );
+                    return;
+                  }
+                } catch (err) {
+                  const errMsg = err instanceof Error ? err.message : String(err);
+                  console.warn(`[gemini/chat] key#${keyIdx} model=${candidateModel} failed: ${errMsg.slice(0, 140)}`);
+                }
               }
             }
             if (isExternal) {
@@ -384,8 +420,9 @@ const server = http.createServer(async (req, res) => {
                   text: `### Chưa thể xác thực thông tin qua Google Search lúc này\n\nHệ thống chưa nhận được nguồn đối chiếu trực tiếp từ Google Search cho câu hỏi: **"${message}"**. Vui lòng bấm **"Kiểm chứng"** bên dưới hoặc thử lại sau vài giây.`,
                   modelUsed: fallbackModels[0],
                   queryScope: 'external',
-                  apiConnected: true,
+                  apiConnected: false,
                   verifiedWebSearch: false,
+                  keyState: 'quota_depleted',
                   sources: [],
                   usage: { totalTokens: 0 },
                   quota,
@@ -394,16 +431,27 @@ const server = http.createServer(async (req, res) => {
               return;
             }
           }
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(
+            JSON.stringify({
+              text: '',
+              fallbackRequired: true,
+              apiConnected: false,
+              keyState: candidateKeys.length > 0 ? 'quota_depleted' : 'not_configured',
+            })
+          );
+          return;
         } catch {
-          // Fall through to client fallback JSON response
+          // Fall through to structured fallback response
         }
+        const fallbackKeys = getCandidateApiKeys();
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(
           JSON.stringify({
             text: '',
             fallbackRequired: true,
             apiConnected: false,
-            keyState: 'not_configured',
+            keyState: fallbackKeys.length > 0 ? 'quota_depleted' : 'not_configured',
           })
         );
       });
