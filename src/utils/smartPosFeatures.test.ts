@@ -12,6 +12,7 @@ import {
   OFFLINE_QUEUE_STORAGE_KEY,
   PosCartDraftItem,
   sanitizeVietQrText,
+  upsertQuickCartProductQuantity,
   validateCartInventory,
 } from './smartPosFeatures';
 import { ProductItem, SaleTransaction, VietQrBankConfig } from '../types';
@@ -164,6 +165,30 @@ describe('Priority 1 — Multi-Item POS Cart Allocation & Inventory Validation',
     ];
     const grouped = findInvoiceGroupSales(allSales, base);
     assert.equal(grouped.length, 2);
+  });
+
+  it('quick-picks, updates, validates stock, and removes items directly into shared POS cart', () => {
+    let cart: PosCartDraftItem[] = [];
+    const add1 = upsertQuickCartProductQuantity(cart, mockProducts[0], 2, mockProducts);
+    assert.equal(add1.error, undefined);
+    assert.equal(add1.items.length, 1);
+    assert.equal(add1.items[0].quantity, 2);
+    assert.equal(add1.items[0].dosageGuide, 'Rải gốc 15-25 kg / công 1.000m².');
+    cart = add1.items;
+
+    const add2 = upsertQuickCartProductQuantity(cart, mockProducts[1], 3, mockProducts);
+    assert.equal(add2.error, undefined);
+    assert.equal(add2.items.length, 2);
+    cart = add2.items;
+
+    const overStock = upsertQuickCartProductQuantity(cart, mockProducts[1], 99, mockProducts);
+    assert.ok(overStock.error);
+    assert.equal(overStock.items[1].quantity, 3);
+
+    const remove1 = upsertQuickCartProductQuantity(cart, mockProducts[0], 0, mockProducts);
+    assert.equal(remove1.error, undefined);
+    assert.equal(remove1.items.length, 1);
+    assert.equal(remove1.items[0].productId, 'p2');
   });
 });
 

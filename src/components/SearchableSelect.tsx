@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, Plus, Search, X } from 'lucide-react';
+import { Check, ChevronDown, Minus, Plus, Search, ShoppingCart, X } from 'lucide-react';
 import {
   filterSearchableOptions,
   SearchableOptionItem,
@@ -16,6 +16,11 @@ interface SearchableSelectProps {
   onCreateAction?: (typedKeyword?: string) => void;
   disabled?: boolean;
   ariaLabel?: string;
+  /** Optional quick multi-item quantity selector inside dropdown (keeps dropdown open while picking) */
+  quickQuantities?: Record<string, number>;
+  quickMaxQuantities?: Record<string, number>;
+  onQuickQuantityChange?: (optionValue: string, nextQuantity: number) => void;
+  quickCartSummaryLabel?: string;
 }
 
 /**
@@ -33,7 +38,19 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   onCreateAction,
   disabled = false,
   ariaLabel,
+  quickQuantities,
+  quickMaxQuantities,
+  onQuickQuantityChange,
+  quickCartSummaryLabel,
 }) => {
+  const quickPickedCount = useMemo(() => {
+    if (!quickQuantities) return 0;
+    return Object.values(quickQuantities).filter((q) => q > 0).length;
+  }, [quickQuantities]);
+  const quickPickedUnits = useMemo(() => {
+    if (!quickQuantities) return 0;
+    return Object.values(quickQuantities).reduce((s, q) => s + (q > 0 ? q : 0), 0);
+  }, [quickQuantities]);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -111,7 +128,11 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
           aria-expanded={isOpen}
           autoComplete="off"
           value={isOpen ? searchQuery : selectedOption ? selectedOption.label : ''}
-          placeholder={selectedOption ? selectedOption.label : placeholder}
+          placeholder={
+            selectedOption
+              ? selectedOption.label
+              : quickCartSummaryLabel || placeholder
+          }
           onFocus={() => {
             if (!disabled) {
               setIsOpen(true);
@@ -233,42 +254,128 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
           ) : (
             filteredOptions.map((opt) => {
               const isSelected = opt.value === value;
+              const quickQty = quickQuantities?.[opt.value] || 0;
+              const maxQty = quickMaxQuantities?.[opt.value];
+              const isOutOfStock = maxQty !== undefined && maxQty <= 0;
               return (
-                <button
+                <div
                   key={opt.value}
-                  type="button"
                   role="option"
-                  aria-selected={isSelected}
-                  onClick={() => {
-                    onChange(opt.value);
-                    setSearchQuery(opt.label);
-                    setIsOpen(false);
-                  }}
-                  className={`w-full px-3.5 py-2.5 text-left transition-colors flex items-start justify-between gap-3 ${
-                    isSelected
-                      ? 'bg-emerald-50/90 text-emerald-950 font-semibold'
+                  aria-selected={isSelected || quickQty > 0}
+                  className={`w-full px-3 py-2 text-left transition-colors flex items-center justify-between gap-2 ${
+                    quickQty > 0
+                      ? 'bg-emerald-50/95 text-emerald-950'
+                      : isSelected
+                      ? 'bg-emerald-50/80 text-emerald-950 font-semibold'
                       : 'hover:bg-slate-50 text-slate-900'
                   }`}
                 >
-                  <div className="min-w-0 flex-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onChange(opt.value);
+                      setSearchQuery(opt.label);
+                      setIsOpen(false);
+                    }}
+                    className="min-w-0 flex-1 text-left focus:outline-none"
+                  >
                     <div className="text-xs sm:text-sm font-medium truncate">{opt.label}</div>
                     {opt.subLabel && (
                       <div className="text-[11px] text-slate-500 truncate mt-0.5">
                         {opt.subLabel}
                       </div>
                     )}
-                  </div>
+                  </button>
+
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {onQuickQuantityChange && (
+                      <div
+                        className="flex items-center gap-0.5 bg-white border border-emerald-300 rounded-lg p-0.5 shadow-2xs"
+                        onClick={(e) => e.stopPropagation()}
+                        onMouseDown={(e) => e.stopPropagation()}
+                      >
+                        {isOutOfStock ? (
+                          <span className="px-1.5 py-0.5 text-[10px] font-semibold text-rose-600 whitespace-nowrap">
+                            Hết hàng
+                          </span>
+                        ) : quickQty === 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => onQuickQuantityChange(opt.value, 1)}
+                            title="Chọn nhanh 1 vào hóa đơn chung"
+                            aria-label={`Thêm nhanh 1 ${opt.label} vào hóa đơn chung`}
+                            className="px-2 py-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-0.5 whitespace-nowrap transition-colors"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>SL</span>
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onQuickQuantityChange(opt.value, Math.max(0, quickQty - 1))}
+                              aria-label={`Giảm số lượng ${opt.label}`}
+                              className="w-6 h-6 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-800 flex items-center justify-center"
+                            >
+                              <Minus className="w-3 h-3" />
+                            </button>
+                            <input
+                              type="number"
+                              min={0}
+                              max={maxQty}
+                              value={quickQty}
+                              aria-label={`Số lượng chọn nhanh ${opt.label}`}
+                              onChange={(e) => {
+                                const parsed = Math.max(0, Math.round(Number(e.target.value) || 0));
+                                onQuickQuantityChange(opt.value, parsed);
+                              }}
+                              className="w-10 text-center text-xs font-mono font-bold text-emerald-900 bg-transparent focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                            />
+                            <button
+                              type="button"
+                              disabled={maxQty !== undefined && quickQty >= maxQty}
+                              onClick={() => onQuickQuantityChange(opt.value, quickQty + 1)}
+                              aria-label={`Tăng số lượng ${opt.label}`}
+                              className="w-6 h-6 rounded-md bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 text-white flex items-center justify-center"
+                            >
+                              <Plus className="w-3 h-3" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    )}
+
                     {opt.badge && (
-                      <span className="text-[11px] font-mono font-semibold text-emerald-800 bg-emerald-100/70 px-2 py-0.5 rounded">
+                      <span className="text-[11px] font-mono font-semibold text-emerald-800 bg-emerald-100/70 px-2 py-0.5 rounded whitespace-nowrap">
                         {opt.badge}
                       </span>
                     )}
-                    {isSelected && <Check className="w-4 h-4 text-emerald-700 shrink-0" />}
+                    {isSelected && !onQuickQuantityChange && (
+                      <Check className="w-4 h-4 text-emerald-700 shrink-0" />
+                    )}
                   </div>
-                </button>
+                </div>
               );
             })
+          )}
+
+          {/* Sticky Footer when Quick Multi-Item Quantity Mode has selected items */}
+          {onQuickQuantityChange && quickPickedCount > 0 && (
+            <div className="px-3 py-2 bg-emerald-700 text-white sticky bottom-0 z-10 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-xs font-semibold min-w-0">
+                <ShoppingCart className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">
+                  Đã chọn {quickPickedCount} mặt hàng ({quickPickedUnits} ĐVT) vào hóa đơn chung
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                className="px-2.5 py-1 text-xs font-bold text-emerald-900 bg-white hover:bg-emerald-50 rounded-md whitespace-nowrap shrink-0"
+              >
+                Xong ({quickPickedCount})
+              </button>
+            </div>
           )}
         </div>
       )}

@@ -63,6 +63,7 @@ import {
   DOSAGE_GUIDE_PRESETS,
   findInvoiceGroupSales,
   PosCartDraftItem,
+  upsertQuickCartProductQuantity,
   validateCartInventory,
 } from '../utils/smartPosFeatures';
 import { ExcelDataBar } from './ExcelDataBar';
@@ -724,6 +725,35 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
       type: 'success',
       text: `Đã thêm "${resolvedProduct.name}" (${qtyNum} ${resolvedProduct.unit}) vào giỏ POS (${nextCart.length} mặt hàng trên 1 hóa đơn). Chọn tiếp vật tư khác hoặc bấm Lưu đơn!`,
     });
+  };
+
+  const quickCartQuantities = posCartItems.reduce<Record<string, number>>((acc, item) => {
+    acc[item.productId] = (acc[item.productId] || 0) + item.quantity;
+    return acc;
+  }, {});
+
+  const quickMaxQuantities = products.reduce<Record<string, number>>((acc, p) => {
+    acc[p.id] = Math.max(0, Number(p.stock) || 0);
+    return acc;
+  }, {});
+
+  const handleQuickSetCartProductQuantity = (productId: string, nextQty: number) => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) return;
+    setFormMessage(null);
+    const res = upsertQuickCartProductQuantity(posCartItems, prod, nextQty, products);
+    if (res.error) {
+      setFormMessage({ type: 'error', text: res.error });
+      return;
+    }
+    setPosCartItems(res.items);
+    // Avoid double-counting if the same product was also filled in single-item inputs
+    if (selectedProductId === productId) {
+      clearCurrentLineInputsOnly();
+    }
+    if (!selectedWarehouse && !lockedWarehouse && prod.warehouseName && nextQty > 0) {
+      setSelectedWarehouse(prod.warehouseName);
+    }
   };
 
   const handleUpdateCartItemQty = (itemId: string, delta: number) => {
@@ -1552,6 +1582,16 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 placeholder="Gõ tên vật tư (NPK, Anvil, GAP...), mã VT hoặc kho để tìm nhanh..."
                 emptyOptionLabel="-- Chưa chọn vật tư --"
                 createActionLabel="+ Thêm vật tư nông nghiệp mới trực tiếp tại đây..."
+                quickQuantities={onCreateMultiItemSale ? quickCartQuantities : undefined}
+                quickMaxQuantities={onCreateMultiItemSale ? quickMaxQuantities : undefined}
+                onQuickQuantityChange={
+                  onCreateMultiItemSale ? handleQuickSetCartProductQuantity : undefined
+                }
+                quickCartSummaryLabel={
+                  posCartItems.length > 0
+                    ? `Đã chọn nhanh ${posCartItems.length} mặt hàng vào hóa đơn chung (bấm để chọn thêm)...`
+                    : undefined
+                }
                 onCreateAction={(kw) => {
                   if (onRequestAddNewProductInImports) {
                     onRequestAddNewProductInImports(kw || '');
@@ -1576,6 +1616,96 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   };
                 })}
               />
+
+              {posCartItems.length > 0 && (
+                <div className="p-2.5 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-emerald-900">
+                    <span className="flex items-center gap-1.5">
+                      <ShoppingCart className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>
+                        Hóa đơn chung POS ({posCartItems.length} mặt hàng ·{' '}
+                        {formatVND(cartAllocation.netTotal)})
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPosCartItems([])}
+                      className="text-[11px] font-semibold text-red-600 hover:underline"
+                    >
+                      Xóa giỏ
+                    </button>
+                  </div>
+                  <div className="divide-y divide-emerald-100 bg-white rounded-lg border border-emerald-100 px-2.5 max-h-56 overflow-y-auto">
+                    {posCartItems.map((item, idx) => {
+                      const lineNet = Math.max(
+                        0,
+                        Math.round(item.quantity * item.unitPrice) - (item.discountAmount || 0)
+                      );
+                      return (
+                        <div key={item.id} className="py-2 flex items-start justify-between gap-2 text-xs">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-semibold text-slate-900 truncate">
+                              {idx + 1}. {item.productName}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              {formatVND(item.unitPrice)} / {item.unit}
+                              {(item.discountAmount || 0) > 0 && (
+                                <span className="text-amber-700 ml-1.5">
+                                  (-{formatVND(item.discountAmount || 0)})
+                                </span>
+                              )}
+                            </div>
+                            {item.giftProductName && (item.giftQuantity || 0) > 0 && (
+                              <div className="text-[10px] text-emerald-700 font-semibold">
+                                + Quà: {item.giftQuantity} {item.giftUnit || ''} {item.giftProductName}
+                              </div>
+                            )}
+                            {item.dosageGuide && (
+                              <div className="text-[10px] text-teal-800 truncate">
+                                Liều lượng: {item.dosageGuide}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateCartItemQty(item.id, -1)}
+                              aria-label={`Giảm số lượng ${item.productName}`}
+                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
+                            >
+                              -
+                            </button>
+                            <span className="w-7 text-center font-mono font-bold text-slate-900">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateCartItemQty(item.id, 1)}
+                              aria-label={`Tăng số lượng ${item.productName}`}
+                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
+                            >
+                              +
+                            </button>
+                            <span className="font-mono font-bold text-emerald-800 ml-1 min-w-[68px] text-right">
+                              {formatVND(lineNet)}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPosCartItems((prev) => prev.filter((x) => x.id !== item.id))
+                              }
+                              aria-label={`Bỏ ${item.productName} khỏi giỏ`}
+                              className="p-1 text-slate-400 hover:text-red-600"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {currentProduct &&
                 currentProduct.expiryDate &&
@@ -2099,96 +2229,9 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 >
                   <Plus className="w-4 h-4 shrink-0" />
                   <span>
-                    Thêm vật tư vào Giỏ Hóa Đơn ({posCartItems.length} mặt hàng đã chọn)
+                    Thêm vật tư kèm ưu đãi / liều lượng vào Giỏ ({posCartItems.length} mặt hàng)
                   </span>
                 </button>
-              )}
-
-              {posCartItems.length > 0 && (
-                <div className="p-2.5 bg-white rounded-lg border border-emerald-200 space-y-2">
-                  <div className="flex items-center justify-between text-xs font-bold text-emerald-900">
-                    <span className="flex items-center gap-1.5">
-                      <ShoppingCart className="w-3.5 h-3.5 text-emerald-700" />
-                      <span>Giỏ hàng POS ({posCartItems.length} mặt hàng · Chung 1 Hóa đơn)</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setPosCartItems([])}
-                      className="text-[11px] font-semibold text-red-600 hover:underline"
-                    >
-                      Xóa giỏ
-                    </button>
-                  </div>
-                  <div className="divide-y divide-slate-100 max-h-52 overflow-y-auto">
-                    {posCartItems.map((item, idx) => {
-                      const lineNet = Math.max(
-                        0,
-                        Math.round(item.quantity * item.unitPrice) - (item.discountAmount || 0)
-                      );
-                      return (
-                        <div key={item.id} className="py-2 flex items-start justify-between gap-2 text-xs">
-                          <div className="min-w-0 flex-1">
-                            <div className="font-semibold text-slate-900 truncate">
-                              {idx + 1}. {item.productName}
-                            </div>
-                            <div className="text-[11px] font-mono text-slate-500">
-                              {formatVND(item.unitPrice)} / {item.unit}
-                              {(item.discountAmount || 0) > 0 && (
-                                <span className="text-amber-700 ml-1.5">
-                                  (-{formatVND(item.discountAmount || 0)})
-                                </span>
-                              )}
-                            </div>
-                            {item.giftProductName && (item.giftQuantity || 0) > 0 && (
-                              <div className="text-[10px] text-emerald-700 font-semibold">
-                                + Quà: {item.giftQuantity} {item.giftUnit || ''} {item.giftProductName}
-                              </div>
-                            )}
-                            {item.dosageGuide && (
-                              <div className="text-[10px] text-teal-800 truncate">
-                                Liều lượng: {item.dosageGuide}
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateCartItemQty(item.id, -1)}
-                              aria-label={`Giảm số lượng ${item.productName}`}
-                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
-                            >
-                              -
-                            </button>
-                            <span className="w-7 text-center font-mono font-bold text-slate-900">
-                              {item.quantity}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateCartItemQty(item.id, 1)}
-                              aria-label={`Tăng số lượng ${item.productName}`}
-                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
-                            >
-                              +
-                            </button>
-                            <span className="font-mono font-bold text-emerald-800 ml-1 min-w-[68px] text-right">
-                              {formatVND(lineNet)}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setPosCartItems((prev) => prev.filter((x) => x.id !== item.id))
-                              }
-                              aria-label={`Bỏ ${item.productName} khỏi giỏ`}
-                              className="p-1 text-slate-400 hover:text-red-600"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
               )}
             </div>
 

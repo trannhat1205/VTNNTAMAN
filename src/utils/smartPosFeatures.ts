@@ -207,6 +207,57 @@ export function validateCartInventory(
 }
 
 /**
+ * Pure helper for quick-quantity +/- picking directly inside the product search dropdown.
+ * Adds, updates, or removes a product line in the shared POS cart while enforcing stock limits.
+ */
+export function upsertQuickCartProductQuantity(
+  cartItems: PosCartDraftItem[],
+  product: ProductItem,
+  nextQtyRaw: number,
+  allProducts: ProductItem[]
+): { items: PosCartDraftItem[]; error?: string } {
+  const safeQty = Math.max(0, Math.round(Number(nextQtyRaw) || 0));
+  if (safeQty === 0) {
+    return {
+      items: cartItems.filter((item) => item.productId !== product.id),
+    };
+  }
+
+  const existingIdx = cartItems.findIndex((item) => item.productId === product.id);
+  let candidate: PosCartDraftItem[];
+  if (existingIdx >= 0) {
+    candidate = cartItems.map((item, idx) =>
+      idx === existingIdx ? { ...item, quantity: safeQty } : item
+    );
+  } else {
+    candidate = [
+      ...cartItems,
+      {
+        id: `cart_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        productId: product.id,
+        productName: product.name,
+        unit: product.unit,
+        quantity: safeQty,
+        unitPrice: product.sellPrice,
+        promotionType: 'none',
+        discountAmount: 0,
+        discountPercent: 0,
+        dosageGuide: product.dosageGuide?.trim() || undefined,
+      },
+    ];
+  }
+
+  const check = validateCartInventory(allProducts, candidate);
+  if (!check.valid) {
+    return {
+      items: cartItems,
+      error: check.error,
+    };
+  }
+  return { items: candidate };
+}
+
+/**
  * Strips Vietnamese diacritics and unsafe characters for banking transfer descriptions & VietQR `addInfo`.
  */
 export function sanitizeVietQrText(text: string, maxLength = 50): string {
