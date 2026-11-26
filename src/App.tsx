@@ -81,6 +81,7 @@ import {
   applyImportToInventory,
   applySaleToInventory,
   applySupplierFifoDebtSettlement,
+  areWarehouseNamesEquivalent,
   authenticateStaffByGoogleEmail,
   buildBackupSnapshotPayload,
   calculateImportSummary,
@@ -88,6 +89,7 @@ import {
   canAccountCreateStaff,
   canPerformRoleAction,
   canStaffFilterMultiWarehouses,
+  canStaffRenameWarehouse,
   canViewAuditHistory,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
@@ -113,6 +115,7 @@ import {
   getDefaultPermissionsForPosition,
   getIndependentWarehouseFullPermissions,
   getPositionRoleLabel,
+  getSelfWarehouseRenameCount,
   getStaffAllowedWarehouses,
   getTodayVietnamDateStr,
   hasMultiWarehouseManagementGrant,
@@ -125,6 +128,7 @@ import {
   recalculateImportPriceOnImportMutation,
   reconcileCustomersFromSales,
   resolveActiveWarehouses,
+  resolveCanonicalSelectWarehouseValue,
   reverseCustomerReceiptVoucherAllocations,
   reverseSupplierPaymentVoucherAllocations,
   updateImportRecord,
@@ -834,11 +838,18 @@ export default function App() {
       const baseUser =
         emailLower.split('@')[0]?.replace(/[^a-zA-Z0-9._-]/g, '') ||
         `user_${user.uid.slice(0, 6)}`;
+      const defaultWhFromEmail = formatDefaultWarehouseNameFromGmail(
+        emailLower || `${baseUser}@gmail.com`
+      );
       const autoWarehouseName = isRemoteAdmin
         ? 'Tất cả kho'
         : pendingReg?.customWarehouseName
         ? normalizeCustomTamAnWarehouseName(pendingReg.customWarehouseName, emailLower)
-        : formatDefaultWarehouseNameFromGmail(emailLower || `${baseUser}@gmail.com`);
+        : defaultWhFromEmail;
+      const usedCustomAtSignup =
+        !isRemoteAdmin &&
+        Boolean(pendingReg?.customWarehouseName) &&
+        !areWarehouseNamesEquivalent(autoWarehouseName, defaultWhFromEmail);
 
       resolvedStaff = {
         uid: isRemoteAdmin ? PRIMARY_ADMIN_UID : user.uid,
@@ -850,12 +861,13 @@ export default function App() {
           baseUser,
         phone: isRemoteAdmin ? ADMIN_PRIMARY_PHONE : '',
         email: emailLower || ADMIN_BACKUP_EMAIL,
-        role: 'manager',
+        role: isRemoteAdmin ? 'manager' : 'staff',
         positionRole: isRemoteAdmin ? 'primary_manager' : 'warehouse_manager',
         permissions: isRemoteAdmin
           ? getDefaultPermissionsForPosition('primary_manager')
           : getIndependentWarehouseFullPermissions(),
         assignedWarehouse: autoWarehouseName,
+        warehouseRenameCount: isRemoteAdmin ? 0 : usedCustomAtSignup ? 1 : 0,
         active: true,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -3081,7 +3093,7 @@ export default function App() {
         ...data,
         warehouseName: resolvedWh,
         id: `prod_${Date.now()}`,
-        ownerId: activeUid,
+        ownerId: resolveOwnerUidForWarehouse(resolvedWh),
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -5153,11 +5165,16 @@ export default function App() {
         ? `${baseUsername}_${Date.now().toString().slice(-3)}`
         : baseUsername;
       const posRole: StaffPositionRole = isPrimary ? 'primary_manager' : 'warehouse_manager';
+      const defaultWhFromGmail = formatDefaultWarehouseNameFromGmail(query);
       const autoWarehouseName = isPrimary
         ? 'Tất cả kho'
         : payload.customWarehouseName
         ? normalizeCustomTamAnWarehouseName(payload.customWarehouseName, query)
-        : formatDefaultWarehouseNameFromGmail(query);
+        : defaultWhFromGmail;
+      const usedCustomAtSignup =
+        !isPrimary &&
+        Boolean(payload.customWarehouseName) &&
+        !areWarehouseNamesEquivalent(autoWarehouseName, defaultWhFromGmail);
 
       const newUid = isPrimary ? PRIMARY_ADMIN_UID : fbSignUp.user.uid;
       const hashedPass = await hashPassword(payload.password, newUid);
@@ -5169,12 +5186,13 @@ export default function App() {
         displayName: payload.displayName.trim() || uniqueUsername,
         phone: isPrimary ? ADMIN_PRIMARY_PHONE : '',
         email: query,
-        role: 'manager',
+        role: isPrimary ? 'manager' : 'staff',
         positionRole: posRole,
         permissions: isPrimary
           ? getDefaultPermissionsForPosition('primary_manager')
           : getIndependentWarehouseFullPermissions(),
         assignedWarehouse: autoWarehouseName,
+        warehouseRenameCount: isPrimary ? 0 : usedCustomAtSignup ? 1 : 0,
         active: true,
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -5321,85 +5339,114 @@ export default function App() {
     }
     const nowIso = new Date().toISOString();
     const oldWarehouse = target.assignedWarehouse;
-    const isSingleWhAccount =
-      oldWarehouse !== 'Tất cả kho' &&
-      !canAccountCreateStaff(target) &&
-      !hasMultiWarehouseManagementGrant(target);
+    const callerIsPrimaryAdmin = canAccountCreateStaff(currentStaff);
+    const renameCheck = canStaffRenameWarehouse(target, currentStaff);
+    const canModifyTargetWarehouse =
+      oldWarehouse !== 'Tất cả kho' && !canAccountCreateStaff(target);
 
-    const nextWarehouse =
-      isSingleWhAccount && payload.customWarehouseName
+    const requestedNextWarehouse =
+      canModifyTargetWarehouse && payload.customWarehouseName
         ? normalizeCustomTamAnWarehouseName(
             payload.customWarehouseName,
             payload.email || target.email
           )
         : oldWarehouse;
 
-    if (isSingleWhAccount && nextWarehouse && nextWarehouse !== oldWarehouse) {
+    const isChangingWarehouseName =
+      Boolean(requestedNextWarehouse) &&
+      !areWarehouseNamesEquivalent(requestedNextWarehouse, oldWarehouse);
+
+    // STRICT POLICY: Newly registered / non-admin accounts may change their warehouse name ONLY ONCE (1 lần duy nhất).
+    // ONLY Primary Admin (trannhat1205@gmail.com) may rename any warehouse unlimited times.
+    if (isChangingWarehouseName && !renameCheck.allowed) {
+      const msg =
+        renameCheck.reason ||
+        `Tài khoản mới đăng ký chỉ được thay đổi tên kho 1 lần duy nhất. Chỉ Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền đổi lại tên kho.`;
+      showToast(msg);
+      return { ok: false, message: msg };
+    }
+
+    // Prevent non-admin users from hijacking another account's existing warehouse name
+    if (isChangingWarehouseName && !callerIsPrimaryAdmin) {
+      const collidingStaff = staffList.find(
+        (s) =>
+          s.uid !== target.uid &&
+          s.assignedWarehouse !== 'Tất cả kho' &&
+          areWarehouseNamesEquivalent(s.assignedWarehouse, requestedNextWarehouse)
+      );
+      if (collidingStaff) {
+        const msg = `Tên kho "${requestedNextWarehouse}" đã được tài khoản khác sử dụng. Vui lòng chọn một tên kho riêng khác (VD: TÂM AN + TÊN KHU VỰC/CỬA HÀNG).`;
+        showToast(msg);
+        return { ok: false, message: msg };
+      }
+    }
+
+    const nextWarehouse = isChangingWarehouseName ? requestedNextWarehouse : oldWarehouse;
+    const otherAccountsShareOldWh = staffList.some(
+      (s) => s.uid !== target.uid && areWarehouseNamesEquivalent(s.assignedWarehouse, oldWarehouse)
+    );
+    const belongsToTarget = (rec: { ownerId?: string; warehouseName?: string; actorUid?: string }) => {
+      if (!areWarehouseNamesEquivalent(rec.warehouseName, oldWarehouse)) return false;
+      const recOwner = rec.ownerId || rec.actorUid;
+      if (recOwner) return recOwner === payload.uid;
+      return !otherAccountsShareOldWh;
+    };
+
+    if (isChangingWarehouseName && nextWarehouse) {
       setWarehouses((prev) => {
-        const replaced = prev.map((w) => (w === oldWarehouse ? nextWarehouse : w));
-        return replaced.includes(nextWarehouse) ? replaced : [...replaced, nextWarehouse];
+        const replaced = otherAccountsShareOldWh
+          ? [...prev, nextWarehouse]
+          : prev.map((w) => (areWarehouseNamesEquivalent(w, oldWarehouse) ? nextWarehouse : w));
+        return dedupeWarehouseNames([...replaced, nextWarehouse]);
       });
       setProducts((prev) =>
         prev.map((p) =>
-          p.warehouseName === oldWarehouse
-            ? { ...p, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : p
+          belongsToTarget(p) ? { ...p, warehouseName: nextWarehouse, updatedAt: nowIso } : p
         )
       );
       setSales((prev) =>
         prev.map((s) =>
-          s.warehouseName === oldWarehouse
-            ? { ...s, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : s
+          belongsToTarget(s) ? { ...s, warehouseName: nextWarehouse, updatedAt: nowIso } : s
         )
       );
       setImports((prev) =>
         prev.map((i) =>
-          i.warehouseName === oldWarehouse
-            ? { ...i, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : i
+          belongsToTarget(i) ? { ...i, warehouseName: nextWarehouse, updatedAt: nowIso } : i
         )
       );
       setReceiptVouchers((prev) =>
         prev.map((rv) =>
-          rv.warehouseName === oldWarehouse
-            ? { ...rv, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : rv
+          belongsToTarget(rv) ? { ...rv, warehouseName: nextWarehouse, updatedAt: nowIso } : rv
         )
       );
       setPaymentVouchers((prev) =>
         prev.map((pv) =>
-          pv.warehouseName === oldWarehouse
-            ? { ...pv, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : pv
+          belongsToTarget(pv) ? { ...pv, warehouseName: nextWarehouse, updatedAt: nowIso } : pv
         )
       );
       setCustomers((prev) =>
         prev.map((c) =>
-          c.warehouseName === oldWarehouse
-            ? { ...c, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : c
+          belongsToTarget(c) ? { ...c, warehouseName: nextWarehouse, updatedAt: nowIso } : c
         )
       );
       setSuppliers((prev) =>
         prev.map((sp) =>
-          sp.warehouseName === oldWarehouse
-            ? { ...sp, warehouseName: nextWarehouse }
-            : sp
+          belongsToTarget(sp) ? { ...sp, warehouseName: nextWarehouse } : sp
         )
       );
       setSavedVouchers((prev) =>
         prev.map((vc) =>
-          vc.warehouseName === oldWarehouse
-            ? { ...vc, warehouseName: nextWarehouse, updatedAt: nowIso }
-            : vc
+          belongsToTarget(vc) ? { ...vc, warehouseName: nextWarehouse, updatedAt: nowIso } : vc
+        )
+      );
+      setStockAdjustments((prev) =>
+        prev.map((adj) =>
+          belongsToTarget(adj) ? { ...adj, warehouseName: nextWarehouse, updatedAt: nowIso } : adj
         )
       );
       setAuditLogs((prev) =>
         prev.map((log) =>
-          log.warehouseName === oldWarehouse
-            ? { ...log, warehouseName: nextWarehouse }
-            : log
+          belongsToTarget(log) ? { ...log, warehouseName: nextWarehouse } : log
         )
       );
     }
@@ -5408,6 +5455,23 @@ export default function App() {
       ? await hashPassword(payload.newPassword, target.uid)
       : target.password;
 
+    const currentRenameCount = getSelfWarehouseRenameCount(target);
+    const nextRenameCount =
+      isChangingWarehouseName && !callerIsPrimaryAdmin
+        ? currentRenameCount + 1
+        : currentRenameCount;
+
+    const nextAssignedWarehouses =
+      target.assignedWarehouses && target.assignedWarehouses.length >= 2
+        ? isChangingWarehouseName
+          ? dedupeWarehouseNames(
+              target.assignedWarehouses.map((w) =>
+                areWarehouseNamesEquivalent(w, oldWarehouse) ? nextWarehouse : w
+              )
+            )
+          : target.assignedWarehouses
+        : undefined;
+
     const updatedProfileTarget: StaffMember = {
       ...target,
       displayName: payload.displayName || target.displayName,
@@ -5415,16 +5479,13 @@ export default function App() {
       email: payload.email || target.email,
       password: nextPasswordHash,
       assignedWarehouse: nextWarehouse,
+      ...(nextAssignedWarehouses ? { assignedWarehouses: nextAssignedWarehouses } : {}),
+      warehouseRenameCount: canAccountCreateStaff(target) ? 0 : nextRenameCount,
       updatedAt: nowIso,
     };
+    // ISOLATION: Only update the target account itself — NEVER overwrite other accounts sharing the old name!
     setStaffList((prev) =>
-      prev.map((s) =>
-        s.uid === payload.uid
-          ? updatedProfileTarget
-          : isSingleWhAccount && nextWarehouse !== oldWarehouse && s.assignedWarehouse === oldWarehouse
-          ? { ...s, assignedWarehouse: nextWarehouse, updatedAt: nowIso }
-          : s
-      )
+      prev.map((s) => (s.uid === payload.uid ? updatedProfileTarget : s))
     );
     if (isGoogleAuthenticated) {
       void upsertRealtimeUserDirectoryProfile(updatedProfileTarget);
@@ -5435,8 +5496,10 @@ export default function App() {
       targetCode: `@${target.username}`,
       warehouseName: nextWarehouse,
       summary: `Cập nhật hồ sơ cá nhân @${target.username}${
-        nextWarehouse !== oldWarehouse
-          ? ` & Đổi tên hiển thị kho: "${oldWarehouse}" → "${nextWarehouse}"`
+        isChangingWarehouseName
+          ? ` & Đổi tên hiển thị kho: "${oldWarehouse}" → "${nextWarehouse}"${
+              callerIsPrimaryAdmin ? ' (Admin chính)' : ' (Đã dùng 1/1 lượt đổi)'
+            }`
           : ''
       }`,
       details: `Họ tên: ${payload.displayName || target.displayName} · Gmail: ${
@@ -5446,11 +5509,16 @@ export default function App() {
       }`,
     });
     showToast(
-      `Đã lưu hồ sơ cá nhân cho @${target.username} · Kho hiển thị: ${nextWarehouse}!`
+      isChangingWarehouseName && !callerIsPrimaryAdmin
+        ? `Đã đổi tên kho thành "${nextWarehouse}"! (Đã dùng 1/1 lượt đổi tên kho — lần sau chỉ Quản lý chính mới có quyền đổi).`
+        : `Đã lưu hồ sơ cá nhân cho @${target.username} · Kho hiển thị: ${nextWarehouse}!`
     );
     return {
       ok: true,
-      message: `Đã cập nhật hồ sơ cá nhân & tên hiển thị kho (${nextWarehouse}) cho tài khoản @${target.username} thành công!`,
+      message:
+        isChangingWarehouseName && !callerIsPrimaryAdmin
+          ? `Đã cập nhật tên kho "${nextWarehouse}" thành công! Lưu ý: Tài khoản đã dùng hết 1/1 lượt tự đổi tên kho (lần sau vui lòng liên hệ Quản lý chính).`
+          : `Đã cập nhật hồ sơ cá nhân & tên hiển thị kho (${nextWarehouse}) cho tài khoản @${target.username} thành công!`,
     };
   };
 
@@ -7518,29 +7586,40 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isAdminAccount || canFilterMultiWarehouses) {
-                        setActiveTab('staff_accounts');
-                      } else {
-                        setQuickRenameSuffix(
-                          extractCustomWarehouseSuffix(currentStaff.assignedWarehouse)
-                        );
-                        setQuickRenameWarehouseOpen(true);
-                      }
-                    }}
-                    className="w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-bold rounded-lg border transition-colors flex items-center gap-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-300"
-                  >
-                    <ShieldCheck className="w-4 h-4 shrink-0" />
-                    <span className="truncate">
-                      {isAdminAccount
-                        ? 'Mở Bảng Phân Quyền Kho'
-                        : canFilterMultiWarehouses
-                        ? `Hồ sơ & Phạm vi ${allowedWarehouses.length} kho`
-                        : `Đổi tên hiển thị kho (${currentStaff.assignedWarehouse})`}
-                    </span>
-                  </button>
+                  {(() => {
+                    const selfRenameCheck = canStaffRenameWarehouse(currentStaff, currentStaff);
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isAdminAccount || canFilterMultiWarehouses || !selfRenameCheck.allowed) {
+                            setActiveTab('staff_accounts');
+                          } else {
+                            setQuickRenameSuffix(
+                              extractCustomWarehouseSuffix(currentStaff.assignedWarehouse)
+                            );
+                            setQuickRenameWarehouseOpen(true);
+                          }
+                        }}
+                        className={`w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-bold rounded-lg border transition-colors flex items-center gap-1.5 ${
+                          !isAdminAccount && !canFilterMultiWarehouses && !selfRenameCheck.allowed
+                            ? 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-300'
+                            : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border-emerald-300'
+                        }`}
+                      >
+                        <ShieldCheck className="w-4 h-4 shrink-0" />
+                        <span className="truncate">
+                          {isAdminAccount
+                            ? 'Mở Bảng Phân Quyền Kho'
+                            : canFilterMultiWarehouses
+                            ? `Hồ sơ & Phạm vi ${allowedWarehouses.length} kho`
+                            : selfRenameCheck.allowed
+                            ? `Đổi tên hiển thị kho (còn 1 lần)`
+                            : `Tên kho đã cố định (1/1) · Hồ sơ`}
+                        </span>
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -7612,19 +7691,35 @@ export default function App() {
                             {isRowAdmin ? (
                               <span className="font-bold text-emerald-900">Tất cả kho</span>
                             ) : (
-                              <select
-                                aria-label={`Phân quyền kho cho ${st.username}`}
-                                value={st.assignedWarehouse}
-                                onChange={(e) => handleUpdateStaffWarehouse(st.uid, e.target.value)}
-                                className="flex-1 min-w-0 px-2 py-1 text-xs font-bold bg-white border border-emerald-300 rounded-md text-emerald-950"
-                              >
-                                {warehouses.map((w) => (
-                                  <option key={w} value={w}>
-                                    {w}
-                                  </option>
-                                ))}
-                                <option value="Tất cả kho">Tất cả kho</option>
-                              </select>
+                              (() => {
+                                const dashOptions = dedupeWarehouseNames([
+                                  ...warehouses,
+                                  st.assignedWarehouse,
+                                ]);
+                                const resolvedSelectVal = isRowAllWh
+                                  ? 'Tất cả kho'
+                                  : resolveCanonicalSelectWarehouseValue(
+                                      st.assignedWarehouse,
+                                      dashOptions
+                                    );
+                                return (
+                                  <select
+                                    aria-label={`Phân quyền kho cho ${st.username}`}
+                                    value={resolvedSelectVal}
+                                    onChange={(e) =>
+                                      handleUpdateStaffWarehouse(st.uid, e.target.value)
+                                    }
+                                    className="flex-1 min-w-0 px-2 py-1 text-xs font-bold bg-white border border-emerald-300 rounded-md text-emerald-950"
+                                  >
+                                    {dashOptions.map((w) => (
+                                      <option key={w} value={w}>
+                                        {w}
+                                      </option>
+                                    ))}
+                                    <option value="Tất cả kho">Tất cả kho</option>
+                                  </select>
+                                );
+                              })()
                             )}
                           </div>
                         </div>
@@ -8497,7 +8592,12 @@ export default function App() {
               className="p-5 space-y-4"
             >
               <p className="text-xs text-slate-600 leading-relaxed">
-                Tài khoản đăng ký mới tự động có kho độc lập và tự đổi tên kho không cần Admin cấp. Hệ thống giữ nguyên tiền tố mặc định <strong>{MANDATORY_WAREHOUSE_PREFIX}</strong> ở phía trước:
+                Tài khoản đăng ký mới tự động có kho độc lập với tiền tố mặc định{' '}
+                <strong>{MANDATORY_WAREHOUSE_PREFIX}</strong>.{' '}
+                <strong className="text-amber-800">
+                  Lưu ý quan trọng: Mỗi tài khoản chỉ được thay đổi tên kho 1 lần duy nhất
+                </strong>{' '}
+                (sau đó chỉ Quản lý chính mới có quyền thay đổi lại):
               </p>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">

@@ -89,6 +89,7 @@ export interface RtdbUserDirectoryProfile {
   assignedWarehouses?: string[];
   multiWarehouseGrantedByAdmin?: boolean;
   assignedOwnerUids?: Record<string, boolean>;
+  warehouseRenameCount?: number;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -287,6 +288,10 @@ export function toRtdbUserDirectoryProfile(
     ...(normalized.assignedOwnerUids && Object.keys(normalized.assignedOwnerUids).length > 0
       ? { assignedOwnerUids: normalized.assignedOwnerUids }
       : {}),
+    ...(typeof normalized.warehouseRenameCount === 'number' &&
+    Number.isFinite(normalized.warehouseRenameCount)
+      ? { warehouseRenameCount: Math.max(0, Math.floor(normalized.warehouseRenameCount)) }
+      : {}),
     active: normalized.active !== false,
     createdAt: normalized.createdAt || nowIso,
     updatedAt: normalized.updatedAt || nowIso,
@@ -334,6 +339,10 @@ export function mergeDirectoryIntoStaffList(
           : dir.multiWarehouseGrantedByAdmin === false
           ? undefined
           : prev?.assignedOwnerUids,
+      warehouseRenameCount:
+        typeof dir.warehouseRenameCount === 'number' && Number.isFinite(dir.warehouseRenameCount)
+          ? Math.max(0, Math.floor(dir.warehouseRenameCount))
+          : prev?.warehouseRenameCount,
       active: dir.active !== undefined ? dir.active : prev?.active ?? true,
       createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
       updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
@@ -982,6 +991,12 @@ export function resolveDesignatedOwnerUidsForWarehouses(params: {
     if (rec?.ownerId && selectedKeys.has(normalizeWarehouseKey(rec.warehouseName))) {
       ownerUidsMap[rec.ownerId.trim()] = true;
     }
+  }
+
+  // SECURITY: Never expose Primary Admin's private workspace (which holds exclusive auditLogs & backups)
+  // to non-admin designated multi-warehouse managers.
+  if (params.targetUid !== PRIMARY_ADMIN_UID) {
+    delete ownerUidsMap[PRIMARY_ADMIN_UID];
   }
 
   return ownerUidsMap;

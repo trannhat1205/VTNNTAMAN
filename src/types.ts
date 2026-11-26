@@ -322,6 +322,8 @@ export interface StaffMember {
   multiWarehouseGrantedByAdmin?: boolean;
   /** Map of workspace owner UIDs readable/writable by a designated multi-warehouse manager in Firebase RTDB. */
   assignedOwnerUids?: Record<string, boolean>;
+  /** Number of self-service warehouse renames used by a non-admin account (max 1; Primary Admin is unlimited). */
+  warehouseRenameCount?: number;
   active: boolean;
   createdAt: string;
   updatedAt: string;

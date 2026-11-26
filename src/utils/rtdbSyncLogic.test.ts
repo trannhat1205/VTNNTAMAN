@@ -24,14 +24,18 @@ import {
 } from './rtdbSyncLogic';
 import {
   canStaffFilterMultiWarehouses,
+  canStaffRenameWarehouse,
   dedupeWarehouseNames,
   evaluateStaffAccessScope,
   filterRecordsBySelectedWarehouses,
   formatSelectedWarehousesBadge,
   getIndependentWarehouseFullPermissions,
+  getSelfWarehouseRenameCount,
   getStaffAllowedWarehouses,
   hasMultiWarehouseManagementGrant,
   normalizeWarehouseKey,
+  PRIMARY_ADMIN_UID,
+  resolveCanonicalSelectWarehouseValue,
 } from './businessLogic';
 import type { AuditLogEntry, BackupEntry, SaleTransaction } from '../types';
 
@@ -592,4 +596,113 @@ test('Case-insensitive multi-warehouse matching & owner UID resolution: "Tâm An
   assert.equal(partitioned[VTNNTAMAN99_UID].meta.assignedWarehouse, 'TÂM AN MỸ NGÃI');
   assert.equal(partitioned[VTNNTAMAN99_UID].meta.ownerEmail, 'vtnntaman99@gmail.com');
   assert.equal(partitioned[VTNNTAMAN99_UID].products.length, 8);
+
+  // 5. Security: PRIMARY_ADMIN_UID is NEVER exposed in non-admin assignedOwnerUids
+  const ownerMapWithAdminRec = resolveDesignatedOwnerUidsForWarehouses({
+    targetUid: 'LAiiKyabFmg4XxjkaTEgIcW4DnK2',
+    selectedWarehouses: ['TÂM AN MỸ NGÃI'],
+    staffList: [],
+    records: [
+      { warehouseName: 'Tâm An Mỹ Ngãi', ownerId: PRIMARY_ADMIN_UID },
+      { warehouseName: 'TÂM AN MỸ NGÃI', ownerId: VTNNTAMAN99_UID },
+    ],
+  });
+  assert.equal(ownerMapWithAdminRec[VTNNTAMAN99_UID], true);
+  assert.equal(ownerMapWithAdminRec[PRIMARY_ADMIN_UID], undefined);
+});
+
+test('One-time warehouse rename policy, Primary Admin unlimited renames, canonical select fallback, and RTDB rules enforcement', () => {
+  const primaryAdmin = {
+    uid: PRIMARY_ADMIN_UID,
+    username: 'admin',
+    password: '',
+    displayName: 'Trần Đình Nhất',
+    email: 'trannhat1205@gmail.com',
+    phone: '0393120246',
+    role: 'manager' as const,
+    positionRole: 'primary_manager' as const,
+    assignedWarehouse: 'Tất cả kho',
+    active: true,
+    createdAt: '2026-11-25T00:00:00Z',
+    updatedAt: '2026-11-25T00:00:00Z',
+  };
+
+  // 1. Brand-new registered account with default Gmail warehouse name -> 0/1 used -> allowed ONCE
+  const freshUser = {
+    uid: 'uid_new_user_1',
+    username: 'taman010205',
+    password: '',
+    displayName: 'Tâm An Mới',
+    email: 'taman010205@gmail.com',
+    phone: '',
+    role: 'staff' as const,
+    positionRole: 'warehouse_manager' as const,
+    assignedWarehouse: 'TÂM AN TAMAN010205',
+    warehouseRenameCount: 0,
+    active: true,
+    createdAt: '2026-11-26T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+  assert.equal(getSelfWarehouseRenameCount(freshUser), 0);
+  const firstCheck = canStaffRenameWarehouse(freshUser, freshUser);
+  assert.equal(firstCheck.allowed, true);
+  assert.equal(firstCheck.remainingSelfRenames, 1);
+
+  // 2. After using their 1 rename -> LOCKED for self (even if granted multi-warehouse later!)
+  const renamedOnceUser = {
+    ...freshUser,
+    assignedWarehouse: 'TÂM AN BA SAO',
+    warehouseRenameCount: 1,
+    multiWarehouseGrantedByAdmin: true,
+    assignedWarehouses: ['TÂM AN BA SAO', 'TÂM AN MỸ NGÃI'],
+  };
+  assert.equal(getSelfWarehouseRenameCount(renamedOnceUser), 1);
+  const secondSelfCheck = canStaffRenameWarehouse(renamedOnceUser, renamedOnceUser);
+  assert.equal(secondSelfCheck.allowed, false);
+  assert.equal(secondSelfCheck.remainingSelfRenames, 0);
+
+  // 3. Legacy account without warehouseRenameCount that ALREADY changed away from Gmail default -> inferred 1/1 LOCKED
+  const legacyRenamedUser = {
+    ...freshUser,
+    uid: 'gBW4G38AvAfmHqMJ5FXyMj0Wovn1',
+    username: 'hanhandt0211',
+    email: 'hanhandt0211@gmail.com',
+    assignedWarehouse: 'TÂM AN HAN',
+    warehouseRenameCount: undefined,
+  };
+  assert.equal(getSelfWarehouseRenameCount(legacyRenamedUser), 1);
+  assert.equal(canStaffRenameWarehouse(legacyRenamedUser, legacyRenamedUser).allowed, false);
+
+  // 4. Legacy account with auto-fallback TÂM AN USER_O0XY7Z -> still gets 1 free rename
+  const legacyFallbackUser = {
+    ...freshUser,
+    uid: 'O0xy7zgvgbhwedEYRzAn1afNqvd2',
+    username: 'user_O0xy7z',
+    email: 'phucantamgroup@gmail.com',
+    assignedWarehouse: 'TÂM AN USER_O0XY7Z',
+    warehouseRenameCount: undefined,
+  };
+  assert.equal(getSelfWarehouseRenameCount(legacyFallbackUser), 0);
+  assert.equal(canStaffRenameWarehouse(legacyFallbackUser, legacyFallbackUser).allowed, true);
+
+  // 5. ONLY Primary Admin can rename ANY account's warehouse unlimited times (even after user used 1/1!)
+  const adminCheck = canStaffRenameWarehouse(renamedOnceUser, primaryAdmin);
+  assert.equal(adminCheck.allowed, true);
+  assert.equal(adminCheck.isPrimaryAdminActor, true);
+
+  // 6. Another non-admin user CANNOT rename someone else's warehouse
+  const anotherNonAdmin = { ...renamedOnceUser, uid: 'uid_other_user_2' };
+  assert.equal(canStaffRenameWarehouse(freshUser, anotherNonAdmin).allowed, false);
+
+  // 7. Canonical <select> value resolution prevents Title Case "Tâm An Mỹ Ngãi" from falling back to "Tất cả kho"
+  const dropdownOpts = ['TÂM AN MỸ NGÃI', 'Tâm An Cao Lãnh', 'TÂM AN CHUNG'];
+  assert.equal(
+    resolveCanonicalSelectWarehouseValue('Tâm An Mỹ Ngãi', dropdownOpts),
+    'TÂM AN MỸ NGÃI'
+  );
+  assert.equal(resolveCanonicalSelectWarehouseValue('Tất cả kho', dropdownOpts), 'Tất cả kho');
+
+  // 8. Firebase RTDB database.rules.json enforces server-side warehouseRenameCount lock
+  const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'database.rules.json'), 'utf8');
+  assert.equal(rulesText.includes('warehouseRenameCount'), true);
 });

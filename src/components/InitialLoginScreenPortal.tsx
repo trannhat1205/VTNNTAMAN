@@ -510,8 +510,10 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
                     Tên kho hiển thị: {previewDefaultWarehouseName}
                   </div>
                   <p className="text-[11px] text-emerald-800 leading-snug">
-                    Hệ thống tự cấp kho riêng và đồng bộ thời gian thực — bạn tự đặt/đổi tên theo chuẩn{' '}
-                    <strong>&quot;TÂM AN + TÊN SỬA ĐỔI&quot;</strong> không cần Admin cấp.
+                    Hệ thống tự cấp kho riêng và đồng bộ thời gian thực theo chuẩn{' '}
+                    <strong>&quot;TÂM AN + TÊN SỬA ĐỔI&quot;</strong>. Lưu ý: Tài khoản đăng ký mới
+                    chỉ được đổi tên kho <strong>1 lần duy nhất</strong> (chỉ Quản lý chính mới có
+                    quyền đổi nhiều lần).
                   </p>
                 </div>
 

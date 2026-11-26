@@ -824,6 +824,145 @@ export const PRIMARY_ADMIN_UID = 'Gu6OYdsdiWbRvbEINqaWZXj3LV83';
 export const PRIMARY_MANAGER_EMAIL = 'trannhat1205@gmail.com';
 export const PRIMARY_MANAGER_PHONE = '0393120246';
 export const MANDATORY_WAREHOUSE_PREFIX = 'TÂM AN';
+export const MAX_SELF_WAREHOUSE_RENAMES = 1;
+
+/**
+ * Returns how many self-service warehouse renames a non-admin account has already used.
+ * - Primary Admin is never restricted (always returns 0).
+ * - Accounts with explicit `warehouseRenameCount` use that persisted count.
+ * - Legacy accounts created before `warehouseRenameCount` existed are inferred as 1
+ *   if their current warehouse already differs from their default Gmail warehouse name.
+ */
+export function getSelfWarehouseRenameCount(
+  staff:
+    | (Pick<
+        StaffMember,
+        'assignedWarehouse' | 'email' | 'username' | 'phone' | 'positionRole' | 'warehouseRenameCount'
+      > & { uid?: string })
+    | null
+    | undefined
+): number {
+  if (!staff || canAccountCreateStaff(staff)) return 0;
+  if (
+    typeof staff.warehouseRenameCount === 'number' &&
+    Number.isFinite(staff.warehouseRenameCount)
+  ) {
+    return Math.max(0, Math.floor(staff.warehouseRenameCount));
+  }
+  const currentWh = (staff.assignedWarehouse || '').trim();
+  if (
+    !currentWh ||
+    currentWh === 'Tất cả kho' ||
+    currentWh === 'Kho VTNN Tâm An' ||
+    currentWh === 'VTNN Tâm An' ||
+    /^TÂM AN USER_/i.test(currentWh)
+  ) {
+    return 0;
+  }
+  const defaultWh = formatDefaultWarehouseNameFromGmail(staff.email || staff.username || '');
+  return areWarehouseNamesEquivalent(currentWh, defaultWh) ? 0 : 1;
+}
+
+/**
+ * Strict policy:
+ * - Newly registered / non-admin accounts may rename their warehouse AT MOST ONCE (1 lần duy nhất).
+ * - ONLY the 1 Primary Admin (trannhat1205@gmail.com / Gu6OYdsdiWbRvbEINqaWZXj3LV83)
+ *   can rename any warehouse unlimited times.
+ */
+export function canStaffRenameWarehouse(
+  target:
+    | (Pick<
+        StaffMember,
+        | 'uid'
+        | 'assignedWarehouse'
+        | 'email'
+        | 'username'
+        | 'phone'
+        | 'positionRole'
+        | 'warehouseRenameCount'
+      >)
+    | null
+    | undefined,
+  actor:
+    | (Pick<StaffMember, 'uid' | 'email' | 'phone' | 'positionRole'>)
+    | null
+    | undefined
+): {
+  allowed: boolean;
+  isPrimaryAdminActor: boolean;
+  usedCount: number;
+  remainingSelfRenames: number;
+  reason?: string;
+} {
+  const usedCount = getSelfWarehouseRenameCount(target);
+  const isPrimaryAdminActor = canAccountCreateStaff(actor);
+  if (!target) {
+    return {
+      allowed: false,
+      isPrimaryAdminActor,
+      usedCount,
+      remainingSelfRenames: 0,
+      reason: 'Không tìm thấy tài khoản cần đổi tên kho.',
+    };
+  }
+  if (canAccountCreateStaff(target) || target.assignedWarehouse === 'Tất cả kho') {
+    return {
+      allowed: false,
+      isPrimaryAdminActor,
+      usedCount,
+      remainingSelfRenames: 0,
+      reason: 'Tài khoản quản trị toàn bộ các kho không đổi tên kho đơn lẻ.',
+    };
+  }
+  if (isPrimaryAdminActor) {
+    return {
+      allowed: true,
+      isPrimaryAdminActor: true,
+      usedCount,
+      remainingSelfRenames: Number.POSITIVE_INFINITY,
+    };
+  }
+  if (!actor || actor.uid !== target.uid) {
+    return {
+      allowed: false,
+      isPrimaryAdminActor: false,
+      usedCount,
+      remainingSelfRenames: Math.max(0, MAX_SELF_WAREHOUSE_RENAMES - usedCount),
+      reason: `Chỉ tài khoản Quản lý chính (${PRIMARY_MANAGER_EMAIL}) mới có quyền đổi tên kho của tài khoản khác.`,
+    };
+  }
+  if (usedCount >= MAX_SELF_WAREHOUSE_RENAMES) {
+    return {
+      allowed: false,
+      isPrimaryAdminActor: false,
+      usedCount,
+      remainingSelfRenames: 0,
+      reason: `Tài khoản mới đăng ký chỉ được thay đổi tên kho 1 lần duy nhất (đã sử dụng ${usedCount}/${MAX_SELF_WAREHOUSE_RENAMES} lần). Chỉ Quản lý chính (${PRIMARY_MANAGER_EMAIL}) mới có quyền thay đổi lại tên kho.`,
+    };
+  }
+  return {
+    allowed: true,
+    isPrimaryAdminActor: false,
+    usedCount,
+    remainingSelfRenames: MAX_SELF_WAREHOUSE_RENAMES - usedCount,
+  };
+}
+
+/**
+ * Matches a staff member's `assignedWarehouse` against canonical dropdown options
+ * case- and accent-insensitively so Title Case ("Tâm An Mỹ Ngãi") never falls back to Option #0 ("Tất cả kho").
+ */
+export function resolveCanonicalSelectWarehouseValue(
+  assignedWarehouse: string | null | undefined,
+  warehouseOptions: string[]
+): string {
+  const trimmed = (assignedWarehouse || '').trim();
+  if (!trimmed) return warehouseOptions[0] || '';
+  if (trimmed === 'Tất cả kho') return 'Tất cả kho';
+  const targetKey = normalizeWarehouseKey(trimmed);
+  const matched = warehouseOptions.find((w) => normalizeWarehouseKey(w) === targetKey);
+  return matched || trimmed;
+}
 
 /**
  * Generates the default warehouse display name for a newly registered Gmail account:

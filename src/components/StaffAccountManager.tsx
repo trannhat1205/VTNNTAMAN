@@ -35,18 +35,21 @@ export { InitialLoginScreenPortal, PasswordInputWithEye };
 import {
   ALL_STAFF_FUNCTIONAL_PERMISSIONS,
   canAccountCreateStaff,
+  canStaffRenameWarehouse,
   dedupeWarehouseNames,
   extractCustomWarehouseSuffix,
   formatDefaultWarehouseNameFromGmail,
   formatVND,
   getDefaultPermissionsForPosition,
   getPositionRoleLabel,
+  getSelfWarehouseRenameCount,
   hasCompletedStaffPersonalGmail,
   hasMultiWarehouseManagementGrant,
   MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
   normalizeWarehouseKey,
+  resolveCanonicalSelectWarehouseValue,
   SearchableOptionItem,
 } from '../utils/businessLogic';
 import { AdminWarehouseAccountSummary } from '../utils/rtdbSyncLogic';
@@ -234,8 +237,23 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   const [multiWhSearch, setMultiWhSearch] = useState<string>('');
 
   const canonicalWarehouses = useMemo(
-    () => dedupeWarehouseNames(warehouses),
-    [warehouses]
+    () =>
+      dedupeWarehouseNames([
+        ...warehouses,
+        ...staffList.map((s) => s.assignedWarehouse),
+        ...staffList.flatMap((s) => s.assignedWarehouses || []),
+      ]),
+    [warehouses, staffList]
+  );
+
+  const selfRenameStatus = useMemo(
+    () => canStaffRenameWarehouse(currentStaff, currentStaff),
+    [currentStaff]
+  );
+
+  const personalTargetRenameStatus = useMemo(
+    () => canStaffRenameWarehouse(targetPersonalStaff, currentStaff),
+    [targetPersonalStaff, currentStaff]
   );
 
   const summaryByWarehouseKey = useMemo(() => {
@@ -417,10 +435,8 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       return;
     }
 
-    const isSingleWarehouseTarget =
-      targetPersonalStaff.assignedWarehouse !== 'Tất cả kho' &&
-      !canAccountCreateStaff(targetPersonalStaff);
-    const normalizedWarehouseName = isSingleWarehouseTarget
+    const renamePermission = canStaffRenameWarehouse(targetPersonalStaff, currentStaff);
+    const normalizedWarehouseName = renamePermission.allowed
       ? normalizeCustomTamAnWarehouseName(personalWarehouseSuffix, trimmedEmail)
       : undefined;
 
@@ -599,73 +615,101 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       {!canCreateAndAssignRoles &&
         !hasMultiWarehouseManagementGrant(currentStaff) &&
         currentStaff.assignedWarehouse !== 'Tất cả kho' && (
-        <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-xs">
-          <div className="px-5 py-3.5 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
-              <h3 className="text-sm font-bold text-slate-900">
-                Tên Kho Riêng Của Bạn ({MANDATORY_WAREHOUSE_PREFIX} + TÊN SỬA ĐỔI)
-              </h3>
-            </div>
-            <span className="px-2.5 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded">
-              Tự quản lý · Không cần Admin cấp
-            </span>
-          </div>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const normalizedWh = normalizeCustomTamAnWarehouseName(
-                personalWarehouseSuffix,
-                currentStaff.email
-              );
-              const res = await onUpdateStaffProfile({
-                uid: currentStaff.uid,
-                displayName: personalDisplayName.trim() || currentStaff.displayName,
-                phone: personalPhone.trim(),
-                email: personalEmail.trim() || currentStaff.email || '',
-                customWarehouseName: normalizedWh,
-              });
-              setRealtimeBanner(res.message);
-            }}
-            className="p-4 sm:p-5 flex flex-col md:flex-row md:items-end gap-3"
-          >
-            <div className="flex-1 min-w-0 space-y-1">
-              <label
-                htmlFor="quick-self-warehouse-suffix"
-                className="block text-xs font-semibold text-slate-700"
-              >
-                Chỉnh sửa nhanh tên kho (tự động giữ tiền tố <strong>{MANDATORY_WAREHOUSE_PREFIX}</strong>):
-              </label>
-              <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
-                <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
-                  {MANDATORY_WAREHOUSE_PREFIX}
+          <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-xs">
+            <div className="px-5 py-3.5 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
+                <h3 className="text-sm font-bold text-slate-900">
+                  Tên Kho Riêng Của Bạn ({MANDATORY_WAREHOUSE_PREFIX} + TÊN SỬA ĐỔI)
+                </h3>
+              </div>
+              {selfRenameStatus.allowed ? (
+                <span className="px-2.5 py-0.5 text-[11px] font-bold bg-amber-600 text-white rounded">
+                  Được đổi 1 lần duy nhất (còn 1/1 lượt)
                 </span>
-                <input
-                  id="quick-self-warehouse-suffix"
-                  type="text"
-                  required
-                  value={personalWarehouseSuffix}
-                  onChange={(e) => setPersonalWarehouseSuffix(e.target.value)}
-                  placeholder="VD: BA SAO, MỸ AN..."
-                  className="flex-1 min-w-0 px-3 py-2 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
-                />
-              </div>
-              <div className="text-[11px] text-emerald-800">
-                Tên hiển thị &amp; đồng bộ RTDB:{' '}
-                <strong>
-                  {normalizeCustomTamAnWarehouseName(personalWarehouseSuffix, currentStaff.email)}
-                </strong>
-              </div>
+              ) : (
+                <span className="px-2.5 py-0.5 text-[11px] font-bold bg-slate-700 text-white rounded flex items-center gap-1">
+                  <Lock className="w-3 h-3 shrink-0" />
+                  <span>Đã khóa đổi tên kho (1/1)</span>
+                </span>
+              )}
             </div>
-            <button
-              type="submit"
-              className="px-4 py-2.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg whitespace-nowrap shrink-0"
-            >
-              Lưu tên kho mới ngay
-            </button>
-          </form>
-        </div>
-      )}
+            {selfRenameStatus.allowed ? (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  const normalizedWh = normalizeCustomTamAnWarehouseName(
+                    personalWarehouseSuffix,
+                    currentStaff.email
+                  );
+                  const res = await onUpdateStaffProfile({
+                    uid: currentStaff.uid,
+                    displayName: personalDisplayName.trim() || currentStaff.displayName,
+                    phone: personalPhone.trim(),
+                    email: personalEmail.trim() || currentStaff.email || '',
+                    customWarehouseName: normalizedWh,
+                  });
+                  setRealtimeBanner(res.message);
+                }}
+                className="p-4 sm:p-5 flex flex-col md:flex-row md:items-end gap-3"
+              >
+                <div className="flex-1 min-w-0 space-y-1">
+                  <label
+                    htmlFor="quick-self-warehouse-suffix"
+                    className="block text-xs font-semibold text-slate-700"
+                  >
+                    Đổi tên kho 1 lần duy nhất (giữ nguyên tiền tố{' '}
+                    <strong>{MANDATORY_WAREHOUSE_PREFIX}</strong>; sau khi lưu chỉ Quản lý chính mới có quyền đổi lại):
+                  </label>
+                  <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
+                    <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                      {MANDATORY_WAREHOUSE_PREFIX}
+                    </span>
+                    <input
+                      id="quick-self-warehouse-suffix"
+                      type="text"
+                      required
+                      value={personalWarehouseSuffix}
+                      onChange={(e) => setPersonalWarehouseSuffix(e.target.value)}
+                      placeholder="VD: BA SAO, MỸ AN..."
+                      className="flex-1 min-w-0 px-3 py-2 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                    />
+                  </div>
+                  <div className="text-[11px] text-emerald-800">
+                    Tên hiển thị &amp; đồng bộ RTDB:{' '}
+                    <strong>
+                      {normalizeCustomTamAnWarehouseName(personalWarehouseSuffix, currentStaff.email)}
+                    </strong>
+                  </div>
+                </div>
+                <button
+                  type="submit"
+                  className="px-4 py-2.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg whitespace-nowrap shrink-0"
+                >
+                  Lưu tên kho mới (1 lần)
+                </button>
+              </form>
+            ) : (
+              <div className="p-4 sm:p-5 bg-amber-50/60 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-slate-900">
+                      Tên kho hiện tại:{' '}
+                      <span className="font-mono text-emerald-900 bg-white px-2 py-0.5 rounded border border-emerald-300">
+                        {currentStaff.assignedWarehouse}
+                      </span>
+                    </div>
+                    <p className="text-amber-900">
+                      Tài khoản của bạn đã sử dụng hết <strong>1/1 lần đổi tên kho</strong>. Chỉ tài khoản{' '}
+                      <strong>Quản lý chính ({ADMIN_BACKUP_EMAIL})</strong> mới có quyền thay đổi lại tên kho.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
       {/* Quick Warehouse Assignment Panel for Primary Manager (Gu6OYdsdiWbRvbEINqaWZXj3LV83) */}
       {canCreateAndAssignRoles && (
@@ -791,7 +835,14 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         <>
                           <select
                             aria-label={`Phân quyền kho cho ${st.username}`}
-                            value={isRowAllWh ? 'Tất cả kho' : st.assignedWarehouse}
+                            value={
+                              isRowAllWh
+                                ? 'Tất cả kho'
+                                : resolveCanonicalSelectWarehouseValue(
+                                    st.assignedWarehouse,
+                                    canonicalWarehouses
+                                  )
+                            }
                             onChange={(e) => {
                               onUpdateStaffWarehouse(st.uid, e.target.value);
                               setRealtimeBanner(
@@ -800,7 +851,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                             }}
                             className="flex-1 min-w-0 px-2 py-1.5 text-xs font-bold bg-emerald-50 border border-emerald-300 rounded-lg text-emerald-950"
                           >
-                            {warehouses.map((w) => (
+                            {canonicalWarehouses.map((w) => (
                               <option key={w} value={w}>
                                 {w}
                               </option>
@@ -1416,17 +1467,32 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                             <>
                               <select
                                 aria-label={`Chọn kho phân quyền cho ${st.username}`}
-                                value={st.assignedWarehouse}
+                                value={resolveCanonicalSelectWarehouseValue(
+                                  st.assignedWarehouse,
+                                  canonicalWarehouses
+                                )}
                                 onChange={(e) => onUpdateStaffWarehouse(st.uid, e.target.value)}
                                 className="px-2.5 py-1 text-xs font-semibold bg-white border border-slate-200 rounded-md text-emerald-800"
                               >
-                                <option value="Tất cả kho">Tất cả kho</option>
-                                {warehouses.map((w) => (
+                                {canonicalWarehouses.map((w) => (
                                   <option key={w} value={w}>
                                     {w}
                                   </option>
                                 ))}
+                                <option value="Tất cả kho">Tất cả kho (Phó quản lý tổng)</option>
                               </select>
+                              <span
+                                className={`px-2 py-0.5 text-[10px] font-semibold rounded border ${
+                                  getSelfWarehouseRenameCount(st) >= 1
+                                    ? 'bg-slate-100 text-slate-600 border-slate-200'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}
+                                title="Tài khoản đăng ký mới chỉ tự đổi tên kho 1 lần duy nhất; Admin chính luôn đổi được không giới hạn"
+                              >
+                                {getSelfWarehouseRenameCount(st) >= 1
+                                  ? 'Đã đổi tên kho (1/1)'
+                                  : 'Chưa đổi tên kho (0/1)'}
+                              </span>
                               {st.assignedWarehouses && st.assignedWarehouses.length >= 2 && (
                                 <div className="flex flex-wrap items-center gap-1">
                                   {st.assignedWarehouses.map((wh) => (
@@ -1640,10 +1706,16 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                 </div>
               </div>
 
-              {/* Custom Warehouse Display Name with Locked "TÂM AN" Prefix */}
+              {/* Custom Warehouse Display Name with Locked "TÂM AN" Prefix & 1-Time Self-Rename Lock */}
               {targetPersonalStaff.assignedWarehouse !== 'Tất cả kho' &&
                 !canAccountCreateStaff(targetPersonalStaff) && (
-                  <div className="p-4 rounded-xl bg-emerald-50/80 border border-emerald-200 space-y-2">
+                  <div
+                    className={`p-4 rounded-xl border space-y-2 ${
+                      personalTargetRenameStatus.allowed
+                        ? 'bg-emerald-50/80 border-emerald-200'
+                        : 'bg-amber-50/70 border-amber-200'
+                    }`}
+                  >
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <label
                         htmlFor="personal-warehouse-suffix"
@@ -1652,12 +1724,29 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         <Warehouse className="w-4 h-4 text-emerald-700 shrink-0" />
                         <span>Tên hiển thị Kho quản lý *</span>
                       </label>
-                      <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded">
-                        Quản lý 1 kho độc lập
-                      </span>
+                      {personalTargetRenameStatus.isPrimaryAdminActor ? (
+                        <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-700 text-white rounded">
+                          Admin chính · Đổi không giới hạn
+                        </span>
+                      ) : personalTargetRenameStatus.allowed ? (
+                        <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-600 text-white rounded">
+                          Chỉ được đổi 1 lần duy nhất (còn 1/1)
+                        </span>
+                      ) : (
+                        <span className="px-2 py-0.5 text-[11px] font-bold bg-slate-700 text-white rounded inline-flex items-center gap-1">
+                          <Lock className="w-3 h-3 shrink-0" />
+                          <span>Đã khóa đổi tên kho (1/1)</span>
+                        </span>
+                      )}
                     </div>
 
-                    <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white focus-within:ring-2 focus-within:ring-emerald-600/20">
+                    <div
+                      className={`flex items-stretch rounded-lg overflow-hidden border ${
+                        personalTargetRenameStatus.allowed
+                          ? 'border-emerald-400 bg-white focus-within:ring-2 focus-within:ring-emerald-600/20'
+                          : 'border-slate-300 bg-slate-100 opacity-80'
+                      }`}
+                    >
                       <span className="px-3.5 py-2 text-sm font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
                         {MANDATORY_WAREHOUSE_PREFIX}
                       </span>
@@ -1665,26 +1754,31 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         id="personal-warehouse-suffix"
                         type="text"
                         required
+                        disabled={!personalTargetRenameStatus.allowed}
                         value={personalWarehouseSuffix}
                         onChange={(e) => setPersonalWarehouseSuffix(e.target.value)}
                         placeholder="Nhập tên kho (VD: BA SAO, MỸ NGÃI, VTNNTAMAN)..."
-                        className="flex-1 min-w-0 px-3 py-2 text-sm font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
+                        className="flex-1 min-w-0 px-3 py-2 text-sm font-mono font-bold text-slate-900 bg-transparent focus:outline-none uppercase disabled:cursor-not-allowed"
                       />
                     </div>
 
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-900">
                       <span>
-                        Tên kho hiển thị sau khi lưu:{' '}
+                        Tên kho hiển thị:{' '}
                         <strong className="font-mono text-emerald-950 bg-white px-2 py-0.5 rounded border border-emerald-300">
-                          {normalizeCustomTamAnWarehouseName(
-                            personalWarehouseSuffix,
-                            personalEmail
-                          )}
+                          {personalTargetRenameStatus.allowed
+                            ? normalizeCustomTamAnWarehouseName(
+                                personalWarehouseSuffix,
+                                personalEmail
+                              )
+                            : targetPersonalStaff.assignedWarehouse}
                         </strong>
                       </span>
-                      <span className="text-[11px] text-emerald-700">
-                        Ví dụ: nhập <strong>BA SAO</strong> → hiển thị <strong>TÂM AN BA SAO</strong>
-                      </span>
+                      {!personalTargetRenameStatus.allowed && (
+                        <span className="text-[11px] text-amber-900 font-semibold">
+                          Đã sử dụng 1/1 lần đổi tên kho — chỉ Quản lý chính ({ADMIN_BACKUP_EMAIL}) mới có quyền đổi lại.
+                        </span>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1859,16 +1953,19 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     Phân quyền Kho quản lý *
                   </label>
                   <select
-                    value={permModalWarehouse}
+                    value={resolveCanonicalSelectWarehouseValue(
+                      permModalWarehouse,
+                      canonicalWarehouses
+                    )}
                     onChange={(e) => setPermModalWarehouse(e.target.value)}
                     className="w-full px-3 py-2 text-xs font-semibold bg-white border border-slate-200 rounded-lg"
                   >
-                    <option value="Tất cả kho">Tất cả kho (Quản lý chung)</option>
-                    {warehouses.map((w) => (
+                    {canonicalWarehouses.map((w) => (
                       <option key={w} value={w}>
                         {w}
                       </option>
                     ))}
+                    <option value="Tất cả kho">Tất cả kho (Quản lý chung)</option>
                   </select>
                 </div>
               </div>
@@ -2192,16 +2289,14 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                const isSingleWh =
-                  editingStaffModal.assignedWarehouse !== 'Tất cả kho' &&
-                  !canAccountCreateStaff(editingStaffModal);
+                const modalRenameCheck = canStaffRenameWarehouse(editingStaffModal, currentStaff);
                 onUpdateStaffProfile({
                   uid: editingStaffModal.uid,
                   displayName: modalDisplayName.trim(),
                   phone: modalPhone.trim(),
                   email: modalEmail.trim(),
                   newPassword: modalPassword.trim() || undefined,
-                  customWarehouseName: isSingleWh
+                  customWarehouseName: modalRenameCheck.allowed
                     ? normalizeCustomTamAnWarehouseName(modalWarehouseSuffix, modalEmail.trim())
                     : undefined,
                 });
@@ -2223,32 +2318,70 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                   />
                 </div>
                 {editingStaffModal.assignedWarehouse !== 'Tất cả kho' &&
-                  !canAccountCreateStaff(editingStaffModal) && (
-                    <div>
-                      <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Tên hiển thị Kho *
-                      </label>
-                      <div className="flex items-stretch rounded-lg overflow-hidden border border-emerald-400 bg-white">
-                        <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
-                          {MANDATORY_WAREHOUSE_PREFIX}
-                        </span>
-                        <input
-                          type="text"
-                          required
-                          value={modalWarehouseSuffix}
-                          onChange={(e) => setModalWarehouseSuffix(e.target.value)}
-                          placeholder="VD: BA SAO"
-                          className="flex-1 min-w-0 px-3 py-2 text-xs font-mono font-bold text-slate-900 bg-white focus:outline-none uppercase"
-                        />
+                  !canAccountCreateStaff(editingStaffModal) &&
+                  (() => {
+                    const modalRenameCheck = canStaffRenameWarehouse(
+                      editingStaffModal,
+                      currentStaff
+                    );
+                    return (
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <label className="block text-xs font-semibold text-slate-700">
+                            Tên hiển thị Kho *
+                          </label>
+                          {modalRenameCheck.isPrimaryAdminActor ? (
+                            <span className="px-1.5 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded">
+                              Admin chính · Đổi nhiều lần
+                            </span>
+                          ) : modalRenameCheck.allowed ? (
+                            <span className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-600 text-white rounded">
+                              Đổi 1 lần duy nhất
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 text-[10px] font-bold bg-slate-700 text-white rounded inline-flex items-center gap-1">
+                              <Lock className="w-2.5 h-2.5 shrink-0" />
+                              <span>Đã khóa (1/1)</span>
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className={`flex items-stretch rounded-lg overflow-hidden border ${
+                            modalRenameCheck.allowed
+                              ? 'border-emerald-400 bg-white'
+                              : 'border-slate-300 bg-slate-100 opacity-80'
+                          }`}
+                        >
+                          <span className="px-3 py-2 text-xs font-mono font-extrabold bg-emerald-800 text-white flex items-center select-none shrink-0">
+                            {MANDATORY_WAREHOUSE_PREFIX}
+                          </span>
+                          <input
+                            type="text"
+                            required
+                            disabled={!modalRenameCheck.allowed}
+                            value={modalWarehouseSuffix}
+                            onChange={(e) => setModalWarehouseSuffix(e.target.value)}
+                            placeholder="VD: BA SAO"
+                            className="flex-1 min-w-0 px-3 py-2 text-xs font-mono font-bold text-slate-900 bg-transparent focus:outline-none uppercase disabled:cursor-not-allowed"
+                          />
+                        </div>
+                        <div className="text-[11px] text-emerald-800 mt-1">
+                          {modalRenameCheck.allowed ? (
+                            <>
+                              Hiển thị:{' '}
+                              <strong>
+                                {normalizeCustomTamAnWarehouseName(modalWarehouseSuffix, modalEmail)}
+                              </strong>
+                            </>
+                          ) : (
+                            <span className="text-amber-800 font-semibold">
+                              Đã dùng hết 1/1 lần đổi tên kho — chỉ Quản lý chính ({ADMIN_BACKUP_EMAIL}) mới có quyền đổi lại.
+                            </span>
+                          )}
+                        </div>
                       </div>
-                      <div className="text-[11px] text-emerald-800 mt-1">
-                        Hiển thị:{' '}
-                        <strong>
-                          {normalizeCustomTamAnWarehouseName(modalWarehouseSuffix, modalEmail)}
-                        </strong>
-                      </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Địa chỉ Gmail (Nhận mật khẩu khi quên) *

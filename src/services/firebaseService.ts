@@ -2677,6 +2677,10 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
         assignedWarehouses: resolvedMultiWhs,
         multiWarehouseGrantedByAdmin: resolvedMultiGrant,
         assignedOwnerUids: resolvedOwnerUids,
+        warehouseRenameCount:
+          typeof dir.warehouseRenameCount === 'number' && Number.isFinite(dir.warehouseRenameCount)
+            ? Math.max(0, Math.floor(dir.warehouseRenameCount))
+            : prev?.warehouseRenameCount,
         active: dir.active !== false,
         createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
         updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
