@@ -41,8 +41,10 @@ import {
   getDefaultPermissionsForPosition,
   getPositionRoleLabel,
   hasCompletedStaffPersonalGmail,
+  hasMultiWarehouseManagementGrant,
   MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
+  normalizeVietnameseSearch,
   SearchableOptionItem,
 } from '../utils/businessLogic';
 import { AdminWarehouseAccountSummary } from '../utils/rtdbSyncLogic';
@@ -86,11 +88,17 @@ interface StaffAccountManagerProps {
     assignedWarehouse: string;
   }) => Promise<{ ok: boolean; message: string }> | { ok: boolean; message: string };
   onUpdateStaffWarehouse: (uid: string, warehouseName: string) => void;
+  onUpdateStaffMultiWarehouses?: (
+    uid: string,
+    selectedWarehouses: string[],
+    grantAllWarehouses: boolean
+  ) => void;
   onUpdateStaffPermissions?: (
     uid: string,
     positionRole: StaffPositionRole,
     permissions: StaffFunctionalPermission[],
-    assignedWarehouse: string
+    assignedWarehouse: string,
+    assignedWarehouses?: string[]
   ) => void;
   onResetStaffPasswordByManager: (uid: string, newPass: string) => Promise<void> | void;
   onToggleStaffActive: (uid: string) => void;
@@ -117,6 +125,7 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
   onChangePassword,
   onCreateStaffAccount,
   onUpdateStaffWarehouse,
+  onUpdateStaffMultiWarehouses,
   onUpdateStaffPermissions,
   onResetStaffPasswordByManager,
   onToggleStaffActive,
@@ -214,6 +223,30 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     useState<StaffPositionRole>('warehouse_manager');
   const [permModalList, setPermModalList] = useState<StaffFunctionalPermission[]>([]);
   const [permModalWarehouse, setPermModalWarehouse] = useState<string>('');
+  const [permModalMultiWarehouses, setPermModalMultiWarehouses] = useState<string[]>([]);
+
+  // Primary Manager Dedicated Multi-Warehouse Assignment Modal ("Cấp quyền quản lý nhiều kho")
+  const [multiWhModalStaff, setMultiWhModalStaff] = useState<StaffMember | null>(null);
+  const [multiWhSelectedList, setMultiWhSelectedList] = useState<string[]>([]);
+  const [multiWhGrantAll, setMultiWhGrantAll] = useState<boolean>(false);
+  const [multiWhSearch, setMultiWhSearch] = useState<string>('');
+
+  const openMultiWarehouseModal = (st: StaffMember) => {
+    setMultiWhModalStaff(st);
+    setMultiWhSearch('');
+    const isAll =
+      st.assignedWarehouse === 'Tất cả kho' ||
+      Boolean(st.permissions?.includes('manage_all_warehouses')) ||
+      st.positionRole === 'deputy_general_manager';
+    setMultiWhGrantAll(isAll);
+    const initialList =
+      st.assignedWarehouses && st.assignedWarehouses.length > 0
+        ? st.assignedWarehouses
+        : st.assignedWarehouse && st.assignedWarehouse !== 'Tất cả kho'
+        ? [st.assignedWarehouse]
+        : [];
+    setMultiWhSelectedList(Array.from(new Set(initialList)));
+  };
 
   // Strict check: ONLY trannhat1205@gmail.com or phone 0393120246 can create accounts & assign permissions
   const canCreateAndAssignRoles = canAccountCreateStaff(currentStaff);
@@ -263,6 +296,14 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
     permKey: StaffFunctionalPermission
   ) => {
     if (!canCreateAndAssignRoles || !onUpdateStaffPermissions) return;
+    const isMultiWh = hasMultiWarehouseManagementGrant(targetStaff);
+    if (permKey === 'edit_delete_vouchers' && !isMultiWh) {
+      setRealtimeBanner(
+        `Chỉ tài khoản được Admin chính cấp quyền Quản lý nhiều kho mới có tính năng Sửa / Xóa phiếu. Hãy bấm "Cấp nhiều kho" cho @${targetStaff.username} trước!`
+      );
+      openMultiWarehouseModal(targetStaff);
+      return;
+    }
     const currentPerms =
       targetStaff.permissions ||
       getDefaultPermissionsForPosition(targetStaff.positionRole || 'warehouse_manager');
@@ -275,7 +316,8 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
       targetStaff.uid,
       resolvedPos,
       nextPerms,
-      targetStaff.assignedWarehouse
+      targetStaff.assignedWarehouse,
+      targetStaff.assignedWarehouses
     );
     const permLabel =
       ALL_STAFF_FUNCTIONAL_PERMISSIONS.find((p) => p.key === permKey)?.label || permKey;
@@ -635,12 +677,20 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {staffList.map((st) => {
                 const isRowAdmin = canAccountCreateStaff(st);
+                const rowHasMultiWh = hasMultiWarehouseManagementGrant(st);
+                const rowMultiList = st.assignedWarehouses || [];
+                const isRowAllWh =
+                  isRowAdmin ||
+                  st.assignedWarehouse === 'Tất cả kho' ||
+                  Boolean(st.permissions?.includes('manage_all_warehouses'));
                 return (
                   <div
                     key={`admin-assign-${st.uid}`}
                     className={`p-3.5 rounded-xl border flex flex-col justify-between gap-2.5 ${
                       isRowAdmin
                         ? 'bg-emerald-50/50 border-emerald-300'
+                        : rowHasMultiWh
+                        ? 'bg-teal-50/40 border-teal-300'
                         : 'bg-white border-slate-200 hover:border-emerald-300'
                     }`}
                   >
@@ -651,44 +701,78 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         </span>
                         {isRowAdmin ? (
                           <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded shrink-0">
-                            Tất cả kho
+                            Admin · Tất cả kho
+                          </span>
+                        ) : isRowAllWh ? (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-teal-700 text-white rounded shrink-0">
+                            Tất cả kho · Sửa/Xóa
+                          </span>
+                        ) : rowMultiList.length >= 2 ? (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-teal-700 text-white rounded shrink-0">
+                            {rowMultiList.length} kho · Sửa/Xóa
                           </span>
                         ) : (
-                          <span className="px-2 py-0.5 text-[10px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded shrink-0">
-                            Quản lý 1 kho
+                          <span className="px-2 py-0.5 text-[10px] font-semibold bg-slate-100 text-slate-600 border border-slate-200 rounded shrink-0">
+                            1 kho · Khóa Sửa/Xóa
                           </span>
                         )}
                       </div>
                       <div className="text-[11px] font-mono text-slate-500 truncate">
                         @{st.username} · {st.email || 'Chưa có Gmail'}
                       </div>
+                      {!isRowAdmin && rowMultiList.length >= 2 && (
+                        <div className="flex flex-wrap gap-1 pt-0.5">
+                          {rowMultiList.map((wh) => (
+                            <span
+                              key={wh}
+                              className="px-1.5 py-0.5 text-[10px] font-semibold bg-white text-teal-900 border border-teal-200 rounded"
+                            >
+                              {wh}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
-                    <div className="pt-1 border-t border-slate-100 flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-semibold text-slate-600 whitespace-nowrap shrink-0">
-                        Kho quản lý:
-                      </span>
+                    <div className="pt-1 border-t border-slate-100 flex items-center justify-between gap-1.5">
                       {isRowAdmin ? (
-                        <span className="text-xs font-bold text-emerald-900">Tất cả kho</span>
+                        <>
+                          <span className="text-[11px] font-semibold text-slate-600">
+                            Kho quản lý:
+                          </span>
+                          <span className="text-xs font-bold text-emerald-900">Tất cả kho</span>
+                        </>
                       ) : (
-                        <select
-                          aria-label={`Phân quyền kho cho ${st.username}`}
-                          value={st.assignedWarehouse}
-                          onChange={(e) => {
-                            onUpdateStaffWarehouse(st.uid, e.target.value);
-                            setRealtimeBanner(
-                              `Đã phân quyền quản lý kho "${e.target.value}" cho tài khoản @${st.username} (${st.displayName})`
-                            );
-                          }}
-                          className="flex-1 min-w-0 px-2.5 py-1.5 text-xs font-bold bg-emerald-50 border border-emerald-300 rounded-lg text-emerald-950"
-                        >
-                          {warehouses.map((w) => (
-                            <option key={w} value={w}>
-                              {w}
-                            </option>
-                          ))}
-                          <option value="Tất cả kho">Tất cả kho (Phó quản lý tổng)</option>
-                        </select>
+                        <>
+                          <select
+                            aria-label={`Phân quyền kho cho ${st.username}`}
+                            value={isRowAllWh ? 'Tất cả kho' : st.assignedWarehouse}
+                            onChange={(e) => {
+                              onUpdateStaffWarehouse(st.uid, e.target.value);
+                              setRealtimeBanner(
+                                `Đã phân quyền kho "${e.target.value}" cho @${st.username} (${st.displayName})`
+                              );
+                            }}
+                            className="flex-1 min-w-0 px-2 py-1.5 text-xs font-bold bg-emerald-50 border border-emerald-300 rounded-lg text-emerald-950"
+                          >
+                            {warehouses.map((w) => (
+                              <option key={w} value={w}>
+                                {w}
+                              </option>
+                            ))}
+                            <option value="Tất cả kho">Tất cả kho (Phó quản lý tổng)</option>
+                          </select>
+                          {onUpdateStaffMultiWarehouses && (
+                            <button
+                              type="button"
+                              onClick={() => openMultiWarehouseModal(st)}
+                              title="Chọn nhiều kho chỉ định cho tài khoản này (tự mở quyền Sửa/Xóa phiếu)"
+                              className="px-2.5 py-1.5 text-[11px] font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-lg whitespace-nowrap shrink-0"
+                            >
+                              Cấp nhiều kho
+                            </button>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
@@ -1190,28 +1274,48 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                       {/* Action Buttons for Staff Row */}
                       <div className="flex flex-wrap items-center gap-1.5">
                         {canCreateAndAssignRoles && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPermissionModalStaff(st);
-                              setPermModalPosition(
-                                st.positionRole ||
-                                  (st.role === 'manager'
-                                    ? 'deputy_general_manager'
-                                    : 'warehouse_manager')
-                              );
-                              setPermModalList(
-                                st.permissions ||
-                                  getDefaultPermissionsForPosition(
-                                    st.positionRole || 'warehouse_manager'
-                                  )
-                              );
-                              setPermModalWarehouse(st.assignedWarehouse);
-                            }}
-                            className="px-2.5 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
-                          >
-                            Phân quyền [X]
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPermissionModalStaff(st);
+                                setPermModalPosition(
+                                  st.positionRole ||
+                                    (st.role === 'manager'
+                                      ? 'deputy_general_manager'
+                                      : 'warehouse_manager')
+                                );
+                                setPermModalList(
+                                  st.permissions ||
+                                    getDefaultPermissionsForPosition(
+                                      st.positionRole || 'warehouse_manager'
+                                    )
+                                );
+                                setPermModalWarehouse(st.assignedWarehouse);
+                                setPermModalMultiWarehouses(st.assignedWarehouses || []);
+                              }}
+                              className="px-2.5 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                            >
+                              Phân quyền [X]
+                            </button>
+                            {!isPrimaryOwnerRow && onUpdateStaffMultiWarehouses && (
+                              <button
+                                type="button"
+                                onClick={() => openMultiWarehouseModal(st)}
+                                className={`px-2.5 py-1.5 text-xs font-bold rounded-lg border transition-colors ${
+                                  hasMultiWarehouseManagementGrant(st)
+                                    ? 'bg-teal-700 hover:bg-teal-800 text-white border-teal-700'
+                                    : 'bg-teal-50 hover:bg-teal-100 text-teal-900 border-teal-300'
+                                }`}
+                              >
+                                {st.assignedWarehouses && st.assignedWarehouses.length >= 2
+                                  ? `Quản lý ${st.assignedWarehouses.length} kho`
+                                  : st.assignedWarehouse === 'Tất cả kho'
+                                  ? 'Quản lý tất cả kho'
+                                  : '+ Cấp nhiều kho'}
+                              </button>
+                            )}
+                          </>
                         )}
                         <button
                           type="button"
@@ -1264,19 +1368,33 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                             <span>Kho được phân quyền:</span>
                           </span>
                           {!isPrimaryOwnerRow ? (
-                            <select
-                              aria-label={`Chọn kho phân quyền cho ${st.username}`}
-                              value={st.assignedWarehouse}
-                              onChange={(e) => onUpdateStaffWarehouse(st.uid, e.target.value)}
-                              className="px-2.5 py-1 text-xs font-semibold bg-white border border-slate-200 rounded-md text-emerald-800"
-                            >
-                              <option value="Tất cả kho">Tất cả kho</option>
-                              {warehouses.map((w) => (
-                                <option key={w} value={w}>
-                                  {w}
-                                </option>
-                              ))}
-                            </select>
+                            <>
+                              <select
+                                aria-label={`Chọn kho phân quyền cho ${st.username}`}
+                                value={st.assignedWarehouse}
+                                onChange={(e) => onUpdateStaffWarehouse(st.uid, e.target.value)}
+                                className="px-2.5 py-1 text-xs font-semibold bg-white border border-slate-200 rounded-md text-emerald-800"
+                              >
+                                <option value="Tất cả kho">Tất cả kho</option>
+                                {warehouses.map((w) => (
+                                  <option key={w} value={w}>
+                                    {w}
+                                  </option>
+                                ))}
+                              </select>
+                              {st.assignedWarehouses && st.assignedWarehouses.length >= 2 && (
+                                <div className="flex flex-wrap items-center gap-1">
+                                  {st.assignedWarehouses.map((wh) => (
+                                    <span
+                                      key={wh}
+                                      className="px-2 py-0.5 text-[11px] font-bold bg-teal-50 text-teal-900 border border-teal-300 rounded-md"
+                                    >
+                                      {wh}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </>
                           ) : (
                             <span className="font-bold text-emerald-800">{st.assignedWarehouse}</span>
                           )}
@@ -1285,7 +1403,10 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                         {/* Real-Time Interactive [X] / [ ] Permission Chips */}
                         <div className="flex flex-wrap gap-1.5">
                           {ALL_STAFF_FUNCTIONAL_PERMISSIONS.map((p) => {
-                            const isGranted = perms.includes(p.key);
+                            const hasMultiGrant = hasMultiWarehouseManagementGrant(st);
+                            const isEditDeleteLocked =
+                              p.key === 'edit_delete_vouchers' && !isPrimaryOwnerRow && !hasMultiGrant;
+                            const isGranted = !isEditDeleteLocked && perms.includes(p.key);
                             return (
                               <button
                                 key={p.key}
@@ -1293,20 +1414,31 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                                 disabled={isPrimaryOwnerRow}
                                 onClick={() => handleInstantTogglePermission(st, p.key)}
                                 title={
-                                  !isPrimaryOwnerRow
+                                  isEditDeleteLocked
+                                    ? 'Chỉ cấp cho tài khoản được Admin chính phân quyền Quản lý nhiều kho (bấm để cấp nhiều kho)'
+                                    : !isPrimaryOwnerRow
                                     ? 'Bấm để bật [X] hoặc tắt [ ] quyền này ngay theo thời gian thực'
                                     : p.description
                                 }
                                 className={`px-2 py-1 text-[11px] font-medium rounded-md border transition-colors flex items-center gap-1 ${
-                                  isGranted
+                                  isEditDeleteLocked
+                                    ? 'bg-amber-50/70 text-amber-800 border-amber-200 hover:bg-amber-100'
+                                    : isGranted
                                     ? 'bg-emerald-50 text-emerald-900 border-emerald-300 hover:bg-emerald-100'
                                     : 'bg-slate-50 text-slate-400 border-slate-200 hover:bg-slate-100'
                                 } ${!isPrimaryOwnerRow ? 'cursor-pointer' : 'cursor-default'}`}
                               >
-                                <span className="font-mono font-bold">
-                                  {isGranted ? '[X]' : '[ ]'}
+                                {isEditDeleteLocked ? (
+                                  <Lock className="w-3 h-3 shrink-0" />
+                                ) : (
+                                  <span className="font-mono font-bold">
+                                    {isGranted ? '[X]' : '[ ]'}
+                                  </span>
+                                )}
+                                <span>
+                                  {p.label}
+                                  {isEditDeleteLocked ? ' (Chỉ TK nhiều kho)' : ''}
                                 </span>
-                                <span>{p.label}</span>
                               </button>
                             );
                           })}
@@ -1750,7 +1882,8 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                     permissionModalStaff.uid,
                     permModalPosition,
                     permModalList,
-                    permModalWarehouse
+                    permModalWarehouse,
+                    permModalMultiWarehouses
                   );
                   setRealtimeBanner(
                     `Đã lưu phân quyền [X] thời gian thực cho @${permissionModalStaff.username}!`
@@ -1760,6 +1893,215 @@ export const StaffAccountManager: React.FC<StaffAccountManagerProps> = ({
                 className="px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
               >
                 Lưu phân quyền [X]
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Primary Admin Multi-Warehouse Assignment ("Cấp quyền quản lý nhiều kho cho tài khoản chỉ định") */}
+      {multiWhModalStaff && canCreateAndAssignRoles && onUpdateStaffMultiWarehouses && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-2.5 sm:p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Cấp quyền quản lý nhiều kho cho ${multiWhModalStaff.displayName}`}
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-lg max-h-[calc(100dvh-1.25rem)] sm:max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="px-4 sm:px-6 py-3.5 border-b border-teal-200 bg-teal-50/80 flex items-center justify-between gap-2 shrink-0">
+              <div className="min-w-0">
+                <h3 className="text-sm sm:text-base font-bold text-slate-900 flex items-center gap-1.5">
+                  <Warehouse className="w-4 h-4 text-teal-700 shrink-0" />
+                  <span className="truncate">
+                    Cấp Quyền Quản Lý Nhiều Kho (@{multiWhModalStaff.username})
+                  </span>
+                </h3>
+                <p className="text-[11px] text-teal-900 mt-0.5">
+                  {multiWhModalStaff.displayName} · {multiWhModalStaff.email || 'Tài khoản nhân sự'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMultiWhModalStaff(null)}
+                aria-label="Đóng cửa sổ cấp nhiều kho"
+                className="p-1.5 text-slate-500 hover:text-slate-800 rounded-lg shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-5 space-y-3.5 overflow-y-auto flex-1 overscroll-contain">
+              {/* Rule Explanation Banner */}
+              <div
+                className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                  multiWhGrantAll || multiWhSelectedList.length >= 2
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                    : 'bg-amber-50 border-amber-300 text-amber-950'
+                }`}
+              >
+                {multiWhGrantAll || multiWhSelectedList.length >= 2 ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5" />
+                ) : (
+                  <Lock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                )}
+                <div>
+                  {multiWhGrantAll ? (
+                    <span>
+                      <strong>Quản lý tất cả các kho (Phó quản lý tổng):</strong> Tài khoản được
+                      xem/điều phối toàn bộ kho và <strong>MỞ quyền Sửa / Xóa hóa đơn, phiếu</strong>.
+                    </span>
+                  ) : multiWhSelectedList.length >= 2 ? (
+                    <span>
+                      <strong>Quản lý {multiWhSelectedList.length} kho được chỉ định:</strong> Tài
+                      khoản được đồng bộ &amp; điều phối đúng {multiWhSelectedList.length} kho đã
+                      tick và <strong>MỞ quyền Sửa / Xóa hóa đơn, phiếu</strong>.
+                    </span>
+                  ) : (
+                    <span>
+                      <strong>Chế độ 1 kho độc lập:</strong> Chỉ tài khoản được phân quyền quản lý
+                      từ <strong>2 kho trở lên</strong> (hoặc Tất cả kho) mới có quyền{' '}
+                      <strong>Sửa / Xóa phiếu, hóa đơn</strong>.
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Grant ALL Warehouses Checkbox */}
+              <label className="p-3 rounded-xl border-2 cursor-pointer flex items-center justify-between gap-2 transition-colors bg-slate-50 hover:bg-teal-50/60 border-teal-300">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <input
+                    type="checkbox"
+                    checked={multiWhGrantAll}
+                    onChange={(e) => setMultiWhGrantAll(e.target.checked)}
+                    className="w-4 h-4 accent-teal-700 rounded shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-slate-900">
+                      Cấp quyền quản lý TẤT CẢ CÁC KHO ({warehouses.length} kho)
+                    </div>
+                    <div className="text-[11px] text-slate-600">
+                      Phó quản lý tổng — giám sát toàn bộ kho &amp; mở toàn quyền Sửa / Xóa chứng từ
+                    </div>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 text-[10px] font-bold bg-teal-700 text-white rounded shrink-0">
+                  Tất cả
+                </span>
+              </label>
+
+              {/* Specific Designated Warehouses Checkboxes */}
+              {!multiWhGrantAll && (
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-900">
+                      Hoặc chọn các kho chỉ định ({multiWhSelectedList.length}/{warehouses.length}{' '}
+                      kho đã chọn):
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setMultiWhSelectedList([...warehouses])}
+                        className="px-2 py-0.5 text-[11px] font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded"
+                      >
+                        Chọn hết
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setMultiWhSelectedList(
+                            multiWhModalStaff.assignedWarehouse &&
+                              multiWhModalStaff.assignedWarehouse !== 'Tất cả kho'
+                              ? [multiWhModalStaff.assignedWarehouse]
+                              : []
+                          )
+                        }
+                        className="px-2 py-0.5 text-[11px] font-semibold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded"
+                      >
+                        Về 1 kho gốc
+                      </button>
+                    </div>
+                  </div>
+
+                  <input
+                    type="text"
+                    value={multiWhSearch}
+                    onChange={(e) => setMultiWhSearch(e.target.value)}
+                    placeholder="Gõ tên kho cần tìm nhanh (VD: PHUCANTAM, NHAN QUA, HONGHUY...)..."
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+                  />
+
+                  <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-xl bg-white">
+                    {warehouses
+                      .filter((w) => {
+                        const q = normalizeVietnameseSearch(multiWhSearch);
+                        return !q || normalizeVietnameseSearch(w).includes(q);
+                      })
+                      .map((w) => {
+                        const checked = multiWhSelectedList.includes(w);
+                        return (
+                          <label
+                            key={w}
+                            className={`px-3 py-2.5 flex items-center justify-between gap-2 cursor-pointer transition-colors text-xs ${
+                              checked ? 'bg-teal-50/80 text-teal-950 font-bold' : 'hover:bg-slate-50 text-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() =>
+                                  setMultiWhSelectedList((prev) =>
+                                    prev.includes(w)
+                                      ? prev.filter((item) => item !== w)
+                                      : [...prev, w]
+                                  )
+                                }
+                                className="w-4 h-4 accent-teal-700 rounded shrink-0"
+                              />
+                              <span className="truncate">{w}</span>
+                            </div>
+                            {checked && (
+                              <span className="text-[10px] font-bold text-teal-700 shrink-0">
+                                Đã chọn
+                              </span>
+                            )}
+                          </label>
+                        );
+                      })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setMultiWhModalStaff(null)}
+                className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                disabled={!multiWhGrantAll && multiWhSelectedList.length === 0}
+                onClick={() => {
+                  onUpdateStaffMultiWarehouses(
+                    multiWhModalStaff.uid,
+                    multiWhSelectedList,
+                    multiWhGrantAll
+                  );
+                  setRealtimeBanner(
+                    multiWhGrantAll
+                      ? `Đã cấp quyền quản lý TẤT CẢ KHO & Sửa/Xóa cho @${multiWhModalStaff.username}!`
+                      : multiWhSelectedList.length >= 2
+                      ? `Đã cấp quyền quản lý ${multiWhSelectedList.length} kho (${multiWhSelectedList.join(', ')}) & mở quyền Sửa/Xóa cho @${multiWhModalStaff.username}!`
+                      : `Đã đặt @${multiWhModalStaff.username} về quản lý 1 kho (${multiWhSelectedList[0]}) và khóa quyền Sửa/Xóa.`
+                  );
+                  setMultiWhModalStaff(null);
+                }}
+                className="px-4 py-2 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 disabled:bg-slate-300 rounded-lg"
+              >
+                Lưu phân quyền kho
               </button>
             </div>
           </div>

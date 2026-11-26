@@ -40,6 +40,7 @@ import {
   CashPaymentVoucher,
   CashReceiptVoucher,
   CustomerProfile,
+  DeletedRecordTombstone,
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
@@ -111,7 +112,9 @@ import {
   getDefaultPermissionsForPosition,
   getIndependentWarehouseFullPermissions,
   getPositionRoleLabel,
+  getStaffAllowedWarehouses,
   getTodayVietnamDateStr,
+  hasMultiWarehouseManagementGrant,
   MANDATORY_WAREHOUSE_PREFIX,
   normalizeCustomTamAnWarehouseName,
   normalizeVietnameseSearch,
@@ -144,6 +147,7 @@ import {
   seedExistingStaffToRealtimeDirectoryIfAdmin,
   subscribeToAiTokenGrant,
   subscribeToAllRealtimeWorkspacesForAdmin,
+  subscribeToDesignatedRealtimeWorkspaces,
   subscribeToRealtimeUsersDirectory,
   subscribeToRealtimeWorkspace,
   subscribeToRtdbConnectionState,
@@ -166,19 +170,18 @@ import { buildDirectChatRoomId } from './utils/internalChatLogic';
 import {
   AdminWarehouseAccountSummary,
   aggregateAdminWorkspacesFromRtdb,
-  buildRecoveredVtnnTamAn99Workspace,
   computeWorkspaceFingerprint,
   countWorkspaceBusinessRecords,
   dedupeRecordsById,
+  filterOutDeletedRecords,
   isDestructiveEmptyWorkspaceOverwrite,
+  mergeDeletionTombstones,
   mergeDirectoryIntoStaffList,
   mergeWorkspacePayloads,
   normalizeIndependentWarehouseStaffMember,
   partitionAdminStateByWorkspace,
   RtdbUserDirectoryProfile,
   RtdbWorkspacePayload,
-  VTNNTAMAN99_EMAIL,
-  VTNNTAMAN99_UID,
 } from './utils/rtdbSyncLogic';
 import {
   loadWorkspaceFromStorage,
@@ -316,8 +319,8 @@ export default function App() {
   const rtdbUsersDirMapRef = useRef<Record<string, RtdbUserDirectoryProfile>>({});
   const prevAuthenticatedUidRef = useRef<string | null>(null);
   const allowEmptyWorkspaceWriteRef = useRef<boolean>(false);
+  const forceStorageSyncRef = useRef<boolean>(false);
   const storageCachedWorkspaceRef = useRef<Record<string, RtdbWorkspacePayload>>({});
-  const v99AutoRecoveredRef = useRef<boolean>(false);
   const [isManualCloudSyncing, setIsManualCloudSyncing] = useState<boolean>(false);
   const [rtdbWriteTrigger, setRtdbWriteTrigger] = useState<number>(0);
 
@@ -358,6 +361,24 @@ export default function App() {
   const [productNoteTemplates, setProductNoteTemplates] = useState<ProductNoteTemplate[]>(() =>
     resolveProductNoteTemplates(initialWorkspace.productNoteTemplates)
   );
+  const [deletedRecords, setDeletedRecords] = useState<DeletedRecordTombstone[]>(
+    () => initialWorkspace.deletedRecords || []
+  );
+  const markRecordsDeleted = (ids: string | string[], nowIso = new Date().toISOString()) => {
+    const idArr = Array.isArray(ids) ? ids : [ids];
+    const tombstones: DeletedRecordTombstone[] = idArr
+      .filter((id) => Boolean(id && id.trim()))
+      .map((id) => ({ id: id.trim(), deletedAt: nowIso }));
+    if (tombstones.length === 0) return;
+    allowEmptyWorkspaceWriteRef.current = true;
+    forceStorageSyncRef.current = true;
+    setDeletedRecords((prev) => mergeDeletionTombstones(prev, tombstones));
+  };
+  const unmarkDeletedRecord = (id: string) => {
+    if (!id) return;
+    forceStorageSyncRef.current = true;
+    setDeletedRecords((prev) => prev.filter((t) => t.id !== id));
+  };
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
   );
@@ -445,6 +466,7 @@ export default function App() {
       notificationPrefs,
       bankQrConfig,
       productNoteTemplates,
+      deletedRecords,
       autoDailyBackupEnabled,
     });
   }, [
@@ -468,6 +490,7 @@ export default function App() {
     notificationPrefs,
     bankQrConfig,
     productNoteTemplates,
+    deletedRecords,
     autoDailyBackupEnabled,
   ]);
 
@@ -500,6 +523,9 @@ export default function App() {
         }
         if (parsed.productNoteTemplates && parsed.productNoteTemplates.length > 0) {
           setProductNoteTemplates(parsed.productNoteTemplates);
+        }
+        if (parsed.deletedRecords) {
+          setDeletedRecords(parsed.deletedRecords);
         }
       } catch {
         // ignore invalid storage payload
@@ -854,18 +880,33 @@ export default function App() {
         try {
           const isRemoteAdmin = isCurrentUserAdmin(user);
           const remote = await fetchUserFirestoreData(user.uid, isRemoteAdmin);
-          if (remote) {
+          // Only pull legacy Firestore docs if RTDB has NOT already hydrated authoritative cloud state,
+          // and ALWAYS filter out deleted record tombstones so deleted items can NEVER resurrect!
+          if (remote && !rtdbHydratedKeyRef.current) {
+            const curTombstones = latestWorkspaceRef.current.deletedRecords;
             if (remote.products.length > 0) {
-              setProducts((prev) => mergeRecordsById(prev, remote.products));
+              const safeProds = filterOutDeletedRecords(remote.products, curTombstones);
+              if (safeProds.length > 0) {
+                setProducts((prev) => mergeRecordsById(prev, safeProds));
+              }
             }
             if (remote.customers.length > 0) {
-              setCustomers((prev) => mergeRecordsById(prev, remote.customers));
+              const safeCusts = filterOutDeletedRecords(remote.customers, curTombstones);
+              if (safeCusts.length > 0) {
+                setCustomers((prev) => mergeRecordsById(prev, safeCusts));
+              }
             }
             if (remote.sales.length > 0) {
-              setSales((prev) => mergeRecordsById(prev, remote.sales));
+              const safeSales = filterOutDeletedRecords(remote.sales, curTombstones);
+              if (safeSales.length > 0) {
+                setSales((prev) => mergeRecordsById(prev, safeSales));
+              }
             }
             if (remote.imports.length > 0) {
-              setImports((prev) => mergeRecordsById(prev, remote.imports));
+              const safeImps = filterOutDeletedRecords(remote.imports, curTombstones);
+              if (safeImps.length > 0) {
+                setImports((prev) => mergeRecordsById(prev, safeImps));
+              }
             }
             if (remote.backups.length > 0) {
               setBackups((prev) => {
@@ -1016,6 +1057,7 @@ export default function App() {
     notificationPrefs,
     bankQrConfig,
     productNoteTemplates,
+    deletedRecords,
     autoDailyBackupEnabled,
   });
   latestWorkspaceRef.current = {
@@ -1039,6 +1081,7 @@ export default function App() {
     notificationPrefs,
     bankQrConfig,
     productNoteTemplates,
+    deletedRecords,
     autoDailyBackupEnabled,
   };
 
@@ -1143,6 +1186,20 @@ export default function App() {
 
   // Real-time bidirectional sync with Firebase Realtime Database (gapgold-e6b62-default-rtdb)
   // AND Firebase Storage (gapgold-e6b62.firebasestorage.app/files -> /documents/workspaces/ & /backups/)
+  const designatedMultiWhOwnerUidsKey = useMemo(() => {
+    if (canAccountCreateStaff(currentStaff) || !hasMultiWarehouseManagementGrant(currentStaff)) {
+      return '';
+    }
+    if (currentStaff.assignedWarehouse === 'Tất cả kho') {
+      return '__ALL__';
+    }
+    const uids = Object.entries(currentStaff.assignedOwnerUids || {})
+      .filter(([, allowed]) => Boolean(allowed))
+      .map(([uid]) => uid)
+      .sort();
+    return Array.from(new Set([currentStaff.uid, ...uids])).join(',');
+  }, [currentStaff]);
+
   useEffect(() => {
     const fbUser = auth.currentUser;
     if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) {
@@ -1151,15 +1208,22 @@ export default function App() {
     }
 
     const isPrimary = isCurrentUserAdmin(fbUser);
+    const isDesignatedMultiWh = !isPrimary && Boolean(designatedMultiWhOwnerUidsKey);
     const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
-    const sessionKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
+    const sessionKey = isPrimary
+      ? `admin:${PRIMARY_ADMIN_UID}`
+      : isDesignatedMultiWh
+      ? `multi:${activeUid}:${designatedMultiWhOwnerUidsKey}`
+      : `user:${activeUid}`;
     let cancelled = false;
 
     rtdbHydratedKeyRef.current = null;
 
-    if (isPrimary) {
-      void upsertRealtimeUserDirectoryProfile(PRODUCTION_PRIMARY_ADMIN);
-      void seedExistingStaffToRealtimeDirectoryIfAdmin(latestWorkspaceRef.current.staffList);
+    if (isPrimary || isDesignatedMultiWh) {
+      if (isPrimary) {
+        void upsertRealtimeUserDirectoryProfile(PRODUCTION_PRIMARY_ADMIN);
+        void seedExistingStaffToRealtimeDirectoryIfAdmin(latestWorkspaceRef.current.staffList);
+      }
 
       const applyAdminAggregate = () => {
         if (cancelled) return;
@@ -1167,36 +1231,12 @@ export default function App() {
         const dirMap = rtdbUsersDirMapRef.current;
         const agg = aggregateAdminWorkspacesFromRtdb(wsMap, dirMap);
 
-        // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if its RTDB workspace has fewer than the 8 original products
-        const v99Norm = agg.normalizedWorkspaces[VTNNTAMAN99_UID];
-        if (
-          !v99AutoRecoveredRef.current &&
-          (!v99Norm || (v99Norm.products?.length || 0) < 8)
-        ) {
-          v99AutoRecoveredRef.current = true;
-          const v99Wh =
-            dirMap[VTNNTAMAN99_UID]?.assignedWarehouse ||
-            v99Norm?.meta?.assignedWarehouse ||
-            'TÂM AN VTNNTAMAN99';
-          const baseRecovered = buildRecoveredVtnnTamAn99Workspace(v99Wh);
-          const mergedRecovered =
-            mergeWorkspacePayloads(v99Norm, baseRecovered, VTNNTAMAN99_UID) || baseRecovered;
-          rtdbLastPayloadRef.current[VTNNTAMAN99_UID] = mergedRecovered;
-          rtdbLastFingerprintsRef.current[VTNNTAMAN99_UID] =
-            computeWorkspaceFingerprint(mergedRecovered);
-          adminWorkspacesMapRef.current = {
-            ...wsMap,
-            [VTNNTAMAN99_UID]: mergedRecovered,
-          };
-          void writeRealtimeWorkspace(VTNNTAMAN99_UID, mergedRecovered, null);
-          applyAdminAggregate();
-          return;
+        if (isPrimary) {
+          setAdminWorkspaceSummaries((prev) =>
+            JSON.stringify(prev) === JSON.stringify(agg.adminSummaries) ? prev : agg.adminSummaries
+          );
+          void writeAdminWorkspacesIndexToFirebaseStorage(agg.adminSummaries);
         }
-
-        setAdminWorkspaceSummaries((prev) =>
-          JSON.stringify(prev) === JSON.stringify(agg.adminSummaries) ? prev : agg.adminSummaries
-        );
-        void writeAdminWorkspacesIndexToFirebaseStorage(agg.adminSummaries);
 
         const dirProfiles = Object.values(dirMap);
         if (dirProfiles.length > 0) {
@@ -1237,44 +1277,24 @@ export default function App() {
         }
 
         if (hasRemoteChanges) {
-          const firstHydration = rtdbHydratedKeyRef.current !== sessionKey;
           rtdbHydratedKeyRef.current = sessionKey;
           rtdbSuppressNextWriteRef.current = true;
 
           const cur = latestWorkspaceRef.current;
-          const nextProds = firstHydration
-            ? dedupeRecordsById([...cur.products, ...agg.products])
-            : agg.products;
-          const nextCusts = firstHydration
-            ? dedupeRecordsById([...cur.customers, ...agg.customers])
-            : agg.customers;
-          const nextSups = firstHydration
-            ? dedupeRecordsById([...cur.suppliers, ...agg.suppliers])
-            : agg.suppliers;
-          const nextSales = firstHydration
-            ? dedupeRecordsById([...cur.sales, ...agg.sales])
-            : agg.sales;
-          const nextImps = firstHydration
-            ? dedupeRecordsById([...cur.imports, ...agg.imports])
-            : agg.imports;
-          const nextRvs = firstHydration
-            ? dedupeRecordsById([...cur.receiptVouchers, ...agg.receiptVouchers])
-            : agg.receiptVouchers;
-          const nextPvs = firstHydration
-            ? dedupeRecordsById([...cur.paymentVouchers, ...agg.paymentVouchers])
-            : agg.paymentVouchers;
-          const nextSvs = firstHydration
-            ? dedupeRecordsById([...cur.savedVouchers, ...agg.savedVouchers])
-            : agg.savedVouchers;
-          const nextAdjs = firstHydration
-            ? dedupeRecordsById([...cur.stockAdjustments, ...agg.stockAdjustments])
-            : agg.stockAdjustments;
-          const nextLogs = firstHydration
-            ? dedupeRecordsById([...cur.auditLogs, ...agg.auditLogs])
-            : agg.auditLogs;
-          const nextBks = firstHydration
-            ? dedupeRecordsById([...cur.backups, ...agg.backups])
-            : agg.backups;
+          const mergedTombstones = mergeDeletionTombstones(cur.deletedRecords, agg.deletedRecords);
+
+          // Cloud RTDB is authoritative for deletions — NEVER union stale localStorage deleted records back!
+          const nextProds = filterOutDeletedRecords(agg.products, mergedTombstones);
+          const nextCusts = filterOutDeletedRecords(agg.customers, mergedTombstones);
+          const nextSups = filterOutDeletedRecords(agg.suppliers, mergedTombstones);
+          const nextSales = filterOutDeletedRecords(agg.sales, mergedTombstones);
+          const nextImps = filterOutDeletedRecords(agg.imports, mergedTombstones);
+          const nextRvs = filterOutDeletedRecords(agg.receiptVouchers, mergedTombstones);
+          const nextPvs = filterOutDeletedRecords(agg.paymentVouchers, mergedTombstones);
+          const nextSvs = filterOutDeletedRecords(agg.savedVouchers, mergedTombstones);
+          const nextAdjs = filterOutDeletedRecords(agg.stockAdjustments, mergedTombstones);
+          const nextLogs = dedupeRecordsById([...agg.auditLogs]).slice(0, 500);
+          const nextBks = dedupeRecordsById([...agg.backups]);
           const nextWhs = Array.from(new Set([...cur.warehouses, ...agg.warehouses]));
           const nextCGs = Array.from(new Set([...cur.customerGroups, ...agg.customerGroups]));
           const nextPCs = Array.from(
@@ -1303,11 +1323,14 @@ export default function App() {
               receiptGroups: nextRGs,
               paymentGroups: nextPGs,
               notificationPrefs: cur.notificationPrefs,
+              ...(cur.bankQrConfig ? { bankQrConfig: cur.bankQrConfig } : {}),
+              productNoteTemplates: cur.productNoteTemplates,
+              ...(mergedTombstones.length > 0 ? { deletedRecords: mergedTombstones } : {}),
               autoDailyBackupEnabled: cur.autoDailyBackupEnabled,
             },
             staffList: cur.staffList,
             knownOwnerUids: Array.from(rtdbKnownOwnerUidsRef.current),
-            adminUid: PRIMARY_ADMIN_UID,
+            adminUid: isPrimary ? PRIMARY_ADMIN_UID : activeUid,
             nowIso: new Date().toISOString(),
           });
           for (const [bUid, bPayload] of Object.entries(baselinePartitioned)) {
@@ -1328,6 +1351,9 @@ export default function App() {
           setStockAdjustments(nextAdjs);
           setAuditLogs(nextLogs);
           setBackups(nextBks);
+          setDeletedRecords((prev) =>
+            JSON.stringify(prev) === JSON.stringify(mergedTombstones) ? prev : mergedTombstones
+          );
           setWarehouses((prev) =>
             JSON.stringify(prev) === JSON.stringify(nextWhs) ? prev : nextWhs
           );
@@ -1351,11 +1377,20 @@ export default function App() {
         }
       };
 
-      const unsubAllWs = subscribeToAllRealtimeWorkspacesForAdmin((wsMap) => {
-        adminWorkspacesMapRef.current = wsMap;
-        applyAdminAggregate();
-      });
-      const unsubDir = subscribeToRealtimeUsersDirectory(PRIMARY_ADMIN_UID, true, (dirMap) => {
+      const unsubAllWs =
+        isPrimary || designatedMultiWhOwnerUidsKey === '__ALL__'
+          ? subscribeToAllRealtimeWorkspacesForAdmin((wsMap) => {
+              adminWorkspacesMapRef.current = wsMap;
+              applyAdminAggregate();
+            })
+          : subscribeToDesignatedRealtimeWorkspaces(
+              designatedMultiWhOwnerUidsKey.split(',').filter(Boolean),
+              (wsMap) => {
+                adminWorkspacesMapRef.current = wsMap;
+                applyAdminAggregate();
+              }
+            );
+      const unsubDir = subscribeToRealtimeUsersDirectory(activeUid, isPrimary, (dirMap) => {
         rtdbUsersDirMapRef.current = dirMap;
         applyAdminAggregate();
       });
@@ -1373,29 +1408,7 @@ export default function App() {
       storageWs: RtdbWorkspacePayload | null
     ) => {
       if (cancelled) return;
-      let mergedWs = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid);
-
-      // Auto-recover vtnntaman99@gmail.com (AkkSJD5bXHQ7SIlONn9sMIicNB02) if cloud workspace has fewer than the 8 original products
-      const isV99User =
-        activeUid === VTNNTAMAN99_UID ||
-        (fbUser.email || '').trim().toLowerCase() === VTNNTAMAN99_EMAIL;
-      if (
-        isV99User &&
-        !v99AutoRecoveredRef.current &&
-        (!mergedWs || (mergedWs.products?.length || 0) < 8)
-      ) {
-        v99AutoRecoveredRef.current = true;
-        const activeStaffEntry = latestWorkspaceRef.current.staffList.find(
-          (s) => s.uid === activeUid
-        );
-        const preferredWh =
-          mergedWs?.meta?.assignedWarehouse ||
-          activeStaffEntry?.assignedWarehouse ||
-          'TÂM AN VTNNTAMAN99';
-        const baseRecovered = buildRecoveredVtnnTamAn99Workspace(preferredWh);
-        mergedWs = mergeWorkspacePayloads(mergedWs, baseRecovered, activeUid) || baseRecovered;
-        void writeRealtimeWorkspace(activeUid, mergedWs, null);
-      }
+      const mergedWs = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid);
 
       if (!mergedWs) {
         // First time this warehouse user connects to both RTDB & Storage -> push local workspace
@@ -1448,28 +1461,49 @@ export default function App() {
             })
           : items;
 
+      const cur = latestWorkspaceRef.current;
+      const mergedTombstones = mergeDeletionTombstones(
+        cur.deletedRecords,
+        mergedWs.settings.deletedRecords
+      );
+
       const unifiedWs: RtdbWorkspacePayload = {
         ...mergedWs,
         meta: {
           ...mergedWs.meta,
           assignedWarehouse: resolvedWh || mergedWs.meta.assignedWarehouse,
         },
-        products: unifyWh(mergedWs.products),
-        customers: unifyWh(mergedWs.customers),
-        suppliers: unifyWh(mergedWs.suppliers),
-        sales: unifyWh(mergedWs.sales),
-        imports: unifyWh(mergedWs.imports),
-        receiptVouchers: unifyWh(mergedWs.receiptVouchers),
-        paymentVouchers: unifyWh(mergedWs.paymentVouchers),
-        savedVouchers: unifyWh(mergedWs.savedVouchers),
-        stockAdjustments: unifyWh(mergedWs.stockAdjustments || []),
+        products: filterOutDeletedRecords(unifyWh(mergedWs.products), mergedTombstones),
+        customers: filterOutDeletedRecords(unifyWh(mergedWs.customers), mergedTombstones),
+        suppliers: filterOutDeletedRecords(unifyWh(mergedWs.suppliers), mergedTombstones),
+        sales: filterOutDeletedRecords(unifyWh(mergedWs.sales), mergedTombstones),
+        imports: filterOutDeletedRecords(unifyWh(mergedWs.imports), mergedTombstones),
+        receiptVouchers: filterOutDeletedRecords(
+          unifyWh(mergedWs.receiptVouchers),
+          mergedTombstones
+        ),
+        paymentVouchers: filterOutDeletedRecords(
+          unifyWh(mergedWs.paymentVouchers),
+          mergedTombstones
+        ),
+        savedVouchers: filterOutDeletedRecords(unifyWh(mergedWs.savedVouchers), mergedTombstones),
+        stockAdjustments: filterOutDeletedRecords(
+          unifyWh(mergedWs.stockAdjustments || []),
+          mergedTombstones
+        ),
+        settings: {
+          ...mergedWs.settings,
+          ...(mergedTombstones.length > 0 ? { deletedRecords: mergedTombstones } : {}),
+        },
       };
 
       rtdbLastPayloadRef.current[activeUid] = unifiedWs;
       const isLegacy = isRealtimeWorkspaceLegacyLayout(activeUid);
       const rtdbNeedsHeal =
         !rtdbWs ||
-        countWorkspaceBusinessRecords(unifiedWs) > countWorkspaceBusinessRecords(rtdbWs);
+        (countWorkspaceBusinessRecords(rtdbWs) === 0 &&
+          countWorkspaceBusinessRecords(unifiedWs) > 0 &&
+          mergedTombstones.length === 0);
       const incomingFp = computeWorkspaceFingerprint(unifiedWs);
       if (
         !isLegacy &&
@@ -1480,79 +1514,24 @@ export default function App() {
         return;
       }
 
-      const firstHydration = rtdbHydratedKeyRef.current !== sessionKey;
       rtdbHydratedKeyRef.current = sessionKey;
       rtdbLastFingerprintsRef.current[activeUid] = isLegacy || rtdbNeedsHeal ? '' : incomingFp;
       rtdbSuppressNextWriteRef.current = !(isLegacy || rtdbNeedsHeal);
 
-      const cur = latestWorkspaceRef.current;
-      // Only merge local cur records on firstHydration if they explicitly belong to activeUid
-      const ownOnly = <T extends object>(items: T[]): T[] =>
-        items.filter((x) => (x as { ownerId?: string }).ownerId === activeUid);
-
-      const nextProds = firstHydration
-        ? dedupeRecordsById([...unifyWh(ownOnly(cur.products)), ...unifiedWs.products])
-        : unifiedWs.products;
-      productsRef.current = nextProds;
-      setProducts(nextProds);
-      setCustomers(
-        firstHydration
-          ? dedupeRecordsById([...unifyWh(ownOnly(cur.customers)), ...unifiedWs.customers])
-          : unifiedWs.customers
-      );
-      setSuppliers(
-        firstHydration
-          ? dedupeRecordsById([...unifyWh(ownOnly(cur.suppliers)), ...unifiedWs.suppliers])
-          : unifiedWs.suppliers
-      );
-      setSales(
-        firstHydration
-          ? dedupeRecordsById([...unifyWh(ownOnly(cur.sales)), ...unifiedWs.sales])
-          : unifiedWs.sales
-      );
-      setImports(
-        firstHydration
-          ? dedupeRecordsById([...unifyWh(ownOnly(cur.imports)), ...unifiedWs.imports])
-          : unifiedWs.imports
-      );
-      setReceiptVouchers(
-        firstHydration
-          ? dedupeRecordsById([
-              ...unifyWh(ownOnly(cur.receiptVouchers)),
-              ...unifiedWs.receiptVouchers,
-            ])
-          : unifiedWs.receiptVouchers
-      );
-      setPaymentVouchers(
-        firstHydration
-          ? dedupeRecordsById([
-              ...unifyWh(ownOnly(cur.paymentVouchers)),
-              ...unifiedWs.paymentVouchers,
-            ])
-          : unifiedWs.paymentVouchers
-      );
-      setSavedVouchers(
-        firstHydration
-          ? dedupeRecordsById([...unifyWh(ownOnly(cur.savedVouchers)), ...unifiedWs.savedVouchers])
-          : unifiedWs.savedVouchers
-      );
-      setStockAdjustments(
-        firstHydration
-          ? dedupeRecordsById([
-              ...unifyWh(ownOnly(cur.stockAdjustments)),
-              ...(unifiedWs.stockAdjustments || []),
-            ])
-          : unifiedWs.stockAdjustments || []
-      );
-      setAuditLogs(
-        firstHydration
-          ? dedupeRecordsById([...cur.auditLogs, ...unifiedWs.auditLogs]).slice(0, 500)
-          : unifiedWs.auditLogs
-      );
-      setBackups(
-        firstHydration
-          ? dedupeRecordsById([...ownOnly(cur.backups), ...unifiedWs.backups])
-          : unifiedWs.backups
+      productsRef.current = unifiedWs.products;
+      setProducts(unifiedWs.products);
+      setCustomers(unifiedWs.customers);
+      setSuppliers(unifiedWs.suppliers);
+      setSales(unifiedWs.sales);
+      setImports(unifiedWs.imports);
+      setReceiptVouchers(unifiedWs.receiptVouchers);
+      setPaymentVouchers(unifiedWs.paymentVouchers);
+      setSavedVouchers(unifiedWs.savedVouchers);
+      setStockAdjustments(unifiedWs.stockAdjustments || []);
+      setAuditLogs(unifiedWs.auditLogs);
+      setBackups(unifiedWs.backups);
+      setDeletedRecords((prev) =>
+        JSON.stringify(prev) === JSON.stringify(mergedTombstones) ? prev : mergedTombstones
       );
       setWarehouses((prev) => {
         const next = Array.from(
@@ -1669,7 +1648,7 @@ export default function App() {
       unsubUserWs();
       unsubUserDir();
     };
-  }, [isSessionLoggedIn, isGoogleAuthenticated, currentUserEmail]);
+  }, [isSessionLoggedIn, isGoogleAuthenticated, currentUserEmail, designatedMultiWhOwnerUidsKey]);
 
   // Debounced auto-sync to Firebase Realtime Database & Firebase Storage on every state mutation
   useEffect(() => {
@@ -1677,8 +1656,13 @@ export default function App() {
     if (!isSessionLoggedIn || !isGoogleAuthenticated || !fbUser) return;
 
     const isPrimary = isCurrentUserAdmin(fbUser);
+    const isDesignatedMultiWh = !isPrimary && Boolean(designatedMultiWhOwnerUidsKey);
     const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
-    const expectedKey = isPrimary ? `admin:${PRIMARY_ADMIN_UID}` : `user:${activeUid}`;
+    const expectedKey = isPrimary
+      ? `admin:${PRIMARY_ADMIN_UID}`
+      : isDesignatedMultiWh
+      ? `multi:${activeUid}:${designatedMultiWhOwnerUidsKey}`
+      : `user:${activeUid}`;
 
     if (rtdbHydratedKeyRef.current !== expectedKey) return;
     if (rtdbSuppressNextWriteRef.current) {
@@ -1690,6 +1674,8 @@ export default function App() {
       const nowIso = new Date().toISOString();
       const allowWipe = allowEmptyWorkspaceWriteRef.current;
       allowEmptyWorkspaceWriteRef.current = false;
+      const forceStorage = forceStorageSyncRef.current;
+      forceStorageSyncRef.current = false;
       const settingsObj = {
         warehouses,
         customerGroups,
@@ -1699,10 +1685,11 @@ export default function App() {
         notificationPrefs,
         ...(bankQrConfig ? { bankQrConfig } : {}),
         productNoteTemplates,
+        ...(deletedRecords.length > 0 ? { deletedRecords } : {}),
         autoDailyBackupEnabled,
       };
 
-      if (isPrimary) {
+      if (isPrimary || isDesignatedMultiWh) {
         const partitioned = partitionAdminStateByWorkspace({
           products,
           customers,
@@ -1718,7 +1705,7 @@ export default function App() {
           settings: settingsObj,
           staffList,
           knownOwnerUids: Array.from(rtdbKnownOwnerUidsRef.current),
-          adminUid: PRIMARY_ADMIN_UID,
+          adminUid: isPrimary ? PRIMARY_ADMIN_UID : activeUid,
           nowIso,
         });
 
@@ -1728,16 +1715,17 @@ export default function App() {
             return;
           }
           const nextFp = computeWorkspaceFingerprint(bucketPayload);
-          if (rtdbLastFingerprintsRef.current[bucketUid] !== nextFp) {
+          if (forceStorage || rtdbLastFingerprintsRef.current[bucketUid] !== nextFp) {
             rtdbLastFingerprintsRef.current[bucketUid] = nextFp;
             rtdbKnownOwnerUidsRef.current.add(bucketUid);
-            void writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot, allowWipe).then(
-              (ok) => {
-                if (ok) {
-                  rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
-                }
+            void writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot, allowWipe, {
+              forceStorage,
+              allowMultiWarehouseManager: isDesignatedMultiWh,
+            }).then((ok) => {
+              if (ok) {
+                rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
               }
-            );
+            });
           }
         });
       } else {
@@ -1769,9 +1757,11 @@ export default function App() {
           return;
         }
         const nextFp = computeWorkspaceFingerprint(payload);
-        if (rtdbLastFingerprintsRef.current[activeUid] !== nextFp) {
+        if (forceStorage || rtdbLastFingerprintsRef.current[activeUid] !== nextFp) {
           rtdbLastFingerprintsRef.current[activeUid] = nextFp;
-          void writeRealtimeWorkspace(activeUid, payload, prevSnapshot, allowWipe).then((ok) => {
+          void writeRealtimeWorkspace(activeUid, payload, prevSnapshot, allowWipe, {
+            forceStorage,
+          }).then((ok) => {
             if (ok) {
               rtdbLastPayloadRef.current[activeUid] = payload;
             }
@@ -1786,6 +1776,7 @@ export default function App() {
   }, [
     isSessionLoggedIn,
     isGoogleAuthenticated,
+    designatedMultiWhOwnerUidsKey,
     currentStaff.uid,
     currentStaff.email,
     currentStaff.displayName,
@@ -1810,6 +1801,7 @@ export default function App() {
     notificationPrefs,
     bankQrConfig,
     productNoteTemplates,
+    deletedRecords,
     autoDailyBackupEnabled,
     rtdbWriteTrigger,
   ]);
@@ -2458,6 +2450,7 @@ export default function App() {
       }
     }
     const nowIso = new Date().toISOString();
+    markRecordsDeleted(saleId, nowIso);
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     if (target) {
       // Restore sold & gift inventory stock
@@ -2749,6 +2742,7 @@ export default function App() {
         return;
       }
     }
+    markRecordsDeleted(importId, nowIso);
     const nextImports = imports.filter((imp) => imp.id !== importId);
     setImports(nextImports);
     if (target) {
@@ -2970,6 +2964,7 @@ export default function App() {
   const handleDeleteProduct = (productId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = products.find((p) => p.id === productId);
+    markRecordsDeleted(productId);
     const nextList = productsRef.current.filter((p) => p.id !== productId);
     productsRef.current = nextList;
     setProducts(nextList);
@@ -2991,11 +2986,13 @@ export default function App() {
       showToast(`Đã xóa vật tư "${target.name}" (${target.code}).`, {
         label: 'Hoàn tác (10s)',
         onUndo: () => {
-          const restored = [target, ...productsRef.current.filter((p) => p.id !== target.id)];
+          unmarkDeletedRecord(target.id);
+          const restoredItem = { ...target, updatedAt: new Date().toISOString() };
+          const restored = [restoredItem, ...productsRef.current.filter((p) => p.id !== target.id)];
           productsRef.current = restored;
           setProducts(restored);
           if (isGoogleAuthenticated) {
-            void syncProductToFirestore(target, true);
+            void syncProductToFirestore(restoredItem, true);
           }
           recordAuditLog({
             actionCategory: 'create',
@@ -3094,6 +3091,7 @@ export default function App() {
   const handleDeleteCustomer = (customerId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = customers.find((c) => c.id === customerId);
+    markRecordsDeleted(customerId);
     setCustomers((prev) => prev.filter((c) => c.id !== customerId));
     if (isGoogleAuthenticated) {
       void deleteFirestoreDocIfAdmin('customers', customerId);
@@ -3113,9 +3111,11 @@ export default function App() {
       showToast(`Đã xóa khách hàng "${target.name}".`, {
         label: 'Hoàn tác (10s)',
         onUndo: () => {
-          setCustomers((prev) => [target, ...prev.filter((c) => c.id !== target.id)]);
+          unmarkDeletedRecord(target.id);
+          const restoredCust = { ...target, updatedAt: new Date().toISOString() };
+          setCustomers((prev) => [restoredCust, ...prev.filter((c) => c.id !== target.id)]);
           if (isGoogleAuthenticated) {
-            void syncCustomerToFirestore(target, true);
+            void syncCustomerToFirestore(restoredCust, true);
           }
           recordAuditLog({
             actionCategory: 'create',
@@ -3204,6 +3204,7 @@ export default function App() {
   const handleDeleteVoucher = (voucherId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = savedVouchers.find((v) => v.id === voucherId);
+    markRecordsDeleted(voucherId);
     setSavedVouchers((prev) => prev.filter((v) => v.id !== voucherId));
     if (target) {
       recordAuditLog({
@@ -3939,6 +3940,7 @@ export default function App() {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = receiptVouchers.find((rv) => rv.id === id);
     const nowIso = new Date().toISOString();
+    markRecordsDeleted(id, nowIso);
     setReceiptVouchers((prev) => prev.filter((rv) => rv.id !== id));
     if (target) {
       if (target.isDebtSettlement && target.settledAllocations?.length) {
@@ -4149,6 +4151,7 @@ export default function App() {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = paymentVouchers.find((pv) => pv.id === id);
     const nowIso = new Date().toISOString();
+    markRecordsDeleted(id, nowIso);
     setPaymentVouchers((prev) => prev.filter((pv) => pv.id !== id));
     if (target) {
       if (target.isDebtSettlement && target.settledAllocations?.length) {
@@ -5339,39 +5342,150 @@ export default function App() {
       showToast(`Chỉ Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền đổi phân quyền kho.`);
       return;
     }
+    if (warehouseName === 'Tất cả kho') {
+      handleUpdateStaffMultiWarehouses(uid, [], true);
+      return;
+    }
+    handleUpdateStaffMultiWarehouses(uid, [warehouseName], false);
+  };
+
+  const handleUpdateStaffMultiWarehouses = (
+    uid: string,
+    selectedWarehouses: string[],
+    grantAllWarehouses: boolean
+  ) => {
+    if (!canAccountCreateStaff(currentStaff)) {
+      showToast(
+        `Chỉ Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền cấp quyền quản lý nhiều kho.`
+      );
+      return;
+    }
     const target = staffList.find((s) => s.uid === uid);
+    if (!target || canAccountCreateStaff(target)) return;
+
     const nowIso = new Date().toISOString();
-    setStaffList((prev) =>
-      prev.map((s) =>
-        s.uid === uid ? { ...s, assignedWarehouse: warehouseName, updatedAt: nowIso } : s
+    const cleanedWhs = Array.from(
+      new Set(
+        selectedWarehouses
+          .map((w) => (w || '').trim())
+          .filter((w) => Boolean(w) && w !== 'Tất cả kho')
       )
     );
-    if (target) {
-      if (isGoogleAuthenticated) {
-        void upsertRealtimeUserDirectoryProfile({
-          ...target,
-          assignedWarehouse: warehouseName,
-          updatedAt: nowIso,
-        });
+    const isMultiGrant = grantAllWarehouses || cleanedWhs.length >= 2;
+    const primaryWarehouseName = grantAllWarehouses
+      ? 'Tất cả kho'
+      : cleanedWhs[0] || target.assignedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+
+    // Map each granted warehouse to its workspace owner UID(s) so RTDB rules grant exact read/write scope
+    const ownerUidsMap: Record<string, boolean> = {};
+    if (isMultiGrant && !grantAllWarehouses) {
+      ownerUidsMap[uid] = true;
+      for (const st of staffList) {
+        if (st.assignedWarehouse && cleanedWhs.includes(st.assignedWarehouse)) {
+          ownerUidsMap[st.uid] = true;
+        }
       }
-      recordAuditLog({
-        actionCategory: 'permission',
-        targetEntity: 'staff',
-        targetCode: `@${target.username}`,
-        warehouseName,
-        summary: `Đổi phân quyền kho của @${target.username} sang "${warehouseName}"`,
-        details: `Kho trước đó: ${target.assignedWarehouse} -> Kho mới: ${warehouseName}`,
-        snapshotData: JSON.stringify(target),
-      });
+      // Also include any ownerUid observed on records belonging to these warehouses
+      for (const rec of [...products, ...sales, ...imports, ...customers]) {
+        if (rec.warehouseName && cleanedWhs.includes(rec.warehouseName) && rec.ownerId) {
+          ownerUidsMap[rec.ownerId] = true;
+        }
+      }
     }
-    showToast(`Đã cập nhật phân quyền kho "${warehouseName}" cho nhân sự.`);
+
+    const basePerms =
+      target.permissions && target.permissions.length > 0
+        ? [...target.permissions]
+        : getIndependentWarehouseFullPermissions();
+
+    let nextPerms: StaffFunctionalPermission[];
+    let nextPositionRole: StaffPositionRole = target.positionRole || 'warehouse_manager';
+    if (grantAllWarehouses) {
+      nextPositionRole = 'deputy_general_manager';
+      nextPerms = Array.from(
+        new Set<StaffFunctionalPermission>([
+          ...basePerms,
+          'manage_all_warehouses',
+          'edit_delete_vouchers',
+        ])
+      );
+    } else if (cleanedWhs.length >= 2) {
+      nextPositionRole = 'warehouse_manager';
+      nextPerms = Array.from(
+        new Set<StaffFunctionalPermission>([
+          ...basePerms.filter((p) => p !== 'manage_all_warehouses'),
+          'manage_single_warehouse',
+          'edit_delete_vouchers',
+        ])
+      );
+    } else {
+      nextPositionRole =
+        target.positionRole === 'deputy_general_manager'
+          ? 'warehouse_manager'
+          : target.positionRole || 'warehouse_manager';
+      // STRICT RULE: Single-warehouse accounts CANNOT edit or delete saved invoices/vouchers
+      nextPerms = basePerms.filter(
+        (p) => p !== 'edit_delete_vouchers' && p !== 'manage_all_warehouses'
+      );
+    }
+
+    const resolvedRole: UserRole =
+      isMultiGrant && nextPerms.includes('edit_delete_vouchers') ? 'manager' : 'staff';
+
+    const updatedStaff: StaffMember = {
+      ...target,
+      role: resolvedRole,
+      positionRole: nextPositionRole,
+      permissions: nextPerms,
+      assignedWarehouse: primaryWarehouseName,
+      assignedWarehouses: !grantAllWarehouses && cleanedWhs.length >= 2 ? cleanedWhs : undefined,
+      multiWarehouseGrantedByAdmin: isMultiGrant,
+      assignedOwnerUids:
+        !grantAllWarehouses && cleanedWhs.length >= 2 ? ownerUidsMap : undefined,
+      updatedAt: nowIso,
+    };
+
+    setStaffList((prev) => prev.map((s) => (s.uid === uid ? updatedStaff : s)));
+    if (uid === currentStaff.uid) {
+      setRole(resolvedRole);
+    }
+    if (isGoogleAuthenticated) {
+      void upsertRealtimeUserDirectoryProfile(updatedStaff);
+    }
+
+    const whSummaryLabel = grantAllWarehouses
+      ? 'Tất cả kho (Phó quản lý tổng)'
+      : cleanedWhs.length >= 2
+      ? `${cleanedWhs.length} kho: ${cleanedWhs.join(', ')}`
+      : primaryWarehouseName;
+
+    recordAuditLog({
+      actionCategory: 'permission',
+      targetEntity: 'staff',
+      targetCode: `@${target.username}`,
+      warehouseName: primaryWarehouseName,
+      summary: isMultiGrant
+        ? `Cấp quyền quản lý nhiều kho & Sửa/Xóa cho @${target.username} (${whSummaryLabel})`
+        : `Đổi phân quyền kho đơn cho @${target.username} sang "${primaryWarehouseName}" (Khóa Sửa/Xóa phiếu)`,
+      details: `Phạm vi kho mới: ${whSummaryLabel} · Quyền Sửa/Xóa phiếu: ${
+        isMultiGrant ? 'ĐƯỢC CẤP' : 'ĐÃ KHÓA (chỉ cấp cho TK quản lý nhiều kho)'
+      }`,
+      snapshotData: JSON.stringify(target),
+    });
+
+    showToast(
+      isMultiGrant
+        ? `Đã cấp quyền quản lý nhiều kho (${whSummaryLabel}) & mở quyền Sửa/Xóa phiếu cho @${target.username}!`
+        : `Đã đặt @${target.username} quản lý 1 kho "${primaryWarehouseName}" (khóa quyền Sửa/Xóa phiếu).`
+    );
   };
 
   const handleUpdateStaffPermissions = (
     uid: string,
     positionRole: StaffPositionRole,
     permissions: StaffFunctionalPermission[],
-    assignedWarehouse: string
+    assignedWarehouse: string,
+    assignedWarehouses?: string[]
   ) => {
     if (!canAccountCreateStaff(currentStaff)) {
       showToast(`Chỉ Quản lý chính (${ADMIN_BACKUP_EMAIL}) mới có quyền phân quyền cho tài khoản.`);
@@ -5379,13 +5493,54 @@ export default function App() {
     }
     const target = staffList.find((s) => s.uid === uid);
     const nowIso = new Date().toISOString();
-    const resolvedRole: UserRole =
+
+    const effectiveMultiWhs =
+      assignedWarehouses !== undefined ? assignedWarehouses : target?.assignedWarehouses;
+    const cleanedMultiWhs = Array.from(
+      new Set(
+        (effectiveMultiWhs || [])
+          .map((w) => (w || '').trim())
+          .filter((w) => Boolean(w) && w !== 'Tất cả kho')
+      )
+    );
+    const isAllWhs =
       positionRole === 'primary_manager' ||
       positionRole === 'deputy_general_manager' ||
-      permissions.includes('edit_delete_vouchers') ||
-      permissions.includes('manage_all_warehouses')
+      assignedWarehouse === 'Tất cả kho' ||
+      permissions.includes('manage_all_warehouses');
+    const hasMultiWhGrant = isAllWhs || cleanedMultiWhs.length >= 2;
+
+    // STRICT RULE: Only Primary Admin & accounts granted Multi-Warehouse Management can hold edit_delete_vouchers
+    const sanitizedPermissions = hasMultiWhGrant
+      ? permissions
+      : permissions.filter((p) => p !== 'edit_delete_vouchers' && p !== 'manage_all_warehouses');
+
+    const resolvedRole: UserRole =
+      positionRole === 'primary_manager' ||
+      (hasMultiWhGrant &&
+        (isAllWhs || sanitizedPermissions.includes('edit_delete_vouchers')))
         ? 'manager'
         : 'staff';
+
+    const ownerUidsMap: Record<string, boolean> | undefined =
+      !isAllWhs && cleanedMultiWhs.length >= 2
+        ? (() => {
+            const map: Record<string, boolean> = { [uid]: true };
+            for (const st of staffList) {
+              if (st.assignedWarehouse && cleanedMultiWhs.includes(st.assignedWarehouse)) {
+                map[st.uid] = true;
+              }
+            }
+            for (const rec of [...products, ...sales, ...imports, ...customers]) {
+              if (rec.warehouseName && cleanedMultiWhs.includes(rec.warehouseName) && rec.ownerId) {
+                map[rec.ownerId] = true;
+              }
+            }
+            return map;
+          })()
+        : undefined;
+
+    const finalAssignedWh = isAllWhs ? 'Tất cả kho' : cleanedMultiWhs[0] || assignedWarehouse;
 
     setStaffList((prev) =>
       prev.map((s) =>
@@ -5394,8 +5549,11 @@ export default function App() {
               ...s,
               role: resolvedRole,
               positionRole,
-              permissions,
-              assignedWarehouse,
+              permissions: sanitizedPermissions,
+              assignedWarehouse: finalAssignedWh,
+              assignedWarehouses: !isAllWhs && cleanedMultiWhs.length >= 2 ? cleanedMultiWhs : undefined,
+              multiWarehouseGrantedByAdmin: hasMultiWhGrant,
+              assignedOwnerUids: ownerUidsMap,
               updatedAt: nowIso,
             }
           : s
@@ -5410,8 +5568,11 @@ export default function App() {
           ...target,
           role: resolvedRole,
           positionRole,
-          permissions,
-          assignedWarehouse,
+          permissions: sanitizedPermissions,
+          assignedWarehouse: finalAssignedWh,
+          assignedWarehouses: !isAllWhs && cleanedMultiWhs.length >= 2 ? cleanedMultiWhs : undefined,
+          multiWarehouseGrantedByAdmin: hasMultiWhGrant,
+          assignedOwnerUids: ownerUidsMap,
           updatedAt: nowIso,
         });
       }
@@ -5419,17 +5580,21 @@ export default function App() {
         actionCategory: 'permission',
         targetEntity: 'staff',
         targetCode: `@${target.username}`,
-        warehouseName: assignedWarehouse,
+        warehouseName: finalAssignedWh,
         summary: `Cập nhật phân quyền [X] cho @${target.username} (${target.displayName})`,
         details: `Vai trò: ${getPositionRoleLabel(
           positionRole
-        )} · Kho: ${assignedWarehouse} · Quyền [X] được cấp (${
-          permissions.length
-        }): ${permissions.join(', ')}`,
+        )} · Kho: ${
+          !isAllWhs && cleanedMultiWhs.length >= 2 ? cleanedMultiWhs.join(', ') : finalAssignedWh
+        } · Quyền [X] được cấp (${sanitizedPermissions.length}): ${sanitizedPermissions.join(', ')}`,
         snapshotData: JSON.stringify(target),
       });
     }
-    showToast('Quản lý chính đã lưu phân quyền [X] vai trò & chức năng cho tài khoản!');
+    showToast(
+      !hasMultiWhGrant && permissions.includes('edit_delete_vouchers')
+        ? 'Đã lưu phân quyền! Lưu ý: Quyền Sửa/Xóa chỉ cấp cho tài khoản được phân quyền quản lý nhiều kho.'
+        : 'Quản lý chính đã lưu phân quyền [X] vai trò & chức năng cho tài khoản!'
+    );
   };
 
   const handleResetStaffPasswordByManager = async (uid: string, newPass: string) => {
@@ -5709,8 +5874,11 @@ export default function App() {
     try {
       const nowIso = new Date().toISOString();
       const parsed = JSON.parse(audit.snapshotData);
+      if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string') {
+        unmarkDeletedRecord(parsed.id);
+      }
       if (audit.targetEntity === 'sale') {
-        const restoredSale = parsed as SaleTransaction;
+        const restoredSale = { ...(parsed as SaleTransaction), updatedAt: nowIso };
         const existingSale = sales.find((s) => s.id === restoredSale.id);
         const nextSales = [restoredSale, ...sales.filter((s) => s.id !== restoredSale.id)];
         setSales(nextSales);
@@ -5730,7 +5898,7 @@ export default function App() {
         }
         setCustomers((prev) => reconcileCustomersFromSales(prev, nextSales, nowIso).customers);
       } else if (audit.targetEntity === 'import') {
-        const restoredImp = parsed as ImportTransaction;
+        const restoredImp = { ...(parsed as ImportTransaction), updatedAt: nowIso };
         const existingImp = imports.find((i) => i.id === restoredImp.id);
         setImports((prev) => [restoredImp, ...prev.filter((i) => i.id !== restoredImp.id)]);
         const qtyDelta = restoredImp.quantity - (existingImp?.quantity || 0);
@@ -5744,13 +5912,13 @@ export default function App() {
           );
         }
       } else if (audit.targetEntity === 'product') {
-        const restoredProd = parsed as ProductItem;
+        const restoredProd = { ...(parsed as ProductItem), updatedAt: nowIso };
         setProducts((prev) => {
           const filtered = prev.filter((p) => p.id !== restoredProd.id);
           return [restoredProd, ...filtered];
         });
       } else if (audit.targetEntity === 'customer') {
-        const restoredCust = parsed as CustomerProfile;
+        const restoredCust = { ...(parsed as CustomerProfile), updatedAt: nowIso };
         setCustomers((prev) => {
           const filtered = prev.filter((c) => c.id !== restoredCust.id);
           return [restoredCust, ...filtered];
@@ -5758,22 +5926,22 @@ export default function App() {
       } else if (audit.targetEntity === 'voucher') {
         const rec = parsed as Record<string, unknown>;
         if (typeof rec.voucherType === 'string') {
-          const restoredVc = parsed as SavedVoucherRecord;
+          const restoredVc = { ...(parsed as SavedVoucherRecord), updatedAt: nowIso };
           setSavedVouchers((prev) => [restoredVc, ...prev.filter((v) => v.id !== restoredVc.id)]);
         } else if (
           String(rec.id || '').startsWith('rv_') ||
           String(rec.voucherCode || '').startsWith('PT')
         ) {
-          const restoredRv = parsed as CashReceiptVoucher;
+          const restoredRv = { ...(parsed as CashReceiptVoucher), updatedAt: nowIso };
           setReceiptVouchers((prev) => [restoredRv, ...prev.filter((r) => r.id !== restoredRv.id)]);
         } else if (
           String(rec.id || '').startsWith('pv_') ||
           String(rec.voucherCode || '').startsWith('PC')
         ) {
-          const restoredPv = parsed as CashPaymentVoucher;
+          const restoredPv = { ...(parsed as CashPaymentVoucher), updatedAt: nowIso };
           setPaymentVouchers((prev) => [restoredPv, ...prev.filter((p) => p.id !== restoredPv.id)]);
         } else {
-          const restoredVc = parsed as SavedVoucherRecord;
+          const restoredVc = { ...(parsed as SavedVoucherRecord), updatedAt: nowIso };
           setSavedVouchers((prev) => [restoredVc, ...prev.filter((v) => v.id !== restoredVc.id)]);
         }
       }
@@ -5952,7 +6120,21 @@ export default function App() {
 
     const isScopedSingleWh = !canFilterMultiWarehouses && lockedWarehouse;
     allowEmptyWorkspaceWriteRef.current = true;
+    forceStorageSyncRef.current = true;
+    const nowWipeIso = new Date().toISOString();
     if (isScopedSingleWh) {
+      const idsToTombstone = [
+        ...products.filter((p) => p.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...customers.filter((c) => c.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...suppliers.filter((sp) => sp.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...sales.filter((s) => s.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...imports.filter((i) => i.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...receiptVouchers.filter((r) => r.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...paymentVouchers.filter((p) => p.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...savedVouchers.filter((v) => v.warehouseName === lockedWarehouse).map((x) => x.id),
+        ...stockAdjustments.filter((a) => a.warehouseName === lockedWarehouse).map((x) => x.id),
+      ];
+      markRecordsDeleted(idsToTombstone, nowWipeIso);
       // Wipe only the current user's independent warehouse data, keeping other warehouses completely intact
       setProducts((prev) => prev.filter((p) => p.warehouseName !== lockedWarehouse));
       setCustomers((prev) => prev.filter((c) => c.warehouseName !== lockedWarehouse));
@@ -5976,6 +6158,18 @@ export default function App() {
       return;
     }
 
+    const allWipedIds = [
+      ...products.map((x) => x.id),
+      ...customers.map((x) => x.id),
+      ...suppliers.map((x) => x.id),
+      ...sales.map((x) => x.id),
+      ...imports.map((x) => x.id),
+      ...receiptVouchers.map((x) => x.id),
+      ...paymentVouchers.map((x) => x.id),
+      ...savedVouchers.map((x) => x.id),
+      ...stockAdjustments.map((x) => x.id),
+    ];
+    markRecordsDeleted(allWipedIds, nowWipeIso);
     const wiped = executeFullApplicationDataWipe({ staffList });
     setProducts(wiped.products);
     setCustomers(wiped.customers);
@@ -6052,6 +6246,136 @@ export default function App() {
         message:
           'Chưa hoàn tất chọn tài khoản Google hoặc cửa sổ đăng nhập đã đóng. Vui lòng chọn một tài khoản Google trong cửa sổ bật lên để đăng nhập.',
       };
+    }
+  };
+
+  const handleManualCloudSync = async () => {
+    const fbUser = auth.currentUser;
+    if (!fbUser || isManualCloudSyncing) return;
+    setIsManualCloudSyncing(true);
+    try {
+      const isPrimary = isCurrentUserAdmin(fbUser);
+      const isDesignatedMultiWh = !isPrimary && Boolean(designatedMultiWhOwnerUidsKey);
+      const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
+      const nowIso = new Date().toISOString();
+      const settingsObj = {
+        warehouses,
+        customerGroups,
+        productCategories,
+        receiptGroups,
+        paymentGroups,
+        notificationPrefs,
+        ...(bankQrConfig ? { bankQrConfig } : {}),
+        productNoteTemplates,
+        ...(deletedRecords.length > 0 ? { deletedRecords } : {}),
+        autoDailyBackupEnabled,
+      };
+
+      if (isPrimary || isDesignatedMultiWh) {
+        // Authoritative push of ALL partitioned workspaces (including deletions!) directly to RTDB & Firebase Storage
+        const partitioned = partitionAdminStateByWorkspace({
+          products,
+          customers,
+          suppliers,
+          sales,
+          imports,
+          receiptVouchers,
+          paymentVouchers,
+          savedVouchers,
+          stockAdjustments,
+          auditLogs,
+          backups,
+          settings: settingsObj,
+          staffList,
+          knownOwnerUids: Array.from(rtdbKnownOwnerUidsRef.current),
+          adminUid: isPrimary ? PRIMARY_ADMIN_UID : activeUid,
+          nowIso,
+        });
+        await Promise.allSettled(
+          Object.entries(partitioned).map(async ([bucketUid, bucketPayload]) => {
+            const prevSnapshot = rtdbLastPayloadRef.current[bucketUid] ?? null;
+            const ok = await writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot, true, {
+              forceStorage: true,
+              allowMultiWarehouseManager: isDesignatedMultiWh,
+            });
+            if (ok) {
+              rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
+              rtdbLastFingerprintsRef.current[bucketUid] = computeWorkspaceFingerprint(bucketPayload);
+            }
+          })
+        );
+        if (isPrimary && adminWorkspaceSummaries.length > 0) {
+          await writeAdminWorkspacesIndexToFirebaseStorage(adminWorkspaceSummaries, true);
+        }
+      } else {
+        // Single-warehouse user: push current live state + tombstones cleanly to RTDB & Firebase Storage
+        // ONLY pull from Storage if current workspace is completely empty with no tombstones (fresh phone login)
+        const currentCount =
+          products.length + customers.length + sales.length + imports.length;
+        if (currentCount === 0 && deletedRecords.length === 0) {
+          const storageWs = await readWorkspaceFromFirebaseStorage({
+            uid: activeUid,
+            email: fbUser.email || currentStaff.email,
+            assignedWarehouse: currentStaff.assignedWarehouse,
+          });
+          if (storageWs && countWorkspaceBusinessRecords(storageWs) > 0) {
+            storageCachedWorkspaceRef.current[activeUid] = storageWs;
+            productsRef.current = storageWs.products;
+            setProducts(storageWs.products);
+            setCustomers(storageWs.customers);
+            setSuppliers(storageWs.suppliers);
+            setSales(storageWs.sales);
+            setImports(storageWs.imports);
+            setReceiptVouchers(storageWs.receiptVouchers);
+            setPaymentVouchers(storageWs.paymentVouchers);
+            setSavedVouchers(storageWs.savedVouchers);
+            setStockAdjustments(storageWs.stockAdjustments || []);
+            if (storageWs.settings?.deletedRecords?.length) {
+              setDeletedRecords(storageWs.settings.deletedRecords);
+            }
+          }
+        }
+        const payload: RtdbWorkspacePayload = {
+          meta: {
+            ownerUid: activeUid,
+            ownerEmail: currentStaff.email || fbUser.email || '',
+            ownerDisplayName: currentStaff.displayName || fbUser.displayName || '',
+            assignedWarehouse: currentStaff.assignedWarehouse || 'Tâm An Mỹ Ngãi',
+            updatedAt: nowIso,
+            updatedByUid: activeUid,
+            schemaVersion: 1,
+          },
+          products: latestWorkspaceRef.current.products,
+          customers: latestWorkspaceRef.current.customers,
+          suppliers: latestWorkspaceRef.current.suppliers,
+          sales: latestWorkspaceRef.current.sales,
+          imports: latestWorkspaceRef.current.imports,
+          receiptVouchers: latestWorkspaceRef.current.receiptVouchers,
+          paymentVouchers: latestWorkspaceRef.current.paymentVouchers,
+          savedVouchers: latestWorkspaceRef.current.savedVouchers,
+          stockAdjustments: latestWorkspaceRef.current.stockAdjustments,
+          auditLogs: latestWorkspaceRef.current.auditLogs.slice(0, 500),
+          backups: latestWorkspaceRef.current.backups.map((b) => ({
+            ...b,
+            snapshotPayload: undefined,
+          })),
+          settings: settingsObj,
+        };
+        const prevSnapshot = rtdbLastPayloadRef.current[activeUid] ?? null;
+        const ok = await writeRealtimeWorkspace(activeUid, payload, prevSnapshot, true, {
+          forceStorage: true,
+        });
+        if (ok) {
+          rtdbLastPayloadRef.current[activeUid] = payload;
+          rtdbLastFingerprintsRef.current[activeUid] = computeWorkspaceFingerprint(payload);
+        }
+      }
+
+      showToast(
+        `Đã đồng bộ tức thì lên Firebase Realtime DB & Firebase Storage (${visibleProducts.length} vật tư, ${visibleSales.length} đơn bán, ${visibleCustomers.length} khách hàng)!`
+      );
+    } finally {
+      setIsManualCloudSyncing(false);
     }
   };
 
@@ -6379,59 +6703,8 @@ export default function App() {
                 <button
                   type="button"
                   disabled={isManualCloudSyncing}
-                  onClick={async () => {
-                    const fbUser = auth.currentUser;
-                    if (!fbUser || isManualCloudSyncing) return;
-                    setIsManualCloudSyncing(true);
-                    try {
-                      const isPrimary = isCurrentUserAdmin(fbUser);
-                      const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
-                      const storageWs = await readWorkspaceFromFirebaseStorage({
-                        uid: activeUid,
-                        email: fbUser.email || currentStaff.email,
-                        assignedWarehouse: currentStaff.assignedWarehouse,
-                      });
-                      if (storageWs && !isPrimary) {
-                        storageCachedWorkspaceRef.current[activeUid] = storageWs;
-                        const merged = mergeWorkspacePayloads(
-                          rtdbLastPayloadRef.current[activeUid] || null,
-                          storageWs,
-                          activeUid
-                        );
-                        if (merged && countWorkspaceBusinessRecords(merged) > 0) {
-                          setProducts((prev) => dedupeRecordsById([...prev, ...merged.products]));
-                          setCustomers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.customers])
-                          );
-                          setSuppliers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.suppliers])
-                          );
-                          setSales((prev) => dedupeRecordsById([...prev, ...merged.sales]));
-                          setImports((prev) => dedupeRecordsById([...prev, ...merged.imports]));
-                          setReceiptVouchers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.receiptVouchers])
-                          );
-                          setPaymentVouchers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.paymentVouchers])
-                          );
-                          setSavedVouchers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.savedVouchers])
-                          );
-                          setStockAdjustments((prev) =>
-                            dedupeRecordsById([...prev, ...(merged.stockAdjustments || [])])
-                          );
-                        }
-                      }
-                      rtdbSuppressNextWriteRef.current = false;
-                      setRtdbWriteTrigger((n) => n + 1);
-                      showToast(
-                        `Đã đồng bộ dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime DB (${visibleProducts.length} vật tư, ${visibleSales.length} đơn bán, ${visibleCustomers.length} khách hàng)!`
-                      );
-                    } finally {
-                      setIsManualCloudSyncing(false);
-                    }
-                  }}
-                  title="Bấm để đồng bộ tức thì dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime Database"
+                  onClick={() => void handleManualCloudSync()}
+                  title="Bấm để đồng bộ tức thì dữ liệu (kể cả dữ liệu đã xóa) lên Firebase Storage & Realtime Database"
                   className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors shrink-0 ${
                     rtdbSyncState === 'live'
                       ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
@@ -6465,7 +6738,7 @@ export default function App() {
               <div className="hidden md:block shrink-0">
                 <MultiWarehouseFilterPopover
                   triggerId="desktop-multi-warehouse-filter"
-                  allWarehouses={warehouses}
+                  allWarehouses={getStaffAllowedWarehouses(currentStaff, warehouses)}
                   selectedWarehouses={selectedFilterWarehouses}
                   onChangeSelectedWarehouses={(next) => {
                     setSelectedFilterWarehouses(next);
@@ -6565,59 +6838,8 @@ export default function App() {
                 <button
                   type="button"
                   disabled={isManualCloudSyncing}
-                  onClick={async () => {
-                    const fbUser = auth.currentUser;
-                    if (!fbUser || isManualCloudSyncing) return;
-                    setIsManualCloudSyncing(true);
-                    try {
-                      const isPrimary = isCurrentUserAdmin(fbUser);
-                      const activeUid = isPrimary ? PRIMARY_ADMIN_UID : fbUser.uid;
-                      const storageWs = await readWorkspaceFromFirebaseStorage({
-                        uid: activeUid,
-                        email: fbUser.email || currentStaff.email,
-                        assignedWarehouse: currentStaff.assignedWarehouse,
-                      });
-                      if (storageWs && !isPrimary) {
-                        storageCachedWorkspaceRef.current[activeUid] = storageWs;
-                        const merged = mergeWorkspacePayloads(
-                          rtdbLastPayloadRef.current[activeUid] || null,
-                          storageWs,
-                          activeUid
-                        );
-                        if (merged && countWorkspaceBusinessRecords(merged) > 0) {
-                          setProducts((prev) => dedupeRecordsById([...prev, ...merged.products]));
-                          setCustomers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.customers])
-                          );
-                          setSuppliers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.suppliers])
-                          );
-                          setSales((prev) => dedupeRecordsById([...prev, ...merged.sales]));
-                          setImports((prev) => dedupeRecordsById([...prev, ...merged.imports]));
-                          setReceiptVouchers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.receiptVouchers])
-                          );
-                          setPaymentVouchers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.paymentVouchers])
-                          );
-                          setSavedVouchers((prev) =>
-                            dedupeRecordsById([...prev, ...merged.savedVouchers])
-                          );
-                          setStockAdjustments((prev) =>
-                            dedupeRecordsById([...prev, ...(merged.stockAdjustments || [])])
-                          );
-                        }
-                      }
-                      rtdbSuppressNextWriteRef.current = false;
-                      setRtdbWriteTrigger((n) => n + 1);
-                      showToast(
-                        `Đã đồng bộ dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime DB (${visibleProducts.length} vật tư, ${visibleSales.length} đơn bán, ${visibleCustomers.length} khách hàng)!`
-                      );
-                    } finally {
-                      setIsManualCloudSyncing(false);
-                    }
-                  }}
-                  title="Bấm để đồng bộ tức thì dữ liệu Web ↔ Điện thoại qua Firebase Storage & Realtime Database"
+                  onClick={() => void handleManualCloudSync()}
+                  title="Bấm để đồng bộ tức thì dữ liệu (kể cả dữ liệu đã xóa) lên Firebase Storage & Realtime Database"
                   className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors shrink-0 ${
                     rtdbSyncState === 'live'
                       ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
@@ -6665,7 +6887,7 @@ export default function App() {
             <div className="min-w-0 flex items-center justify-end">
               <MultiWarehouseFilterPopover
                 triggerId="mobile-multi-warehouse-filter"
-                allWarehouses={warehouses}
+                allWarehouses={getStaffAllowedWarehouses(currentStaff, warehouses)}
                 selectedWarehouses={selectedFilterWarehouses}
                 onChangeSelectedWarehouses={(next) => {
                   setSelectedFilterWarehouses(next);
@@ -7622,6 +7844,7 @@ export default function App() {
               onChangePassword={handleChangeStaffPassword}
               onCreateStaffAccount={handleCreateStaffAccount}
               onUpdateStaffWarehouse={handleUpdateStaffWarehouse}
+              onUpdateStaffMultiWarehouses={handleUpdateStaffMultiWarehouses}
               onUpdateStaffPermissions={handleUpdateStaffPermissions}
               onResetStaffPasswordByManager={handleResetStaffPasswordByManager}
               onToggleStaffActive={handleToggleStaffActive}

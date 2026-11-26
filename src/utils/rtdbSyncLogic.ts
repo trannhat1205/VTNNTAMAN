@@ -4,6 +4,7 @@ import {
   CashPaymentVoucher,
   CashReceiptVoucher,
   CustomerProfile,
+  DeletedRecordTombstone,
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
@@ -31,6 +32,7 @@ import {
   formatDefaultWarehouseNameFromGmail,
   getDefaultPermissionsForPosition,
   getIndependentWarehouseFullPermissions,
+  hasMultiWarehouseManagementGrant,
 } from './businessLogic';
 
 export interface RtdbWorkspaceMeta {
@@ -52,6 +54,7 @@ export interface RtdbWorkspaceSettings {
   notificationPrefs: NotificationPrefs;
   bankQrConfig?: VietQrBankConfig;
   productNoteTemplates?: ProductNoteTemplate[];
+  deletedRecords?: DeletedRecordTombstone[];
   autoDailyBackupEnabled: boolean;
 }
 
@@ -81,6 +84,9 @@ export interface RtdbUserDirectoryProfile {
   positionRole: StaffMember['positionRole'];
   permissions: StaffMember['permissions'];
   assignedWarehouse: string;
+  assignedWarehouses?: string[];
+  multiWarehouseGrantedByAdmin?: boolean;
+  assignedOwnerUids?: Record<string, boolean>;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -198,6 +204,29 @@ export function normalizeIndependentWarehouseStaffMember(staff: StaffMember): St
   }
 
   const isInternalAdminCreated = staff.uid.startsWith('staff_');
+  const hasMultiGrant = hasMultiWarehouseManagementGrant(staff);
+
+  if (isInternalAdminCreated || hasMultiGrant) {
+    const cleanedMultiWhs = Array.from(
+      new Set(
+        (staff.assignedWarehouses || [])
+          .map((w) => (w || '').trim())
+          .filter((w) => Boolean(w) && w !== 'Tất cả kho')
+      )
+    );
+    const currentPerms = staff.permissions || [];
+    const safePerms = hasMultiGrant
+      ? currentPerms
+      : currentPerms.filter((p) => p !== 'edit_delete_vouchers' && p !== 'manage_all_warehouses');
+    return {
+      ...staff,
+      role: hasMultiGrant && safePerms.includes('edit_delete_vouchers') ? 'manager' : 'staff',
+      permissions: safePerms,
+      ...(cleanedMultiWhs.length > 0 ? { assignedWarehouses: cleanedMultiWhs } : {}),
+      ...(hasMultiGrant ? { multiWarehouseGrantedByAdmin: true } : {}),
+    };
+  }
+
   const rawWh = (staff.assignedWarehouse || '').trim();
   const hasInvalidLegacyWh =
     !rawWh ||
@@ -205,28 +234,27 @@ export function normalizeIndependentWarehouseStaffMember(staff: StaffMember): St
     rawWh === 'VTNN Tâm An' ||
     rawWh === 'Tất cả kho';
 
-  if (isInternalAdminCreated) {
-    return staff;
-  }
-
   const fixedWarehouse = hasInvalidLegacyWh
     ? formatDefaultWarehouseNameFromGmail(staff.email || staff.username || '')
     : rawWh;
 
-  const existingPerms = staff.permissions || [];
+  const existingPerms = (staff.permissions || []).filter(
+    (p) => p !== 'edit_delete_vouchers' && p !== 'manage_all_warehouses'
+  );
   const hasFullWarehousePerms =
     existingPerms.includes('manage_single_warehouse') &&
-    existingPerms.includes('warehouse_accounting') &&
-    existingPerms.includes('edit_delete_vouchers');
+    existingPerms.includes('warehouse_accounting');
 
   return {
     ...staff,
-    role: 'manager',
+    role: 'staff',
     positionRole: 'warehouse_manager',
     permissions: hasFullWarehousePerms
       ? existingPerms
       : getIndependentWarehouseFullPermissions(),
     assignedWarehouse: fixedWarehouse,
+    assignedWarehouses: undefined,
+    multiWarehouseGrantedByAdmin: false,
   };
 }
 
@@ -235,6 +263,7 @@ export function toRtdbUserDirectoryProfile(
   nowIso = new Date().toISOString()
 ): RtdbUserDirectoryProfile {
   const normalized = normalizeIndependentWarehouseStaffMember(staff);
+  const hasMultiGrant = hasMultiWarehouseManagementGrant(normalized);
   return sanitizeForRealtimeDb({
     uid: normalized.uid,
     username: normalized.username || '',
@@ -249,6 +278,13 @@ export function toRtdbUserDirectoryProfile(
       normalized.permissions ||
       getDefaultPermissionsForPosition(normalized.positionRole || 'warehouse_manager'),
     assignedWarehouse: normalized.assignedWarehouse || 'Tâm An Mỹ Ngãi',
+    ...(normalized.assignedWarehouses && normalized.assignedWarehouses.length > 0
+      ? { assignedWarehouses: normalized.assignedWarehouses }
+      : {}),
+    ...(hasMultiGrant ? { multiWarehouseGrantedByAdmin: true } : { multiWarehouseGrantedByAdmin: false }),
+    ...(normalized.assignedOwnerUids && Object.keys(normalized.assignedOwnerUids).length > 0
+      ? { assignedOwnerUids: normalized.assignedOwnerUids }
+      : {}),
     active: normalized.active !== false,
     createdAt: normalized.createdAt || nowIso,
     updatedAt: normalized.updatedAt || nowIso,
@@ -268,6 +304,7 @@ export function mergeDirectoryIntoStaffList(
   for (const dir of directoryUsers) {
     if (!dir || !dir.uid) continue;
     const prev = byUid.get(dir.uid);
+    const dirMultiWhs = ensureArrayFromRtdb<string>(dir.assignedWarehouses);
     const merged = normalizeIndependentWarehouseStaffMember({
       uid: dir.uid,
       username: dir.username || prev?.username || `user_${dir.uid.slice(0, 6)}`,
@@ -279,6 +316,22 @@ export function mergeDirectoryIntoStaffList(
       positionRole: dir.positionRole || prev?.positionRole || 'warehouse_manager',
       permissions: dir.permissions || prev?.permissions,
       assignedWarehouse: dir.assignedWarehouse || prev?.assignedWarehouse || 'Tâm An Mỹ Ngãi',
+      assignedWarehouses:
+        dirMultiWhs.length > 0
+          ? dirMultiWhs
+          : dir.multiWarehouseGrantedByAdmin === false
+          ? undefined
+          : prev?.assignedWarehouses,
+      multiWarehouseGrantedByAdmin:
+        dir.multiWarehouseGrantedByAdmin !== undefined
+          ? dir.multiWarehouseGrantedByAdmin
+          : prev?.multiWarehouseGrantedByAdmin,
+      assignedOwnerUids:
+        dir.assignedOwnerUids && typeof dir.assignedOwnerUids === 'object'
+          ? dir.assignedOwnerUids
+          : dir.multiWarehouseGrantedByAdmin === false
+          ? undefined
+          : prev?.assignedOwnerUids,
       active: dir.active !== undefined ? dir.active : prev?.active ?? true,
       createdAt: dir.createdAt || prev?.createdAt || new Date().toISOString(),
       updatedAt: dir.updatedAt || prev?.updatedAt || new Date().toISOString(),
@@ -367,6 +420,11 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
             productNoteTemplates: ensureArrayFromRtdb<ProductNoteTemplate>(
               rawSettings.productNoteTemplates
             ),
+          }
+        : {}),
+      ...(rawSettings.deletedRecords
+        ? {
+            deletedRecords: ensureArrayFromRtdb<DeletedRecordTombstone>(rawSettings.deletedRecords),
           }
         : {}),
       autoDailyBackupEnabled:
@@ -550,6 +608,7 @@ export function aggregateAdminWorkspacesFromRtdb(
   productCategories: string[];
   receiptGroups: string[];
   paymentGroups: string[];
+  deletedRecords: DeletedRecordTombstone[];
   adminSummaries: AdminWarehouseAccountSummary[];
   normalizedWorkspaces: Record<string, RtdbWorkspacePayload>;
 } {
@@ -569,6 +628,7 @@ export function aggregateAdminWorkspacesFromRtdb(
   const prodCatSet = new Set<string>(INITIAL_PRODUCT_CATEGORIES);
   const recGroupSet = new Set<string>(INITIAL_RECEIPT_GROUPS);
   const payGroupSet = new Set<string>(INITIAL_PAYMENT_GROUPS);
+  const allDeletedRecordLists: Array<DeletedRecordTombstone[] | undefined> = [];
 
   const normalizedWorkspaces: Record<string, RtdbWorkspacePayload> = {};
   const ownerUids = new Set<string>([
@@ -604,6 +664,9 @@ export function aggregateAdminWorkspacesFromRtdb(
     norm.settings.productCategories.forEach((c) => c && prodCatSet.add(c));
     norm.settings.receiptGroups.forEach((g) => g && recGroupSet.add(g));
     norm.settings.paymentGroups.forEach((g) => g && payGroupSet.add(g));
+    if (norm.settings.deletedRecords && norm.settings.deletedRecords.length > 0) {
+      allDeletedRecordLists.push(norm.settings.deletedRecords);
+    }
   }
 
   for (const user of Object.values(usersDirectoryMap || {})) {
@@ -662,16 +725,27 @@ export function aggregateAdminWorkspacesFromRtdb(
     (b.timestamp || '').localeCompare(a.timestamp || '')
   );
 
+  const mergedDeletedRecords = mergeDeletionTombstones(...allDeletedRecordLists);
+
   return {
-    products: dedupeRecordsById(allProducts),
-    customers: dedupeRecordsById(allCustomers),
-    suppliers: dedupeRecordsById(allSuppliers),
-    sales: dedupeRecordsById(allSales),
-    imports: dedupeRecordsById(allImports),
-    receiptVouchers: dedupeRecordsById(allReceiptVouchers),
-    paymentVouchers: dedupeRecordsById(allPaymentVouchers),
-    savedVouchers: dedupeRecordsById(allSavedVouchers),
-    stockAdjustments: dedupeRecordsById(allStockAdjustments),
+    products: filterOutDeletedRecords(dedupeRecordsById(allProducts), mergedDeletedRecords),
+    customers: filterOutDeletedRecords(dedupeRecordsById(allCustomers), mergedDeletedRecords),
+    suppliers: filterOutDeletedRecords(dedupeRecordsById(allSuppliers), mergedDeletedRecords),
+    sales: filterOutDeletedRecords(dedupeRecordsById(allSales), mergedDeletedRecords),
+    imports: filterOutDeletedRecords(dedupeRecordsById(allImports), mergedDeletedRecords),
+    receiptVouchers: filterOutDeletedRecords(
+      dedupeRecordsById(allReceiptVouchers),
+      mergedDeletedRecords
+    ),
+    paymentVouchers: filterOutDeletedRecords(
+      dedupeRecordsById(allPaymentVouchers),
+      mergedDeletedRecords
+    ),
+    savedVouchers: filterOutDeletedRecords(dedupeRecordsById(allSavedVouchers), mergedDeletedRecords),
+    stockAdjustments: filterOutDeletedRecords(
+      dedupeRecordsById(allStockAdjustments),
+      mergedDeletedRecords
+    ),
     auditLogs: sortedAuditLogs,
     backups: dedupeRecordsById(allBackups),
     warehouses: Array.from(warehouseSet),
@@ -679,6 +753,7 @@ export function aggregateAdminWorkspacesFromRtdb(
     productCategories: Array.from(prodCatSet),
     receiptGroups: Array.from(recGroupSet),
     paymentGroups: Array.from(payGroupSet),
+    deletedRecords: mergedDeletedRecords,
     adminSummaries,
     normalizedWorkspaces,
   };
@@ -894,9 +969,56 @@ export function buildStorageWorkspacePaths(params: {
   };
 }
 
+export function mergeDeletionTombstones(
+  ...lists: Array<DeletedRecordTombstone[] | undefined | null>
+): DeletedRecordTombstone[] {
+  const byId = new Map<string, string>();
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const item of list) {
+      if (!item || !item.id) continue;
+      const prev = byId.get(item.id) || '';
+      const nextTs = item.deletedAt || '';
+      if (!prev || nextTs >= prev) {
+        byId.set(item.id, nextTs);
+      }
+    }
+  }
+  return Array.from(byId.entries())
+    .map(([id, deletedAt]) => ({ id, deletedAt }))
+    .sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''))
+    .slice(0, 500);
+}
+
+export function filterOutDeletedRecords<
+  T extends { id: string; updatedAt?: string; createdAt?: string }
+>(records: T[], tombstones: DeletedRecordTombstone[] | undefined | null): T[] {
+  if (!Array.isArray(tombstones) || tombstones.length === 0) return records;
+  const map = new Map<string, string>();
+  for (const t of tombstones) {
+    if (t && t.id) {
+      const prev = map.get(t.id) || '';
+      if (!prev || (t.deletedAt || '') >= prev) {
+        map.set(t.id, t.deletedAt || '');
+      }
+    }
+  }
+  return records.filter((rec) => {
+    if (!rec || !rec.id) return false;
+    const deletedAt = map.get(rec.id);
+    if (deletedAt === undefined) return true;
+    const recTs = rec.updatedAt || rec.createdAt || '';
+    // Keep only if explicitly restored/re-created AFTER deletion timestamp
+    return Boolean(recTs && deletedAt && recTs > deletedAt);
+  });
+}
+
 /**
- * Merges two workspace snapshots (e.g. RTDB + Firebase Storage), preserving all unique records
- * by ID (keeping the newest `updatedAt` / `createdAt`) and the most complete metadata.
+ * Merges two workspace snapshots (e.g. RTDB + Firebase Storage) safely WITHOUT resurrecting deleted records.
+ * - Respects `deletedRecords` tombstones from BOTH snapshots.
+ * - When `first` (e.g. live RTDB) is strictly newer than `second` (e.g. stale Storage) and non-empty,
+ *   uses `first` as authoritative for deletions so older Storage files NEVER re-download deleted items back.
+ * - When one snapshot is empty (e.g. fresh phone login or wiped RTDB without tombstones), cleanly recovers from the other.
  */
 export function mergeWorkspacePayloads(
   first: RtdbWorkspacePayload | null | undefined,
@@ -907,9 +1029,55 @@ export function mergeWorkspacePayloads(
   if (!first) return second || null;
   if (!second) return first;
 
-  const firstNewer = (first.meta?.updatedAt || '') >= (second.meta?.updatedAt || '');
-  const primary = firstNewer ? first : second;
-  const secondary = firstNewer ? second : first;
+  const mergedTombstones = mergeDeletionTombstones(
+    first.settings?.deletedRecords,
+    second.settings?.deletedRecords
+  );
+
+  const firstCount = countWorkspaceBusinessRecords(first);
+  const secondCount = countWorkspaceBusinessRecords(second);
+  const firstTs = first.meta?.updatedAt || '';
+  const secondTs = second.meta?.updatedAt || '';
+
+  // Determine which snapshot is newer / authoritative
+  const firstIsAuthoritative =
+    firstTs > secondTs &&
+    (firstCount > 0 || (first.settings?.deletedRecords?.length || 0) > 0);
+  const secondIsAuthoritative =
+    secondTs > firstTs &&
+    (secondCount > 0 || (second.settings?.deletedRecords?.length || 0) > 0);
+
+  const primary = secondIsAuthoritative
+    ? second
+    : firstIsAuthoritative || firstTs >= secondTs
+    ? first
+    : second;
+  const secondary = primary === first ? second : first;
+
+  // If primary is strictly newer & healthy (or carries explicit deletion tombstones),
+  // do NOT blindly union stale records from the older secondary snapshot!
+  const useStrictPrimaryRecords =
+    (firstIsAuthoritative || secondIsAuthoritative) &&
+    (countWorkspaceBusinessRecords(primary) > 0 || mergedTombstones.length > 0);
+
+  const mergeCol = <T extends { id: string; updatedAt?: string; createdAt?: string }>(
+    primList: T[] | undefined,
+    secList: T[] | undefined
+  ): T[] => {
+    if (useStrictPrimaryRecords) {
+      return attachOwnerId(
+        filterOutDeletedRecords(dedupeRecordsById(primList || []), mergedTombstones),
+        ownerUid
+      );
+    }
+    return attachOwnerId(
+      filterOutDeletedRecords(
+        dedupeRecordsById([...(secList || []), ...(primList || [])]),
+        mergedTombstones
+      ),
+      ownerUid
+    );
+  };
 
   const pickWarehouse = (a?: string, b?: string): string => {
     const cleanA = (a || '').trim();
@@ -938,51 +1106,15 @@ export function mergeWorkspacePayloads(
       updatedByUid: primary.meta?.updatedByUid || secondary.meta?.updatedByUid || ownerUid,
       schemaVersion: 1,
     },
-    products: attachOwnerId(
-      dedupeRecordsById([...(secondary.products || []), ...(primary.products || [])]),
-      ownerUid
-    ),
-    customers: attachOwnerId(
-      dedupeRecordsById([...(secondary.customers || []), ...(primary.customers || [])]),
-      ownerUid
-    ),
-    suppliers: attachOwnerId(
-      dedupeRecordsById([...(secondary.suppliers || []), ...(primary.suppliers || [])]),
-      ownerUid
-    ),
-    sales: attachOwnerId(
-      dedupeRecordsById([...(secondary.sales || []), ...(primary.sales || [])]),
-      ownerUid
-    ),
-    imports: attachOwnerId(
-      dedupeRecordsById([...(secondary.imports || []), ...(primary.imports || [])]),
-      ownerUid
-    ),
-    receiptVouchers: attachOwnerId(
-      dedupeRecordsById([
-        ...(secondary.receiptVouchers || []),
-        ...(primary.receiptVouchers || []),
-      ]),
-      ownerUid
-    ),
-    paymentVouchers: attachOwnerId(
-      dedupeRecordsById([
-        ...(secondary.paymentVouchers || []),
-        ...(primary.paymentVouchers || []),
-      ]),
-      ownerUid
-    ),
-    savedVouchers: attachOwnerId(
-      dedupeRecordsById([...(secondary.savedVouchers || []), ...(primary.savedVouchers || [])]),
-      ownerUid
-    ),
-    stockAdjustments: attachOwnerId(
-      dedupeRecordsById([
-        ...(secondary.stockAdjustments || []),
-        ...(primary.stockAdjustments || []),
-      ]),
-      ownerUid
-    ),
+    products: mergeCol(primary.products, secondary.products),
+    customers: mergeCol(primary.customers, secondary.customers),
+    suppliers: mergeCol(primary.suppliers, secondary.suppliers),
+    sales: mergeCol(primary.sales, secondary.sales),
+    imports: mergeCol(primary.imports, secondary.imports),
+    receiptVouchers: mergeCol(primary.receiptVouchers, secondary.receiptVouchers),
+    paymentVouchers: mergeCol(primary.paymentVouchers, secondary.paymentVouchers),
+    savedVouchers: mergeCol(primary.savedVouchers, secondary.savedVouchers),
+    stockAdjustments: mergeCol(primary.stockAdjustments, secondary.stockAdjustments),
     auditLogs: dedupeRecordsById([
       ...(secondary.auditLogs || []),
       ...(primary.auditLogs || []),
@@ -1018,6 +1150,16 @@ export function mergeWorkspacePayloads(
         primary.settings?.notificationPrefs ||
         secondary.settings?.notificationPrefs ||
         DEFAULT_NOTIFICATION_PREFS,
+      ...(primary.settings?.bankQrConfig || secondary.settings?.bankQrConfig
+        ? { bankQrConfig: primary.settings?.bankQrConfig || secondary.settings?.bankQrConfig }
+        : {}),
+      ...(primary.settings?.productNoteTemplates || secondary.settings?.productNoteTemplates
+        ? {
+            productNoteTemplates:
+              primary.settings?.productNoteTemplates || secondary.settings?.productNoteTemplates,
+          }
+        : {}),
+      ...(mergedTombstones.length > 0 ? { deletedRecords: mergedTombstones } : {}),
       autoDailyBackupEnabled:
         primary.settings?.autoDailyBackupEnabled ??
         secondary.settings?.autoDailyBackupEnabled ??

@@ -300,6 +300,11 @@ export type ReportModuleCategory =
   | 'cashflow_treasury'
   | 'financial_profit';
 
+export interface DeletedRecordTombstone {
+  id: string;
+  deletedAt: string;
+}
+
 export interface StaffMember {
   uid: string;
   username: string;
@@ -311,6 +316,12 @@ export interface StaffMember {
   positionRole?: StaffPositionRole;
   permissions?: StaffFunctionalPermission[];
   assignedWarehouse: string;
+  /** Optional list of 2+ designated warehouses granted by Primary Admin (enables multi-warehouse & edit/delete rights). */
+  assignedWarehouses?: string[];
+  /** Explicit flag set ONLY by Primary Admin when granting multi-warehouse management (2+ warehouses or All). */
+  multiWarehouseGrantedByAdmin?: boolean;
+  /** Map of workspace owner UIDs readable/writable by a designated multi-warehouse manager in Firebase RTDB. */
+  assignedOwnerUids?: Record<string, boolean>;
   active: boolean;
   createdAt: string;
   updatedAt: string;

@@ -3,10 +3,10 @@
     ".read": false,
     ".write": false,
     "workspaces": {
-      ".read": "auth != null && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+      ".read": "auth != null && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com') || (root.child('users_directory').child(auth.uid).child('multiWarehouseGrantedByAdmin').val() === true && root.child('users_directory').child(auth.uid).child('assignedWarehouse').val() === 'Tất cả kho'))",
       "$ownerUid": {
-        ".read": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
-        ".write": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
+        ".read": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com') || (root.child('users_directory').child(auth.uid).child('multiWarehouseGrantedByAdmin').val() === true && (root.child('users_directory').child(auth.uid).child('assignedWarehouse').val() === 'Tất cả kho' || root.child('users_directory').child(auth.uid).child('assignedOwnerUids').child($ownerUid).val() === true)))",
+        ".write": "auth != null && (auth.uid === $ownerUid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com') || (root.child('users_directory').child(auth.uid).child('multiWarehouseGrantedByAdmin').val() === true && (root.child('users_directory').child(auth.uid).child('assignedWarehouse').val() === 'Tất cả kho' || root.child('users_directory').child(auth.uid).child('assignedOwnerUids').child($ownerUid).val() === true)))",
         "meta": {
           ".validate": "newData.hasChild('ownerUid') && newData.child('ownerUid').isString()"
         },
@@ -76,7 +76,7 @@
       "$uid": {
         ".read": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
         ".write": "auth != null && (auth.uid === $uid || auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com'))",
-        ".validate": "newData.hasChild('uid') && newData.child('uid').isString() && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com') || $uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || ((!newData.hasChild('email') || newData.child('email').val() !== 'trannhat1205@gmail.com') && (!newData.hasChild('positionRole') || newData.child('positionRole').val() !== 'primary_manager') && (!newData.hasChild('assignedWarehouse') || newData.child('assignedWarehouse').val() !== 'Tất cả kho')))"
+        ".validate": "newData.hasChild('uid') && newData.child('uid').isString() && (auth.uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || (auth.token.email_verified === true && auth.token.email === 'trannhat1205@gmail.com') || $uid === 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' || ((!newData.hasChild('email') || newData.child('email').val() !== 'trannhat1205@gmail.com') && (!newData.hasChild('positionRole') || newData.child('positionRole').val() !== 'primary_manager') && (!newData.hasChild('multiWarehouseGrantedByAdmin') || newData.child('multiWarehouseGrantedByAdmin').val() === false || data.child('multiWarehouseGrantedByAdmin').val() === true) && (!newData.hasChild('assignedWarehouse') || newData.child('assignedWarehouse').val() !== 'Tất cả kho' || data.child('assignedWarehouse').val() === 'Tất cả kho')))"
       }
     }
   }

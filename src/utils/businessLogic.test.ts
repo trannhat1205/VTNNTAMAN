@@ -2869,10 +2869,12 @@ test('computeProductStockMovementLedger and normalizeIndependentWarehouseStaffMe
     updatedAt: '2026-11-25T16:23:38Z',
   };
   const healed = normalizeIndependentWarehouseStaffMember(corruptedUser);
-  assert.equal(healed.role, 'manager');
+  assert.equal(healed.role, 'staff');
   assert.equal(healed.positionRole, 'warehouse_manager');
   assert.equal(healed.assignedWarehouse, 'TÂM AN VTNNTAMAN99');
   assert.equal(healed.permissions?.includes('manage_single_warehouse'), true);
+  assert.equal(healed.permissions?.includes('edit_delete_vouchers'), false);
+  assert.equal(evaluateStaffAccessScope(healed).canEditDeleteVouchers, false);
   assert.equal(evaluateStaffAccessScope(healed).allowedTabs.includes('inventory'), true);
 
   // User-renamed warehouse TÂM AN BA SAO is preserved

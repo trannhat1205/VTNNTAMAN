@@ -837,8 +837,9 @@ export function normalizeCustomTamAnWarehouseName(
 }
 
 /**
- * Full functional permissions for an independent single-warehouse user account.
- * Grants all administrative & operational capabilities within their own assigned warehouse.
+ * Full operational permissions for an independent single-warehouse user account.
+ * Note: Edit/Delete voucher permissions ('edit_delete_vouchers') are strictly reserved ONLY for
+ * Primary Admin and accounts explicitly granted Multi-Warehouse Management by Primary Admin.
  */
 export function getIndependentWarehouseFullPermissions(): StaffFunctionalPermission[] {
   return [
@@ -851,10 +852,87 @@ export function getIndependentWarehouseFullPermissions(): StaffFunctionalPermiss
     'bank_treasurer',
     'sales_and_invoicing',
     'import_and_supplier',
-    'edit_delete_vouchers',
     'export_import_excel',
     'view_assigned_reports',
   ];
+}
+
+/**
+ * Returns true ONLY if the account is Primary Admin OR was explicitly granted
+ * Multi-Warehouse Management by Primary Admin (2+ designated warehouses or "Tất cả kho" / deputy manager).
+ */
+export function hasMultiWarehouseManagementGrant(
+  staff:
+    | (Pick<
+        StaffMember,
+        | 'email'
+        | 'phone'
+        | 'positionRole'
+        | 'permissions'
+        | 'assignedWarehouse'
+        | 'assignedWarehouses'
+        | 'multiWarehouseGrantedByAdmin'
+      > & { uid?: string })
+    | null
+    | undefined
+): boolean {
+  if (!staff) return false;
+  if (canAccountCreateStaff(staff)) return true;
+  if (staff.positionRole === 'primary_manager' || staff.positionRole === 'deputy_general_manager') {
+    return true;
+  }
+  if (staff.permissions?.includes('manage_all_warehouses')) {
+    return true;
+  }
+  if (staff.assignedWarehouse === 'Tất cả kho') {
+    return true;
+  }
+  const uniqueMulti = Array.from(
+    new Set(
+      (staff.assignedWarehouses || [])
+        .map((w) => (w || '').trim())
+        .filter((w) => Boolean(w) && w !== 'Tất cả kho')
+    )
+  );
+  if (uniqueMulti.length >= 2) {
+    return true;
+  }
+  return Boolean(staff.multiWarehouseGrantedByAdmin);
+}
+
+/**
+ * Computes the exact list of warehouses an account is permitted to view and manage.
+ */
+export function getStaffAllowedWarehouses(
+  staff: StaffMember | null | undefined,
+  allWarehouses: string[]
+): string[] {
+  const defaultWh = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  if (!staff) return [defaultWh];
+  if (
+    canAccountCreateStaff(staff) ||
+    staff.positionRole === 'primary_manager' ||
+    staff.positionRole === 'deputy_general_manager' ||
+    staff.permissions?.includes('manage_all_warehouses') ||
+    staff.assignedWarehouse === 'Tất cả kho'
+  ) {
+    return allWarehouses.length > 0 ? allWarehouses : [defaultWh];
+  }
+  const designated = Array.from(
+    new Set(
+      (staff.assignedWarehouses || [])
+        .map((w) => (w || '').trim())
+        .filter((w) => Boolean(w) && w !== 'Tất cả kho')
+    )
+  );
+  if (designated.length >= 2) {
+    return designated;
+  }
+  const locked =
+    staff.assignedWarehouse && staff.assignedWarehouse !== 'Tất cả kho'
+      ? staff.assignedWarehouse
+      : designated[0] || defaultWh;
+  return [locked];
 }
 
 /**
@@ -1318,26 +1396,31 @@ export function evaluateStaffAccessScope(
       : getDefaultPermissionsForPosition(staff?.positionRole || 'sales_warehouse_staff');
 
   const hasAllWarehouses = isPrimaryOwner || perms.includes('manage_all_warehouses');
+  const hasMultiWarehouseAuthority = hasMultiWarehouseManagementGrant(staff);
 
   const canAccessSales =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('sales_accounting') ||
     perms.includes('sales_and_invoicing') ||
     perms.includes('warehouse_accounting');
 
   const canAccessImports =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('import_and_supplier') ||
     perms.includes('manage_single_warehouse') ||
     perms.includes('warehouse_accounting');
 
   const canAccessInventory =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('manage_single_warehouse') ||
     perms.includes('warehouse_accounting');
 
   const canAccessCustomers =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('sales_accounting') ||
     perms.includes('customer_debt_accounting') ||
     perms.includes('sales_and_invoicing') ||
@@ -1345,6 +1428,7 @@ export function evaluateStaffAccessScope(
 
   const canAccessCustomerDebts =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('customer_debt_accounting') ||
     perms.includes('cash_treasurer') ||
     perms.includes('bank_treasurer') ||
@@ -1352,6 +1436,7 @@ export function evaluateStaffAccessScope(
 
   const canAccessSupplierDebts =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('supplier_debt_accounting') ||
     perms.includes('cash_treasurer') ||
     perms.includes('bank_treasurer') ||
@@ -1361,6 +1446,7 @@ export function evaluateStaffAccessScope(
 
   const canAccessReceiptVouchers =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('cash_treasurer') ||
     perms.includes('bank_treasurer') ||
     perms.includes('customer_debt_accounting') ||
@@ -1370,6 +1456,7 @@ export function evaluateStaffAccessScope(
 
   const canAccessPaymentVouchers =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('cash_treasurer') ||
     perms.includes('bank_treasurer') ||
     perms.includes('supplier_debt_accounting') ||
@@ -1378,6 +1465,7 @@ export function evaluateStaffAccessScope(
 
   const canAccessCashflow =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('cash_treasurer') ||
     perms.includes('bank_treasurer') ||
     perms.includes('warehouse_accounting') ||
@@ -1387,6 +1475,7 @@ export function evaluateStaffAccessScope(
 
   const canAccessVouchers =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('sales_accounting') ||
     perms.includes('customer_debt_accounting') ||
     perms.includes('supplier_debt_accounting') ||
@@ -1398,21 +1487,24 @@ export function evaluateStaffAccessScope(
 
   const canAccessReports =
     hasAllWarehouses ||
+    hasMultiWarehouseAuthority ||
     perms.includes('view_assigned_reports') ||
     perms.includes('export_import_excel') ||
     perms.includes('warehouse_accounting');
 
   const hasFullSingleWarehouseAdmin =
     isPrimaryOwner ||
-    (perms.includes('manage_single_warehouse') &&
-      perms.includes('warehouse_accounting') &&
-      perms.includes('edit_delete_vouchers'));
+    hasMultiWarehouseAuthority ||
+    (perms.includes('manage_single_warehouse') && perms.includes('warehouse_accounting'));
 
   // STRICT RULE: Only the 1 primary admin account (trannhat1205@gmail.com / Gu6OYdsdiWbRvbEINqaWZXj3LV83) sees "Sao lưu & Lịch sử"
   const canAccessBackupHistory = isPrimaryOwner;
 
+  // STRICT RULE: ONLY Primary Admin OR accounts granted Multi-Warehouse Management by Primary Admin
+  // are allowed to edit or delete saved invoices, vouchers, imports, products, and customer records.
   const canEditDeleteVouchers =
-    hasAllWarehouses || perms.includes('edit_delete_vouchers');
+    isPrimaryOwner ||
+    (hasMultiWarehouseAuthority && (hasAllWarehouses || perms.includes('edit_delete_vouchers')));
 
   // Determine the exact report tabs this staff member is authorized to view & export for upper management
   // Ordered sequentially 1 -> 8 to match REPORT_CATEGORY_META labels (1, 2, 3, 4, 5, 6, 7, 8)
@@ -3624,35 +3716,25 @@ export function computeTaxAuthorityFinancialStatement(params: {
  * - Any account with 'manage_all_warehouses' permission or assignedWarehouse === 'Tất cả kho'
  */
 export function canStaffFilterMultiWarehouses(staff: StaffMember): boolean {
-  return (
-    canAccountCreateStaff(staff) ||
-    staff.positionRole === 'primary_manager' ||
-    staff.positionRole === 'deputy_general_manager' ||
-    Boolean(staff.permissions?.includes('manage_all_warehouses')) ||
-    staff.assignedWarehouse === 'Tất cả kho'
-  );
+  return hasMultiWarehouseManagementGrant(staff);
 }
 
 /**
- * Normalizes the selected warehouse list against all existing warehouses.
- * Empty array or matching all available warehouses means "All Warehouses" are active.
+ * Normalizes the selected warehouse list against all warehouses permitted for this staff member.
+ * Empty array or matching all permitted warehouses means all permitted warehouses are active.
  */
 export function resolveActiveWarehouses(
   staff: StaffMember,
   allWarehouses: string[],
   selectedWarehouses: string[]
 ): string[] {
-  const defaultWarehouse = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  const allowedWarehouses = getStaffAllowedWarehouses(staff, allWarehouses);
   if (!canStaffFilterMultiWarehouses(staff)) {
-    const locked =
-      staff.assignedWarehouse && staff.assignedWarehouse !== 'Tất cả kho'
-        ? staff.assignedWarehouse
-        : defaultWarehouse;
-    return [locked];
+    return allowedWarehouses;
   }
-  const validSelected = selectedWarehouses.filter((w) => allWarehouses.includes(w));
-  if (validSelected.length === 0 || validSelected.length === allWarehouses.length) {
-    return allWarehouses;
+  const validSelected = selectedWarehouses.filter((w) => allowedWarehouses.includes(w));
+  if (validSelected.length === 0 || validSelected.length === allowedWarehouses.length) {
+    return allowedWarehouses;
   }
   return validSelected;
 }
@@ -3671,8 +3753,15 @@ export function filterRecordsBySelectedWarehouses<
   selectedWarehouses: string[]
 ): T[] {
   const defaultWarehouse = allWarehouses[0] || 'Tâm An Mỹ Ngãi';
+  const allowedWarehouses = getStaffAllowedWarehouses(staff, allWarehouses);
   const activeSet = new Set(resolveActiveWarehouses(staff, allWarehouses, selectedWarehouses));
-  if (canStaffFilterMultiWarehouses(staff) && activeSet.size >= allWarehouses.length) {
+  const hasAllSystemWarehouses =
+    canAccountCreateStaff(staff) ||
+    staff.positionRole === 'primary_manager' ||
+    staff.positionRole === 'deputy_general_manager' ||
+    Boolean(staff.permissions?.includes('manage_all_warehouses')) ||
+    staff.assignedWarehouse === 'Tất cả kho';
+  if (hasAllSystemWarehouses && activeSet.size >= allWarehouses.length) {
     return records;
   }
   const isSingleWarehouseOwner =
@@ -3680,10 +3769,19 @@ export function filterRecordsBySelectedWarehouses<
     Boolean(staff.uid) &&
     staff.uid !== PRIMARY_ADMIN_UID &&
     !staff.uid.startsWith('staff_');
+  const designatedOwnerUids =
+    staff.assignedOwnerUids && typeof staff.assignedOwnerUids === 'object'
+      ? staff.assignedOwnerUids
+      : null;
+  const showingAllAllowed = activeSet.size >= allowedWarehouses.length;
   return records.filter(
     (rec) =>
       activeSet.has(rec.warehouseName || defaultWarehouse) ||
-      (isSingleWarehouseOwner && Boolean(rec.ownerId) && rec.ownerId === staff.uid)
+      (isSingleWarehouseOwner && Boolean(rec.ownerId) && rec.ownerId === staff.uid) ||
+      (canStaffFilterMultiWarehouses(staff) &&
+        showingAllAllowed &&
+        Boolean(rec.ownerId) &&
+        Boolean(designatedOwnerUids?.[rec.ownerId!]))
   );
 }
 
@@ -3696,20 +3794,32 @@ export function formatSelectedWarehousesBadge(
   selectedWarehouses: string[],
   detailed = false
 ): string {
+  const allowedWarehouses = getStaffAllowedWarehouses(staff, allWarehouses);
   const active = resolveActiveWarehouses(staff, allWarehouses, selectedWarehouses);
   if (!canStaffFilterMultiWarehouses(staff)) {
     return active[0] || 'Tâm An Mỹ Ngãi';
   }
-  if (active.length === 0 || active.length >= allWarehouses.length) {
-    return `Tất cả kho (${allWarehouses.length})`;
+  const hasAllSystemWarehouses =
+    canAccountCreateStaff(staff) ||
+    staff.positionRole === 'primary_manager' ||
+    staff.positionRole === 'deputy_general_manager' ||
+    Boolean(staff.permissions?.includes('manage_all_warehouses')) ||
+    staff.assignedWarehouse === 'Tất cả kho';
+  if (active.length === 0 || active.length >= allowedWarehouses.length) {
+    if (hasAllSystemWarehouses) {
+      return `Tất cả kho (${allowedWarehouses.length})`;
+    }
+    return detailed
+      ? `${allowedWarehouses.join(', ')} (${allowedWarehouses.length} kho được cấp)`
+      : `${allowedWarehouses.length} kho được cấp`;
   }
   if (active.length === 1) {
     return active[0];
   }
   if (detailed) {
-    return `${active.join(', ')} (${active.length}/${allWarehouses.length} kho)`;
+    return `${active.join(', ')} (${active.length}/${allowedWarehouses.length} kho)`;
   }
-  return `Đã chọn ${active.length}/${allWarehouses.length} kho`;
+  return `Đã chọn ${active.length}/${allowedWarehouses.length} kho`;
 }
 
 /**

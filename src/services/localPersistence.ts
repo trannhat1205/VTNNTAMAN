@@ -4,6 +4,7 @@ import {
   CashPaymentVoucher,
   CashReceiptVoucher,
   CustomerProfile,
+  DeletedRecordTombstone,
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
@@ -54,6 +55,7 @@ export interface WorkspacePersistedState {
   notificationPrefs: NotificationPrefs;
   bankQrConfig?: VietQrBankConfig;
   productNoteTemplates?: ProductNoteTemplate[];
+  deletedRecords?: DeletedRecordTombstone[];
   autoDailyBackupEnabled: boolean;
 }
 

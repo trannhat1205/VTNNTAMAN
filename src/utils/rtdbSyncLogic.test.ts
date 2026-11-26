@@ -8,16 +8,27 @@ import {
   buildStorageWorkspacePaths,
   buildWorkspaceDiffUpdates,
   countWorkspaceBusinessRecords,
+  filterOutDeletedRecords,
   isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
+  mergeDeletionTombstones,
   mergeWorkspacePayloads,
+  normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   RTDB_RECORD_COLLECTIONS,
   RtdbWorkspacePayload,
   toRtdbRecordKey,
   VTNNTAMAN99_UID,
 } from './rtdbSyncLogic';
-import { filterRecordsBySelectedWarehouses, getIndependentWarehouseFullPermissions } from './businessLogic';
+import {
+  canStaffFilterMultiWarehouses,
+  evaluateStaffAccessScope,
+  filterRecordsBySelectedWarehouses,
+  formatSelectedWarehousesBadge,
+  getIndependentWarehouseFullPermissions,
+  getStaffAllowedWarehouses,
+  hasMultiWarehouseManagementGrant,
+} from './businessLogic';
 import type { AuditLogEntry, BackupEntry, SaleTransaction } from '../types';
 
 function makeBasePayload(): RtdbWorkspacePayload {
@@ -346,4 +357,115 @@ test('Web <-> Phone dual Cloud sync: destructive empty-overwrite guard, Firebase
     []
   );
   assert.equal(visibleOnPhone.length, 13);
+});
+
+test('Deletion tombstones & Storage sync: deleted records NEVER resurrect from older Firebase Storage snapshots and restore works', () => {
+  const olderStorageSnap = buildRecoveredVtnnTamAn99Workspace('TÂM AN VTNNTAMAN99');
+  // Simulate Admin deleting HD-2611-001 (sale_v99_hd001_tt) and PN-2611-001 (imp_v99_pn001) on Web/Phone
+  const deletedAtIso = '2026-11-26T10:32:32.000Z';
+  const newerRtdbSnap: RtdbWorkspacePayload = {
+    ...olderStorageSnap,
+    meta: { ...olderStorageSnap.meta, updatedAt: deletedAtIso },
+    sales: olderStorageSnap.sales.filter((s) => s.id !== 'sale_v99_hd001_tt'),
+    imports: olderStorageSnap.imports.filter((i) => i.id !== 'imp_v99_pn001'),
+    settings: {
+      ...olderStorageSnap.settings,
+      deletedRecords: [
+        { id: 'sale_v99_hd001_tt', deletedAt: deletedAtIso },
+        { id: 'imp_v99_pn001', deletedAt: deletedAtIso },
+      ],
+    },
+  };
+
+  // Even when merging newer RTDB with stale Storage snapshot that still has deleted records, deleted items MUST stay gone
+  const merged1 = mergeWorkspacePayloads(newerRtdbSnap, olderStorageSnap, VTNNTAMAN99_UID);
+  assert.ok(merged1);
+  assert.equal(merged1.sales.some((s) => s.id === 'sale_v99_hd001_tt'), false);
+  assert.equal(merged1.imports.some((i) => i.id === 'imp_v99_pn001'), false);
+  assert.equal(merged1.sales.length, 12);
+  assert.equal(merged1.imports.length, 2);
+
+  // Even if timestamps are equal, tombstones still strip deleted items cleanly
+  const sameTsStorage: RtdbWorkspacePayload = {
+    ...olderStorageSnap,
+    meta: { ...olderStorageSnap.meta, updatedAt: deletedAtIso },
+  };
+  const merged2 = mergeWorkspacePayloads(sameTsStorage, newerRtdbSnap, VTNNTAMAN99_UID);
+  assert.ok(merged2);
+  assert.equal(merged2.sales.some((s) => s.id === 'sale_v99_hd001_tt'), false);
+  assert.equal(merged2.imports.some((i) => i.id === 'imp_v99_pn001'), false);
+
+  // If Admin explicitly restores a deleted item later with updatedAt > deletedAt, filterOutDeletedRecords allows it back
+  const tombstones = mergeDeletionTombstones(newerRtdbSnap.settings.deletedRecords);
+  const restoredSale = {
+    ...olderStorageSnap.sales.find((s) => s.id === 'sale_v99_hd001_tt')!,
+    updatedAt: '2026-11-26T11:00:00.000Z',
+  };
+  const afterRestore = filterOutDeletedRecords([restoredSale], tombstones);
+  assert.equal(afterRestore.length, 1);
+});
+
+test('Multi-warehouse RBAC: ONLY Primary Admin & designated multi-warehouse managers can edit/delete vouchers', () => {
+  const allWhs = [
+    'TÂM AN PHUCANTAMGROUP',
+    'TÂM AN NHÂN QUẢ 3',
+    'TÂM AN HONGHUY2802',
+    'TÂM AN TTNHON55555',
+    'TÂM AN MỸ NGÃI',
+  ];
+
+  // 1. Regular single-warehouse account (even if stale edit_delete_vouchers existed in legacy storage)
+  const singleWhUser = normalizeIndependentWarehouseStaffMember({
+    uid: 'uid_tuan',
+    username: 'tuanngacm_230',
+    password: '',
+    displayName: 'Tuấn',
+    phone: '',
+    email: 'tuanngacm@gmail.com',
+    role: 'manager',
+    positionRole: 'warehouse_manager',
+    permissions: [...getIndependentWarehouseFullPermissions(), 'edit_delete_vouchers'],
+    assignedWarehouse: 'TÂM AN TUANNGACM',
+    active: true,
+    createdAt: '2026-11-26T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  });
+  assert.equal(hasMultiWarehouseManagementGrant(singleWhUser), false);
+  assert.equal(singleWhUser.role, 'staff');
+  assert.equal(singleWhUser.permissions?.includes('edit_delete_vouchers'), false);
+  const singleScope = evaluateStaffAccessScope(singleWhUser);
+  assert.equal(singleScope.canEditDeleteVouchers, false);
+  assert.equal(canStaffFilterMultiWarehouses(singleWhUser), false);
+
+  // 2. Same account after Primary Admin grants 4 designated warehouses
+  const multiWhUser = normalizeIndependentWarehouseStaffMember({
+    ...singleWhUser,
+    role: 'manager',
+    assignedWarehouse: 'TÂM AN PHUCANTAMGROUP',
+    assignedWarehouses: [
+      'TÂM AN PHUCANTAMGROUP',
+      'TÂM AN NHÂN QUẢ 3',
+      'TÂM AN HONGHUY2802',
+      'TÂM AN TTNHON55555',
+    ],
+    multiWarehouseGrantedByAdmin: true,
+    permissions: [...getIndependentWarehouseFullPermissions(), 'edit_delete_vouchers'],
+  });
+  assert.equal(hasMultiWarehouseManagementGrant(multiWhUser), true);
+  assert.equal(multiWhUser.role, 'manager');
+  assert.equal(multiWhUser.permissions?.includes('edit_delete_vouchers'), true);
+  const multiScope = evaluateStaffAccessScope(multiWhUser);
+  assert.equal(multiScope.canEditDeleteVouchers, true);
+  assert.equal(canStaffFilterMultiWarehouses(multiWhUser), true);
+
+  // Allowed warehouses strictly scoped to the 4 granted warehouses (NOT 'TÂM AN MỸ NGÃI')
+  const allowed = getStaffAllowedWarehouses(multiWhUser, allWhs);
+  assert.equal(allowed.length, 4);
+  assert.equal(allowed.includes('TÂM AN MỸ NGÃI'), false);
+  assert.equal(formatSelectedWarehousesBadge(multiWhUser, allWhs, []), '4 kho được cấp');
+
+  const sampleRecs = allWhs.map((w, idx) => ({ id: `r${idx}`, warehouseName: w }));
+  const filtered = filterRecordsBySelectedWarehouses(sampleRecs, multiWhUser, allWhs, []);
+  assert.equal(filtered.length, 4);
+  assert.equal(filtered.some((r) => r.warehouseName === 'TÂM AN MỸ NGÃI'), false);
 });

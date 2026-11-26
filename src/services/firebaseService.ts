@@ -1963,11 +1963,26 @@ export function isRealtimeWorkspaceLegacyLayout(uid: string): boolean {
 const lastStorageWorkspaceFpByUid = new Map<string, string>();
 const lastStorageWriteAtByUid = new Map<string, number>();
 const inFlightStorageWriteByUid = new Set<string>();
+const pendingStorageWriteByUid = new Map<
+  string,
+  {
+    payload: RtdbWorkspacePayload;
+    options?: {
+      prevPayload?: RtdbWorkspacePayload | null;
+      allowIntentionalWipe?: boolean;
+      force?: boolean;
+      allowMultiWarehouseManager?: boolean;
+    };
+  }
+>();
+const pendingStorageTimerByUid = new Map<string, ReturnType<typeof setTimeout>>();
 const STORAGE_WRITE_COOLDOWN_MS = 25000;
 
 let lastAdminSummaryFp = '';
 let lastAdminSummaryWriteAt = 0;
 let inFlightAdminSummaryWrite = false;
+let pendingAdminSummary: AdminWarehouseAccountSummary[] | null = null;
+let pendingAdminSummaryTimer: ReturnType<typeof setTimeout> | null = null;
 
 export async function writeWorkspaceToFirebaseStorage(
   ownerUid: string,
@@ -1976,12 +1991,17 @@ export async function writeWorkspaceToFirebaseStorage(
     prevPayload?: RtdbWorkspacePayload | null;
     allowIntentionalWipe?: boolean;
     force?: boolean;
+    allowMultiWarehouseManager?: boolean;
   }
 ): Promise<boolean> {
   const user = auth.currentUser;
   if (!user || !ownerUid) return false;
   const safeUid = sanitizeFirestoreId(ownerUid);
-  if (user.uid !== safeUid && !isCurrentUserAdmin(user)) {
+  if (
+    user.uid !== safeUid &&
+    !isCurrentUserAdmin(user) &&
+    !options?.allowMultiWarehouseManager
+  ) {
     return false;
   }
 
@@ -2004,22 +2024,62 @@ export async function writeWorkspaceToFirebaseStorage(
     return false;
   }
 
+  const recordCount = countWorkspaceBusinessRecords(normalizedPayload);
+  const prevRecordCount = countWorkspaceBusinessRecords(options?.prevPayload);
+  const prevDeletedCount = options?.prevPayload?.settings?.deletedRecords?.length || 0;
+  const nextDeletedCount = normalizedPayload.settings?.deletedRecords?.length || 0;
+  const isDeletionSync =
+    Boolean(options?.allowIntentionalWipe) ||
+    nextDeletedCount > prevDeletedCount ||
+    (Boolean(options?.prevPayload) && recordCount < prevRecordCount);
+  const bypassCooldown = Boolean(options?.force || isDeletionSync);
+
   const fp = computeWorkspaceFingerprint(normalizedPayload);
   const nowMs = Date.now();
-  if (!options?.force) {
-    if (lastStorageWorkspaceFpByUid.get(safeUid) === fp) {
-      return true;
-    }
-    if (inFlightStorageWriteByUid.has(safeUid)) {
-      return false;
-    }
-    const lastWrite = lastStorageWriteAtByUid.get(safeUid) || 0;
-    if (nowMs - lastWrite < STORAGE_WRITE_COOLDOWN_MS) {
-      return false;
-    }
+  if (!bypassCooldown && lastStorageWorkspaceFpByUid.get(safeUid) === fp) {
+    return true;
   }
 
-  const recordCount = countWorkspaceBusinessRecords(normalizedPayload);
+  // If an upload is currently in-flight for this UID, queue this latest payload so it flushes right after!
+  if (inFlightStorageWriteByUid.has(safeUid)) {
+    pendingStorageWriteByUid.set(safeUid, {
+      payload: normalizedPayload,
+      options: { ...options, force: bypassCooldown },
+    });
+    return false;
+  }
+
+  // Respect cooldown for routine non-delete edits, BUT schedule a trailing flush instead of dropping!
+  const lastWrite = lastStorageWriteAtByUid.get(safeUid) || 0;
+  const elapsed = nowMs - lastWrite;
+  if (!bypassCooldown && elapsed < STORAGE_WRITE_COOLDOWN_MS) {
+    pendingStorageWriteByUid.set(safeUid, { payload: normalizedPayload, options });
+    if (!pendingStorageTimerByUid.has(safeUid)) {
+      const waitMs = Math.max(800, STORAGE_WRITE_COOLDOWN_MS - elapsed);
+      const timer = setTimeout(() => {
+        pendingStorageTimerByUid.delete(safeUid);
+        const queued = pendingStorageWriteByUid.get(safeUid);
+        if (queued) {
+          pendingStorageWriteByUid.delete(safeUid);
+          void writeWorkspaceToFirebaseStorage(safeUid, queued.payload, {
+            ...queued.options,
+            force: true,
+          });
+        }
+      }, waitMs);
+      pendingStorageTimerByUid.set(safeUid, timer);
+    }
+    return false;
+  }
+
+  // Clear any older pending timer since we are uploading the freshest snapshot now
+  const existingTimer = pendingStorageTimerByUid.get(safeUid);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    pendingStorageTimerByUid.delete(safeUid);
+  }
+  pendingStorageWriteByUid.delete(safeUid);
+
   const paths = buildStorageWorkspacePaths({
     uid: safeUid,
     email: normalizedPayload.meta?.ownerEmail,
@@ -2050,7 +2110,8 @@ export async function writeWorkspaceToFirebaseStorage(
     const targetPaths: string[] = [paths.uidPath];
     if (paths.emailPath) targetPaths.push(paths.emailPath);
     if (paths.warehousePath) targetPaths.push(paths.warehousePath);
-    if (recordCount > 0) {
+    // Always overwrite backupPath on deletions / intentional wipes too so stale deleted items never survive
+    if (recordCount > 0 || isDeletionSync) {
       targetPaths.push(paths.backupPath);
     }
 
@@ -2062,6 +2123,15 @@ export async function writeWorkspaceToFirebaseStorage(
     return results.some((r) => r.status === 'fulfilled');
   } finally {
     inFlightStorageWriteByUid.delete(safeUid);
+    // Flush any newer snapshot queued while this upload was in flight
+    const queued = pendingStorageWriteByUid.get(safeUid);
+    if (queued) {
+      pendingStorageWriteByUid.delete(safeUid);
+      void writeWorkspaceToFirebaseStorage(safeUid, queued.payload, {
+        ...queued.options,
+        force: true,
+      });
+    }
   }
 }
 
@@ -2083,18 +2153,24 @@ export async function readWorkspaceFromFirebaseStorage(params: {
   if (rawPrimary && typeof rawPrimary === 'object') {
     const normPrimary = normalizeWorkspaceFromRtdb(rawPrimary, safeUid);
     lastStorageWorkspaceFpByUid.set(safeUid, computeWorkspaceFingerprint(normPrimary));
-    if (countWorkspaceBusinessRecords(normPrimary) > 0) {
+    if (
+      countWorkspaceBusinessRecords(normPrimary) > 0 ||
+      (normPrimary.settings?.deletedRecords?.length || 0) > 0
+    ) {
       return normPrimary;
     }
   }
 
-  // Fallback to emailPath only if uidPath was missing or empty
+  // Fallback to emailPath only if uidPath was missing or completely uninitialized
   if (paths.emailPath) {
     const rawEmail = await readJsonFromFirebaseStoragePath<unknown>(paths.emailPath);
     if (rawEmail && typeof rawEmail === 'object') {
       const normEmail = normalizeWorkspaceFromRtdb(rawEmail, safeUid);
       lastStorageWorkspaceFpByUid.set(safeUid, computeWorkspaceFingerprint(normEmail));
-      if (countWorkspaceBusinessRecords(normEmail) > 0) {
+      if (
+        countWorkspaceBusinessRecords(normEmail) > 0 ||
+        (normEmail.settings?.deletedRecords?.length || 0) > 0
+      ) {
         return normEmail;
       }
     }
@@ -2104,7 +2180,8 @@ export async function readWorkspaceFromFirebaseStorage(params: {
 }
 
 export async function writeAdminWorkspacesIndexToFirebaseStorage(
-  summaries: AdminWarehouseAccountSummary[]
+  summaries: AdminWarehouseAccountSummary[],
+  force = false
 ): Promise<boolean> {
   const user = auth.currentUser;
   if (!user || !isCurrentUserAdmin(user)) return false;
@@ -2121,14 +2198,34 @@ export async function writeAdminWorkspacesIndexToFirebaseStorage(
     }))
   );
   const nowMs = Date.now();
-  if (
-    comparableFp === lastAdminSummaryFp ||
-    inFlightAdminSummaryWrite ||
-    nowMs - lastAdminSummaryWriteAt < 30000
-  ) {
+  if (!force && comparableFp === lastAdminSummaryFp) {
+    return true;
+  }
+  if (inFlightAdminSummaryWrite) {
+    pendingAdminSummary = summaries;
+    return false;
+  }
+  const elapsed = nowMs - lastAdminSummaryWriteAt;
+  if (!force && elapsed < 15000) {
+    pendingAdminSummary = summaries;
+    if (!pendingAdminSummaryTimer) {
+      pendingAdminSummaryTimer = setTimeout(() => {
+        pendingAdminSummaryTimer = null;
+        if (pendingAdminSummary) {
+          const next = pendingAdminSummary;
+          pendingAdminSummary = null;
+          void writeAdminWorkspacesIndexToFirebaseStorage(next, true);
+        }
+      }, Math.max(800, 15000 - elapsed));
+    }
     return true;
   }
 
+  if (pendingAdminSummaryTimer) {
+    clearTimeout(pendingAdminSummaryTimer);
+    pendingAdminSummaryTimer = null;
+  }
+  pendingAdminSummary = null;
   lastAdminSummaryFp = comparableFp;
   lastAdminSummaryWriteAt = nowMs;
   inFlightAdminSummaryWrite = true;
@@ -2160,6 +2257,11 @@ export async function writeAdminWorkspacesIndexToFirebaseStorage(
     return false;
   } finally {
     inFlightAdminSummaryWrite = false;
+    if (pendingAdminSummary) {
+      const next = pendingAdminSummary;
+      pendingAdminSummary = null;
+      void writeAdminWorkspacesIndexToFirebaseStorage(next, true);
+    }
   }
 }
 
@@ -2167,12 +2269,20 @@ export async function writeRealtimeWorkspace(
   ownerUid: string,
   payload: RtdbWorkspacePayload,
   prevPayload: RtdbWorkspacePayload | null = null,
-  allowIntentionalWipe = false
+  allowIntentionalWipe = false,
+  options?: {
+    forceStorage?: boolean;
+    allowMultiWarehouseManager?: boolean;
+  }
 ): Promise<boolean> {
   const user = auth.currentUser;
   if (!user || !ownerUid) return false;
   const safeUid = sanitizeFirestoreId(ownerUid);
-  if (user.uid !== safeUid && !isCurrentUserAdmin(user)) {
+  if (
+    user.uid !== safeUid &&
+    !isCurrentUserAdmin(user) &&
+    !options?.allowMultiWarehouseManager
+  ) {
     return false;
   }
 
@@ -2208,15 +2318,57 @@ export async function writeRealtimeWorkspace(
     }
 
     // Mirror live workspace to Firebase Storage (/documents/workspaces/ & /backups/{uid}/)
+    // Deletions and forced syncs bypass cooldown and overwrite Storage immediately!
     void writeWorkspaceToFirebaseStorage(safeUid, normalizedPayload, {
       prevPayload,
       allowIntentionalWipe,
+      force: options?.forceStorage,
+      allowMultiWarehouseManager: options?.allowMultiWarehouseManager,
     });
     return true;
   } catch (err) {
     console.warn('writeRealtimeWorkspace warning:', err instanceof Error ? err.message : err);
     return false;
   }
+}
+
+export function subscribeToDesignatedRealtimeWorkspaces(
+  ownerUids: string[],
+  onWorkspacesMap: (workspacesMap: Record<string, unknown>) => void
+): () => void {
+  const user = auth.currentUser;
+  const uniqueUids = Array.from(new Set(ownerUids.map((u) => sanitizeFirestoreId(u)).filter(Boolean)));
+  if (!user || uniqueUids.length === 0) return () => {};
+
+  const currentMap: Record<string, unknown> = {};
+  const unsubs = uniqueUids.map((safeUid) => {
+    const wsRef = rtdbRef(rtdb, `workspaces/${safeUid}`);
+    const cb = onValue(
+      wsRef,
+      (snap) => {
+        if (snap.exists()) {
+          const rawVal = snap.val();
+          if (isLegacyArrayWorkspaceLayout(rawVal)) {
+            legacyLayoutOwnerUids.add(safeUid);
+          } else {
+            legacyLayoutOwnerUids.delete(safeUid);
+          }
+          currentMap[safeUid] = rawVal;
+        } else {
+          delete currentMap[safeUid];
+        }
+        onWorkspacesMap({ ...currentMap });
+      },
+      (err) => {
+        console.warn(`subscribeToDesignatedRealtimeWorkspaces(${safeUid}) warning:`, err.message);
+      }
+    );
+    return () => off(wsRef, 'value', cb);
+  });
+
+  return () => {
+    unsubs.forEach((u) => u());
+  };
 }
 
 export function subscribeToRealtimeWorkspace(
