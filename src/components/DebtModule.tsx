@@ -8,6 +8,7 @@ import {
   Lock,
   MessageCircle,
   Pencil,
+  QrCode,
   Search,
   Trash2,
   Users,
@@ -20,6 +21,7 @@ import {
   ProductItem,
   SaleTransaction,
   UserRole,
+  VietQrBankConfig,
 } from '../types';
 import {
   buildZaloDebtReminderMessage,
@@ -41,6 +43,7 @@ import {
   exportSupplierPaymentPDF,
 } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
+import { VietQrPaymentModal } from './VietQrPaymentModal';
 
 interface DebtModuleProps {
   products: ProductItem[];
@@ -110,6 +113,8 @@ interface DebtModuleProps {
     note: string;
   }) => void;
   storeName?: string;
+  bankQrConfig?: VietQrBankConfig | null;
+  onSaveBankQrConfig?: (config: VietQrBankConfig) => void;
   onShowToast?: (msg: string) => void;
 }
 
@@ -136,6 +141,8 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   onSettleCustomerTotalDebtFifo,
   onSettleSupplierTotalDebtFifo,
   storeName = 'VTNN Tâm An',
+  bankQrConfig,
+  onSaveBankQrConfig,
   onShowToast,
 }) => {
   const [activeTab, setActiveTab] = useState<'supplier' | 'customer'>(
@@ -215,6 +222,14 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   const [settlingMaxDebt, setSettlingMaxDebt] = useState<number>(0);
   const [paymentAmount, setPaymentAmount] = useState<string>('');
   const [paymentNote, setPaymentNote] = useState<string>('');
+  const [vietQrTarget, setVietQrTarget] = useState<{
+    title: string;
+    subtitle: string;
+    amount: number;
+    addInfo: string;
+    customerPhone?: string;
+    zaloMessage?: string;
+  } | null>(null);
 
   // Manager-only Quick Edit Debt Record Modal
   const [editingDebtType, setEditingDebtType] = useState<'supplier' | 'customer' | null>(null);
@@ -267,6 +282,39 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
       : customerDebts,
     todayStr
   );
+
+  const handleOpenCustomerDebtQr = (sale: SaleTransaction, customAmount?: number) => {
+    const qrAmt = customAmount && customAmount > 0 ? customAmount : sale.debtAmount;
+    const matchingUnpaid = customerDebts.filter(
+      (s) =>
+        (sale.customerId && s.customerId === sale.customerId) ||
+        (sale.customerPhone && s.customerPhone === sale.customerPhone) ||
+        s.customerName === sale.customerName
+    );
+    const totalCustDebt = matchingUnpaid.reduce((sum, s) => sum + s.debtAmount, 0);
+    const { message } = buildZaloDebtReminderMessage({
+      storeName,
+      customerName: sale.customerName,
+      customerPhone: sale.customerPhone,
+      totalDebt: totalCustDebt,
+      unpaidInvoices: matchingUnpaid.map((s) => ({
+        invoiceCode: s.invoiceCode,
+        date: s.createdAt.slice(0, 10),
+        productName: s.productName,
+        debtAmount: s.debtAmount,
+        dueDate: s.dueDate,
+      })),
+      todayStr,
+    });
+    setVietQrTarget({
+      title: `VietQR thu nợ ${sale.customerName}`,
+      subtitle: `Hóa đơn ${sale.invoiceCode} · Còn nợ ${formatVND(sale.debtAmount)}`,
+      amount: qrAmt,
+      addInfo: `THU NO ${sale.invoiceCode} ${sale.customerName}`,
+      customerPhone: sale.customerPhone,
+      zaloMessage: message,
+    });
+  };
 
   const handleSendZaloReminder = (sale: SaleTransaction) => {
     const matchingUnpaid = customerDebts.filter(
@@ -1896,6 +1944,15 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           <MessageCircle className="w-3 h-3" />
                           <span>Nhắc nợ Zalo</span>
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenCustomerDebtQr(sale)}
+                          aria-label={`Hiện mã VietQR thu nợ ${sale.customerName}`}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <QrCode className="w-3 h-3" />
+                          <span>VietQR</span>
+                        </button>
                       </div>
 
                       {canPerformRoleAction(role, 'edit_record') ? (
@@ -2082,6 +2139,15 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             >
                               <MessageCircle className="w-3 h-3" />
                               <span>Nhắc nợ Zalo</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCustomerDebtQr(sale)}
+                              aria-label={`Hiện mã VietQR thu nợ ${sale.customerName}`}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg flex items-center gap-1 whitespace-nowrap"
+                            >
+                              <QrCode className="w-3 h-3" />
+                              <span>VietQR</span>
                             </button>
                             {canPerformRoleAction(role, 'edit_record') ? (
                               <>
@@ -2409,6 +2475,24 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
               </div>
 
               <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex flex-wrap items-center justify-end gap-2 shrink-0">
+                {settlingType === 'customer' && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setVietQrTarget({
+                        title: `VietQR thu nợ ${settlingPartner}`,
+                        subtitle: `Hóa đơn ${settlingCode}`,
+                        amount: Math.max(0, Number(paymentAmount) || settlingMaxDebt),
+                        addInfo: `THU NO ${settlingCode} ${settlingPartner}`,
+                        customerPhone: settlingPhone,
+                      })
+                    }
+                    className="px-3 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg flex items-center gap-1 mr-auto"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Hiện QR thu nợ</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setSettlingType(null)}
@@ -2435,6 +2519,20 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
           </div>
         </div>
       )}
+
+      <VietQrPaymentModal
+        isOpen={Boolean(vietQrTarget)}
+        onClose={() => setVietQrTarget(null)}
+        title={vietQrTarget?.title}
+        subtitle={vietQrTarget?.subtitle}
+        amount={vietQrTarget?.amount || 0}
+        addInfo={vietQrTarget?.addInfo || ''}
+        customerPhone={vietQrTarget?.customerPhone}
+        zaloMessage={vietQrTarget?.zaloMessage}
+        bankConfig={bankQrConfig}
+        onSaveBankConfig={onSaveBankQrConfig}
+        onNotifyToast={onShowToast}
+      />
     </div>
   );
 };

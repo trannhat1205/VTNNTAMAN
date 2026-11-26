@@ -12,6 +12,7 @@ import {
   StaffMember,
   StockAdjustmentRecord,
   SupplierProfile,
+  VietQrBankConfig,
 } from '../types';
 import {
   ADMIN_BACKUP_EMAIL,
@@ -50,6 +51,7 @@ export interface WorkspacePersistedState {
   paymentGroups: string[];
   staffList: StaffMember[];
   notificationPrefs: NotificationPrefs;
+  bankQrConfig?: VietQrBankConfig;
   autoDailyBackupEnabled: boolean;
 }
 

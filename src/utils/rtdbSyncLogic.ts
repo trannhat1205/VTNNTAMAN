@@ -12,6 +12,7 @@ import {
   StaffMember,
   StockAdjustmentRecord,
   SupplierProfile,
+  VietQrBankConfig,
 } from '../types';
 import {
   ADMIN_BACKUP_EMAIL,
@@ -48,6 +49,7 @@ export interface RtdbWorkspaceSettings {
   receiptGroups: string[];
   paymentGroups: string[];
   notificationPrefs: NotificationPrefs;
+  bankQrConfig?: VietQrBankConfig;
   autoDailyBackupEnabled: boolean;
 }
 
@@ -355,6 +357,9 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
         ...DEFAULT_NOTIFICATION_PREFS,
         ...rawPrefs,
       },
+      ...(rawSettings.bankQrConfig && typeof rawSettings.bankQrConfig === 'object'
+        ? { bankQrConfig: rawSettings.bankQrConfig as VietQrBankConfig }
+        : {}),
       autoDailyBackupEnabled:
         typeof rawSettings.autoDailyBackupEnabled === 'boolean'
           ? rawSettings.autoDailyBackupEnabled

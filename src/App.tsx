@@ -18,6 +18,7 @@ import {
   Menu,
   MessageCircle,
   Printer,
+  RefreshCw,
   ShieldCheck,
   ShoppingCart,
   Smartphone,
@@ -26,6 +27,7 @@ import {
   Users,
   Wallet,
   Warehouse,
+  WifiOff,
   X,
 } from 'lucide-react';
 import {
@@ -50,7 +52,17 @@ import {
   StockAdjustmentRecord,
   SupplierProfile,
   UserRole,
+  VietQrBankConfig,
 } from './types';
+import {
+  allocatePaymentAcrossCartItems,
+  clearOfflineQueueStorage,
+  enqueueOfflineQueueItem,
+  loadOfflineQueue,
+  OfflineQueueItem,
+  PosCartDraftItem,
+  validateCartInventory,
+} from './utils/smartPosFeatures';
 import {
   ADMIN_BACKUP_EMAIL,
   ADMIN_PRIMARY_PHONE,
@@ -335,6 +347,14 @@ export default function App() {
   const [notificationPrefs, setNotificationPrefs] = useState<NotificationPrefs>(
     initialWorkspace.notificationPrefs
   );
+  const [bankQrConfig, setBankQrConfig] = useState<VietQrBankConfig | undefined>(
+    initialWorkspace.bankQrConfig
+  );
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [offlineQueue, setOfflineQueue] = useState<OfflineQueueItem[]>(() => loadOfflineQueue());
+  const [isFlushingOfflineQueue, setIsFlushingOfflineQueue] = useState(false);
   const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
   const [readNotifIds, setReadNotifIds] = useState<Set<string>>(new Set());
   const [toastBanner, setToastBanner] = useState<string | null>(null);
@@ -415,6 +435,7 @@ export default function App() {
       paymentGroups,
       staffList,
       notificationPrefs,
+      bankQrConfig,
       autoDailyBackupEnabled,
     });
   }, [
@@ -436,6 +457,7 @@ export default function App() {
     paymentGroups,
     staffList,
     notificationPrefs,
+    bankQrConfig,
     autoDailyBackupEnabled,
   ]);
 
@@ -463,6 +485,9 @@ export default function App() {
         setPaymentGroups(parsed.paymentGroups);
         setStaffList(sanitizeStaffListForStorage(parsed.staffList));
         setNotificationPrefs(parsed.notificationPrefs);
+        if (parsed.bankQrConfig) {
+          setBankQrConfig(parsed.bankQrConfig);
+        }
       } catch {
         // ignore invalid storage payload
       }
@@ -976,6 +1001,7 @@ export default function App() {
     paymentGroups,
     staffList,
     notificationPrefs,
+    bankQrConfig,
     autoDailyBackupEnabled,
   });
   latestWorkspaceRef.current = {
@@ -997,8 +1023,93 @@ export default function App() {
     paymentGroups,
     staffList,
     notificationPrefs,
+    bankQrConfig,
     autoDailyBackupEnabled,
   };
+
+  // Offline Queue: Monitor browser online/offline transitions
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => {
+      setIsOnline(false);
+      showToast(
+        'Đang ở chế độ Ngoại tuyến — Mọi đơn bán & giao dịch vẫn được lưu an toàn trên thiết bị và sẽ tự đồng bộ khi có mạng!'
+      );
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  const trackOfflineOperation = (
+    actionType: OfflineQueueItem['actionType'],
+    label: string,
+    warehouseName?: string
+  ) => {
+    if (!isOnline || rtdbSyncState === 'offline') {
+      setOfflineQueue((prev) =>
+        enqueueOfflineQueueItem(prev, {
+          actionType,
+          label,
+          warehouseName,
+        })
+      );
+    }
+  };
+
+  const handleFlushOfflineQueueNow = () => {
+    if (isFlushingOfflineQueue) return;
+    if (!isOnline) {
+      showToast('Thiết bị vẫn đang mất kết nối mạng. Vui lòng bật 4G/Wi-Fi để đồng bộ.');
+      return;
+    }
+    const pendingCount = offlineQueue.length;
+    setIsFlushingOfflineQueue(true);
+    try {
+      // Force fresh RTDB + Firebase Storage upload for current account
+      rtdbLastFingerprintsRef.current = {};
+      rtdbSuppressNextWriteRef.current = false;
+      setRtdbWriteTrigger((n) => n + 1);
+      clearOfflineQueueStorage();
+      setOfflineQueue([]);
+      showToast(
+        pendingCount > 0
+          ? `Đã đồng bộ thành công ${pendingCount} thao tác ngoại tuyến lên Firebase Realtime DB & Storage!`
+          : 'Đã kích hoạt đồng bộ đám mây thành công!'
+      );
+    } finally {
+      window.setTimeout(() => setIsFlushingOfflineQueue(false), 1200);
+    }
+  };
+
+  // Automatically flush queued offline operations once connectivity + Realtime DB live return
+  useEffect(() => {
+    if (
+      !isOnline ||
+      rtdbSyncState !== 'live' ||
+      !isSessionLoggedIn ||
+      !isGoogleAuthenticated ||
+      offlineQueue.length === 0 ||
+      isFlushingOfflineQueue
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      handleFlushOfflineQueueNow();
+    }, 900);
+    return () => window.clearTimeout(timer);
+  }, [
+    isOnline,
+    rtdbSyncState,
+    isSessionLoggedIn,
+    isGoogleAuthenticated,
+    offlineQueue.length,
+    isFlushingOfflineQueue,
+  ]);
 
   // Monitor Firebase RTDB connection state (.info/connected)
   useEffect(() => {
@@ -1469,6 +1580,13 @@ export default function App() {
             : unifiedWs.settings.notificationPrefs
         );
       }
+      if (unifiedWs.settings.bankQrConfig) {
+        setBankQrConfig((prev) =>
+          JSON.stringify(prev) === JSON.stringify(unifiedWs.settings.bankQrConfig)
+            ? prev
+            : unifiedWs.settings.bankQrConfig
+        );
+      }
 
       if (isLegacy || rtdbNeedsHeal) {
         setRtdbWriteTrigger((n) => n + 1);
@@ -1554,6 +1672,7 @@ export default function App() {
         receiptGroups,
         paymentGroups,
         notificationPrefs,
+        ...(bankQrConfig ? { bankQrConfig } : {}),
         autoDailyBackupEnabled,
       };
 
@@ -1663,6 +1782,7 @@ export default function App() {
     paymentGroups,
     staffList,
     notificationPrefs,
+    bankQrConfig,
     autoDailyBackupEnabled,
     rtdbWriteTrigger,
   ]);
@@ -1852,6 +1972,7 @@ export default function App() {
     giftUnit?: string;
     giftQuantity?: number;
     giftUnitCost?: number;
+    dosageGuide?: string;
   }): SaleTransaction => {
     const nowIso = new Date().toISOString();
     const { updatedProducts, updatedProduct, updatedGiftProduct } = applySaleToInventory(
@@ -1910,6 +2031,7 @@ export default function App() {
       giftUnitCost:
         payload.giftUnitCost ??
         (updatedGiftProduct ? updatedGiftProduct.importPrice : 0),
+      dosageGuide: payload.dosageGuide?.trim() || undefined,
       note: payload.note,
       warehouseName:
         lockedWarehouse ||
@@ -1979,7 +2101,167 @@ export default function App() {
       }
       void syncSaleToFirestore(newSale, true, updatedProduct);
     }
+    trackOfflineOperation(
+      'sale',
+      `Hóa đơn ${newSale.invoiceCode} · ${newSale.customerName} (${formatVND(newSale.totalAmount)})`,
+      newSale.warehouseName
+    );
     return newSale;
+  };
+
+  const handleSaveBankQrConfig = (nextConfig: VietQrBankConfig) => {
+    setBankQrConfig(nextConfig);
+    trackOfflineOperation(
+      'settings',
+      `Cấu hình VietQR ${nextConfig.bankCode} - ${nextConfig.accountNumber}`,
+      lockedWarehouse || currentStaff.assignedWarehouse
+    );
+  };
+
+  const handleCreateMultiItemSale = (payload: {
+    customerId: string;
+    customerName: string;
+    customerPhone: string;
+    warehouseName: string;
+    dueDate: string;
+    note: string;
+    totalPaidAmount: number;
+    items: PosCartDraftItem[];
+  }): SaleTransaction[] => {
+    const invCheck = validateCartInventory(productsRef.current, payload.items);
+    if (!invCheck.valid) {
+      throw new Error(invCheck.error || 'Tồn kho không đủ cho giỏ hàng POS.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const sharedInvoiceCode = generateSequentialVoucherCode(
+      'HD',
+      sales.map((s) => s.invoiceCode)
+    );
+    const sharedGroupId = `invgrp_${Date.now()}`;
+    const allocation = allocatePaymentAcrossCartItems(payload.items, payload.totalPaidAmount);
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const resolvedWh = lockedWarehouse || payload.warehouseName || 'Tâm An Mỹ Ngãi';
+
+    let workingProducts = productsRef.current;
+    const createdSales: SaleTransaction[] = [];
+    const touchedProductsMap = new Map<string, ProductItem>();
+
+    allocation.items.forEach((line, idx) => {
+      const { updatedProducts, updatedProduct, updatedGiftProduct } = applySaleToInventory(
+        workingProducts,
+        line.productId,
+        line.quantity,
+        nowIso,
+        line.giftProductId,
+        line.giftQuantity || 0
+      );
+      workingProducts = updatedProducts;
+      touchedProductsMap.set(updatedProduct.id, updatedProduct);
+      if (updatedGiftProduct) {
+        touchedProductsMap.set(updatedGiftProduct.id, updatedGiftProduct);
+      }
+
+      const saleRow: SaleTransaction = {
+        id: `sale_${Date.now()}_${idx}`,
+        invoiceCode: sharedInvoiceCode,
+        invoiceGroupId: sharedGroupId,
+        customerId: payload.customerId,
+        customerName: payload.customerName,
+        customerPhone: payload.customerPhone,
+        productId: updatedProduct.id,
+        productName: updatedProduct.name,
+        unit: updatedProduct.unit,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        unitCost: Math.max(0, Math.round(updatedProduct.importPrice || 0)),
+        totalAmount: line.totalAmount,
+        paidAmount: line.paidAmount,
+        debtAmount: line.debtAmount,
+        dueDate: payload.dueDate,
+        status: line.status,
+        promotionType: line.promotionType || 'none',
+        discountAmount: line.discountAmount,
+        discountPercent: line.discountPercent || 0,
+        giftProductId: line.giftProductId,
+        giftProductName: line.giftProductName,
+        giftUnit: line.giftUnit,
+        giftQuantity: line.giftQuantity || 0,
+        giftUnitCost: updatedGiftProduct ? updatedGiftProduct.importPrice : 0,
+        dosageGuide: line.dosageGuide?.trim() || undefined,
+        note: payload.note,
+        warehouseName: resolvedWh,
+        staffName: currentStaff.displayName,
+        ownerId: activeUid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      createdSales.push(saleRow);
+    });
+
+    productsRef.current = workingProducts;
+    setProducts(workingProducts);
+    setSales((prev) => [...createdSales, ...prev]);
+
+    recordAuditLog({
+      actionCategory: 'create',
+      targetEntity: 'sale',
+      targetCode: sharedInvoiceCode,
+      warehouseName: resolvedWh,
+      summary: `Tạo hóa đơn POS ${sharedInvoiceCode} (${createdSales.length} mặt hàng) cho ${payload.customerName} (${formatVND(
+        allocation.netTotal
+      )})`,
+      details: `${createdSales
+        .map((s) => `${s.quantity} ${s.unit} ${s.productName}`)
+        .join(' + ')} · Đã thu: ${formatVND(allocation.totalPaid)} · Ghi nợ: ${formatVND(
+        allocation.totalDebt
+      )}`,
+      snapshotData: JSON.stringify(createdSales),
+    });
+
+    let updatedCustomerRef: CustomerProfile | undefined;
+    setCustomers((prev) =>
+      prev.map((c) => {
+        if (c.id !== payload.customerId) return c;
+        const nextCust = {
+          ...c,
+          totalPurchased: c.totalPurchased + allocation.netTotal,
+          totalDebt: c.totalDebt + allocation.totalDebt,
+          updatedAt: nowIso,
+        };
+        updatedCustomerRef = nextCust;
+        return nextCust;
+      })
+    );
+
+    showToast(
+      `Đã lưu hóa đơn POS ${sharedInvoiceCode} gồm ${createdSales.length} mặt hàng tại ${resolvedWh} (${formatVND(
+        allocation.netTotal
+      )})`
+    );
+
+    if (isGoogleAuthenticated) {
+      touchedProductsMap.forEach((prod) => {
+        void syncProductToFirestore(prod, false);
+      });
+      if (updatedCustomerRef) {
+        void syncCustomerToFirestore(updatedCustomerRef, false);
+      }
+      createdSales.forEach((s) => {
+        const prod = touchedProductsMap.get(s.productId);
+        void syncSaleToFirestore(s, true, prod);
+      });
+    }
+
+    trackOfflineOperation(
+      'multi_sale',
+      `Hóa đơn POS ${sharedInvoiceCode} (${createdSales.length} mặt hàng) · ${payload.customerName} (${formatVND(
+        allocation.netTotal
+      )})`,
+      resolvedWh
+    );
+
+    return createdSales;
   };
 
   const handleUpdateSale = (
@@ -2004,6 +2286,7 @@ export default function App() {
       giftUnit?: string;
       giftQuantity?: number;
       giftUnitCost?: number;
+      dosageGuide?: string;
     }
   ) => {
     if (!canPerformRoleAction(role, 'edit_record')) {
@@ -6322,6 +6605,40 @@ export default function App() {
             </div>
           </div>
 
+          {/* Offline Queue Status & Auto-Sync Banner (Desktop & Mobile) */}
+          {(!isOnline || offlineQueue.length > 0) && (
+            <div
+              className={`px-3 sm:px-5 py-2 border-t flex flex-wrap items-center justify-between gap-2 text-xs ${
+                !isOnline
+                  ? 'bg-amber-50 border-amber-200 text-amber-950'
+                  : 'bg-sky-50 border-sky-200 text-sky-950'
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <WifiOff className="w-4 h-4 shrink-0 text-amber-700" />
+                <span className="font-semibold">
+                  {!isOnline
+                    ? `Đang ở chế độ Ngoại tuyến — Hàng đợi an toàn trên máy (${offlineQueue.length} thao tác chờ đồng bộ khi có mạng)`
+                    : `Có ${offlineQueue.length} thao tác ngoại tuyến đang chờ đồng bộ lên Firebase`}
+                </span>
+                {offlineQueue[0] && (
+                  <span className="hidden lg:inline text-[11px] opacity-80 truncate max-w-[340px]">
+                    · Gần nhất: {offlineQueue[0].label}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={!isOnline || isFlushingOfflineQueue}
+                onClick={handleFlushOfflineQueueNow}
+                className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 text-white inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+              >
+                <RefreshCw className={`w-3 h-3 ${isFlushingOfflineQueue ? 'animate-spin' : ''}`} />
+                <span>{isFlushingOfflineQueue ? 'Đang đồng bộ...' : 'Đồng bộ ngay'}</span>
+              </button>
+            </div>
+          )}
+
           {/* Mobile Navigation Drawer — Kept inside sticky header so it opens at top even when scrolled down */}
           {mobileMenuOpen && (
             <div className="lg:hidden bg-white border-t border-slate-200 px-4 py-3 space-y-1 max-h-[calc(100vh-88px)] overflow-y-auto shadow-lg">
@@ -7016,6 +7333,10 @@ export default function App() {
               preselectedCustomerId={preselectedCustomerId}
               onClearPreselectedCustomer={() => setPreselectedCustomerId(null)}
               onCreateSale={handleCreateSale}
+              onCreateMultiItemSale={handleCreateMultiItemSale}
+              bankQrConfig={bankQrConfig}
+              onSaveBankQrConfig={handleSaveBankQrConfig}
+              onNotifyToast={showToast}
               onCreateCustomerInline={(data) => handleSaveCustomer(data)}
               onCreateProductInline={(data) => handleSaveProduct(data)}
               onImportSalesFromExcel={handleImportSalesFromExcel}
@@ -7142,6 +7463,8 @@ export default function App() {
               onUpdateImport={handleUpdateImport}
               onDeleteImport={handleDeleteImport}
               storeName={lockedWarehouse || (selectedFilterWarehouses.length === 1 ? selectedFilterWarehouses[0] : 'VTNN Tâm An')}
+              bankQrConfig={bankQrConfig}
+              onSaveBankQrConfig={handleSaveBankQrConfig}
               onShowToast={showToast}
             />
           )}
@@ -7205,6 +7528,7 @@ export default function App() {
               onDeleteVoucher={handleDeleteVoucher}
               currentStaffName={currentStaff.displayName}
               lockedWarehouse={lockedWarehouse}
+              bankQrConfig={bankQrConfig}
               onNotifyToast={showToast}
             />
           )}

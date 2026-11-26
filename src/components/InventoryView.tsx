@@ -51,6 +51,7 @@ import {
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
+import { DOSAGE_GUIDE_PRESETS } from '../utils/smartPosFeatures';
 
 interface InventoryViewProps {
   products: ProductItem[];
@@ -137,6 +138,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [batchNumber, setBatchNumber] = useState('');
   const [expiryDate, setExpiryDate] = useState('');
   const [barcode, setBarcode] = useState('');
+  const [dosageGuide, setDosageGuide] = useState('');
 
   // Stocktake Modal (Kiểm kê & Điều chỉnh tồn kho KK-YYMM-XXX)
   const [isStocktakeModalOpen, setIsStocktakeModalOpen] = useState(false);
@@ -315,6 +317,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setBatchNumber('');
     setExpiryDate('');
     setBarcode('');
+    setDosageGuide('');
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -342,6 +345,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setBatchNumber(p.batchNumber || '');
     setExpiryDate(p.expiryDate || '');
     setBarcode(p.barcode || '');
+    setDosageGuide(p.dosageGuide || '');
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -406,6 +410,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         batchNumber: batchNumber.trim() || undefined,
         expiryDate: expiryDate.trim() || undefined,
         barcode: barcode.trim() || undefined,
+        dosageGuide: dosageGuide.trim() || undefined,
       },
       editingProduct?.id
     );
@@ -1610,6 +1615,35 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </div>
               </div>
 
+              <div className="pt-1 space-y-1.5">
+                <label
+                  htmlFor="prod-dosage-guide"
+                  className="block text-xs font-semibold text-emerald-900"
+                >
+                  Hướng dẫn liều lượng &amp; cách pha phun mặc định (tự điền khi bán &amp; in kèm hóa đơn)
+                </label>
+                <textarea
+                  id="prod-dosage-guide"
+                  rows={2}
+                  value={dosageGuide}
+                  onChange={(e) => setDosageGuide(e.target.value)}
+                  placeholder="VD: Pha 25-30ml / bình 25 lít nước, phun đều tán lá lúc sáng sớm hoặc chiều mát..."
+                  className="w-full px-3 py-2 text-xs bg-white border border-emerald-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {DOSAGE_GUIDE_PRESETS.slice(0, 4).map((preset, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setDosageGuide(preset)}
+                      className="px-2 py-0.5 text-[11px] font-medium text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-full transition-colors text-left"
+                    >
+                      + {preset.length > 42 ? `${preset.slice(0, 42)}…` : preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               </div>
 
               <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2.5 shrink-0">
@@ -1669,6 +1703,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     Định mức tối thiểu: <strong className="font-mono">{detailProduct.minStock} {detailProduct.unit}</strong>
                   </span>
                 </div>
+                {detailProduct.dosageGuide && (
+                  <div className="mt-1.5 px-2.5 py-1.5 rounded-lg bg-white/90 border border-emerald-200 text-xs text-emerald-900">
+                    <span className="font-bold">Hướng dẫn liều lượng: </span>
+                    <span>{detailProduct.dosageGuide}</span>
+                  </div>
+                )}
               </div>
               <button
                 type="button"

@@ -45,6 +45,7 @@ export interface ProductItem {
   batchNumber?: string;
   expiryDate?: string;
   barcode?: string;
+  dosageGuide?: string;
   ownerId: string;
   createdAt: string;
   updatedAt: string;
@@ -72,6 +73,7 @@ export type SalePromotionType = 'none' | 'gift' | 'discount' | 'both';
 export interface SaleTransaction {
   id: string;
   invoiceCode: string;
+  invoiceGroupId?: string;
   customerId: string;
   customerName: string;
   customerPhone: string;
@@ -95,11 +97,21 @@ export interface SaleTransaction {
   giftUnit?: string;
   giftQuantity?: number;
   giftUnitCost?: number;
+  dosageGuide?: string;
   note: string;
   staffName: string;
   ownerId: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface VietQrBankConfig {
+  bankCode: string;
+  bankBin?: string;
+  accountNumber: string;
+  accountName: string;
+  template?: 'compact' | 'compact2' | 'qr_only' | 'print';
+  updatedAt?: string;
 }
 
 export interface ImportTransaction {

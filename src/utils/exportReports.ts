@@ -9,7 +9,14 @@ import {
   ReportModuleCategory,
   SaleTransaction,
   SavedVoucherRecord,
+  VietQrBankConfig,
 } from '../types';
+import {
+  buildVietQrImageUrl,
+  isValidVietQrConfig,
+  resolveVietnamBankLabel,
+  sanitizeVietQrText,
+} from './smartPosFeatures';
 import {
   evaluateDebtUrgency,
   evaluateStockAlert,
@@ -420,7 +427,45 @@ function saveTallCanvasAsMultiPageA4PDF(
   return fileName;
 }
 
-// 1. Phiếu in Hóa đơn Bán hàng (PDF Tiếng Việt có dấu 100%)
+export interface SaleInvoiceLineItem {
+  productName: string;
+  unit: string;
+  quantity: number;
+  unitPrice: number;
+  discountAmount?: number;
+  giftProductName?: string;
+  giftUnit?: string;
+  giftQuantity?: number;
+  dosageGuide?: string;
+}
+
+function loadVietQrImageSafely(url: string, timeoutMs = 2400): Promise<HTMLImageElement | null> {
+  if (typeof window === 'undefined' || typeof Image === 'undefined' || !url) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (img: HTMLImageElement | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(img);
+    };
+    const timer = window.setTimeout(() => finish(null), timeoutMs);
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      window.clearTimeout(timer);
+      finish(img);
+    };
+    img.onerror = () => {
+      window.clearTimeout(timer);
+      finish(null);
+    };
+    img.src = url;
+  });
+}
+
+// 1. Phiếu in Hóa đơn Bán hàng — Hỗ trợ nhiều mặt hàng POS, Hướng dẫn liều lượng & VietQR động
 export function exportSaleInvoicePDF(sale: {
   invoiceCode: string;
   customerName: string;
@@ -434,6 +479,9 @@ export function exportSaleInvoicePDF(sale: {
   giftProductName?: string;
   giftUnit?: string;
   giftQuantity?: number;
+  dosageGuide?: string;
+  items?: SaleInvoiceLineItem[];
+  bankQrConfig?: VietQrBankConfig | null;
   totalAmount: number;
   paidAmount: number;
   debtAmount: number;
@@ -446,11 +494,36 @@ export function exportSaleInvoicePDF(sale: {
   const dateStr = (sale.createdAt || new Date().toISOString()).slice(0, 10);
   const fileName = `PhieuBanHang_${sale.invoiceCode}_${dateStr}.pdf`;
 
-  return saveCanvasAsA4PDF(
-    'portrait',
-    fileName,
-    'PHIẾU HÓA ĐƠN BÁN HÀNG',
-    (ctx, pageWidth) => {
+  const lineItems: SaleInvoiceLineItem[] =
+    sale.items && sale.items.length > 0
+      ? sale.items
+      : [
+          {
+            productName: sale.productName,
+            unit: sale.unit,
+            quantity: sale.quantity,
+            unitPrice: sale.unitPrice,
+            discountAmount: sale.discountAmount,
+            giftProductName: sale.giftProductName,
+            giftUnit: sale.giftUnit,
+            giftQuantity: sale.giftQuantity,
+            dosageGuide: sale.dosageGuide,
+          },
+        ];
+
+  const dosageEntries = lineItems
+    .filter((item) => (item.dosageGuide || '').trim().length > 0)
+    .map((item) => ({
+      productName: item.productName,
+      guide: (item.dosageGuide || '').trim(),
+    }));
+
+  const hasValidBank = isValidVietQrConfig(sale.bankQrConfig);
+  const qrPayable = sale.debtAmount > 0 ? sale.debtAmount : sale.totalAmount;
+  const qrAddInfo = sanitizeVietQrText(`TT ${sale.invoiceCode} ${sale.customerName}`, 48);
+
+  const renderInvoicePdf = (qrImg: HTMLImageElement | null) => {
+    const drawContent = (ctx: CanvasRenderingContext2D, pageWidth: number, withQrImg: boolean) => {
       const marginX = 52;
       let y = drawVoucherHeaderOnCanvas(
         ctx,
@@ -486,41 +559,46 @@ export function exportSaleInvoicePDF(sale: {
         { header: 'Thành Tiền (VNĐ)', width: 110, align: 'right' },
       ];
 
-      const grossAmount = sale.quantity * sale.unitPrice;
-      const rows: string[][] = [
-        [
-          '1',
-          sale.productName,
-          sale.unit,
-          String(sale.quantity),
-          sale.unitPrice.toLocaleString('vi-VN'),
-          grossAmount.toLocaleString('vi-VN'),
-        ],
-      ];
-
-      if (sale.giftProductName && (sale.giftQuantity || 0) > 0) {
+      const rows: string[][] = [];
+      let rowIndex = 1;
+      for (const item of lineItems) {
+        const grossAmount = item.quantity * item.unitPrice;
         rows.push([
-          '2',
-          `[QUÀ TẶNG KM] ${sale.giftProductName}`,
-          sale.giftUnit || 'CÁI',
-          String(sale.giftQuantity),
-          '0',
-          '0 (Tặng KM)',
+          String(rowIndex++),
+          item.productName,
+          item.unit,
+          String(item.quantity),
+          item.unitPrice.toLocaleString('vi-VN'),
+          grossAmount.toLocaleString('vi-VN'),
         ]);
+        if (item.giftProductName && (item.giftQuantity || 0) > 0) {
+          rows.push([
+            String(rowIndex++),
+            `[QUÀ TẶNG KM] ${item.giftProductName}`,
+            item.giftUnit || 'CÁI',
+            String(item.giftQuantity),
+            '0',
+            '0 (Tặng KM)',
+          ]);
+        }
       }
 
       const tableEndY = drawCanvasTable(ctx, marginX, y, columns, rows, '#15803D');
 
-      let summaryY = tableEndY + 32;
+      let summaryY = tableEndY + 30;
       const rightEdge = pageWidth - marginX;
+      const totalDiscount =
+        sale.discountAmount !== undefined
+          ? sale.discountAmount
+          : lineItems.reduce((sum, item) => sum + (item.discountAmount || 0), 0);
 
       ctx.textAlign = 'right';
       ctx.font = `700 14.5px ${FONT_FAMILY}`;
 
-      if ((sale.discountAmount || 0) > 0) {
+      if (totalDiscount > 0) {
         ctx.fillStyle = '#B45309';
         ctx.fillText(
-          `Giảm giá bán khuyến mãi: -${formatCurrencyPlain(sale.discountAmount || 0)}`,
+          `Giảm giá bán khuyến mãi: -${formatCurrencyPlain(totalDiscount)}`,
           rightEdge,
           summaryY
         );
@@ -551,20 +629,120 @@ export function exportSaleInvoicePDF(sale: {
         ctx.fillText(`Hạn thanh toán công nợ: ${sale.dueDate}`, marginX, summaryY + 26);
       }
       if (sale.note) {
-        ctx.fillText(`Ghi chú: ${sale.note}`, marginX, summaryY + 52);
+        const noteLines = wrapCanvasText(ctx, `Ghi chú: ${sale.note}`, 370).slice(0, 2);
+        noteLines.forEach((line, idx) => {
+          ctx.fillText(line, marginX, summaryY + 52 + idx * 18);
+        });
+      }
+
+      let cursorY = summaryY + 86;
+
+      // Dosage & Spraying Instructions Box
+      if (dosageEntries.length > 0) {
+        const boxWidth = pageWidth - marginX * 2;
+        const wrappedBlocks = dosageEntries.map((entry) => ({
+          title: entry.productName,
+          lines: wrapCanvasText(ctx, `• ${entry.productName}: ${entry.guide}`, boxWidth - 28),
+        }));
+        const totalTextLines = wrappedBlocks.reduce((s, b) => s + b.lines.length, 0);
+        const boxHeight = 36 + totalTextLines * 19 + 12;
+
+        ctx.fillStyle = '#F0FDF4';
+        ctx.strokeStyle = '#86EFAC';
+        ctx.lineWidth = 1.2;
+        ctx.fillRect(marginX, cursorY, boxWidth, boxHeight);
+        ctx.strokeRect(marginX, cursorY, boxWidth, boxHeight);
+
+        ctx.fillStyle = '#166534';
+        ctx.font = `700 13px ${FONT_FAMILY}`;
+        ctx.fillText('HƯỚNG DẪN LIỀU LƯỢNG & CÁCH PHA PHUN AN TOÀN', marginX + 14, cursorY + 22);
+
+        let textY = cursorY + 42;
+        ctx.fillStyle = '#1E293B';
+        ctx.font = `500 12.5px ${FONT_FAMILY}`;
+        for (const block of wrappedBlocks) {
+          for (const line of block.lines) {
+            ctx.fillText(line, marginX + 14, textY);
+            textY += 19;
+          }
+        }
+        cursorY += boxHeight + 16;
+      }
+
+      // Dynamic VietQR Bank Transfer Box
+      if (hasValidBank && sale.bankQrConfig) {
+        const boxWidth = pageWidth - marginX * 2;
+        const showImg = Boolean(withQrImg && qrImg);
+        const boxHeight = showImg ? 136 : 94;
+        ctx.fillStyle = '#F8FAFC';
+        ctx.strokeStyle = '#CBD5E1';
+        ctx.lineWidth = 1.2;
+        ctx.fillRect(marginX, cursorY, boxWidth, boxHeight);
+        ctx.strokeRect(marginX, cursorY, boxWidth, boxHeight);
+
+        const textStartX = showImg ? marginX + 132 : marginX + 14;
+        if (showImg && qrImg) {
+          ctx.drawImage(qrImg, marginX + 12, cursorY + 10, 110, 116);
+        }
+
+        ctx.fillStyle = '#0F766E';
+        ctx.font = `700 13px ${FONT_FAMILY}`;
+        ctx.fillText('CHUYỂN KHOẢN NHANH VIETQR', textStartX, cursorY + 24);
+
+        ctx.fillStyle = '#0F172A';
+        ctx.font = `600 12.5px ${FONT_FAMILY}`;
+        ctx.fillText(
+          `Ngân hàng: ${resolveVietnamBankLabel(sale.bankQrConfig.bankCode)}  |  Số TK: ${sale.bankQrConfig.accountNumber}`,
+          textStartX,
+          cursorY + 46
+        );
+        if (sale.bankQrConfig.accountName) {
+          ctx.fillText(`Chủ tài khoản: ${sale.bankQrConfig.accountName}`, textStartX, cursorY + 66);
+        }
+        ctx.font = `500 12px ${FONT_FAMILY}`;
+        ctx.fillStyle = '#334155';
+        ctx.fillText(
+          `Số tiền: ${formatCurrencyPlain(qrPayable)}  |  Nội dung CK: ${qrAddInfo}`,
+          textStartX,
+          cursorY + (sale.bankQrConfig.accountName ? 86 : 68)
+        );
+        cursorY += boxHeight + 16;
       }
 
       drawSignatureFooterOnCanvas(
         ctx,
         pageWidth,
-        summaryY + 75,
+        cursorY + 8,
         'KHÁCH MUA HÀNG',
         'ĐẠI DIỆN VTNN TÂM AN',
         sale.customerName,
         sale.staffName
       );
+    };
+
+    try {
+      saveCanvasAsA4PDF('portrait', fileName, 'PHIẾU HÓA ĐƠN BÁN HÀNG', (ctx, pageWidth) =>
+        drawContent(ctx, pageWidth, Boolean(qrImg))
+      );
+    } catch {
+      // Safe fallback if browser marks external VietQR image canvas as tainted
+      saveCanvasAsA4PDF('portrait', fileName, 'PHIẾU HÓA ĐƠN BÁN HÀNG', (ctx, pageWidth) =>
+        drawContent(ctx, pageWidth, false)
+      );
     }
-  );
+  };
+
+  if (hasValidBank && sale.bankQrConfig && qrPayable > 0 && typeof window !== 'undefined') {
+    const qrUrl = buildVietQrImageUrl(sale.bankQrConfig, {
+      amount: qrPayable,
+      addInfo: qrAddInfo,
+    });
+    void loadVietQrImageSafely(qrUrl, 2400).then((img) => renderInvoicePdf(img));
+    return fileName;
+  }
+
+  renderInvoicePdf(null);
+  return fileName;
 }
 
 // 2. Phiếu in Thu tiền Khách hàng (PDF Tiếng Việt có dấu 100%)
@@ -2688,7 +2866,7 @@ export function exportSmartReorderExcel(
   return fileName;
 }
 
-// 13. In Hóa Đơn / Phiếu Thu-Chi Khổ Nhiệt K58 (58mm) & K80 (80mm) — PDF Tiếng Việt
+// 13. In Hóa Đơn / Phiếu Thu-Chi Khổ Nhiệt K58 (58mm) & K80 (80mm) — Hỗ trợ Nhiều mặt hàng, Liều lượng & VietQR
 export function exportThermalReceiptPDF(params: {
   paperWidthMm: 58 | 80;
   storeName?: string;
@@ -2703,6 +2881,9 @@ export function exportThermalReceiptPDF(params: {
   quantity?: number;
   unitPrice?: number;
   discountAmount?: number;
+  dosageGuide?: string;
+  items?: SaleInvoiceLineItem[];
+  bankQrConfig?: VietQrBankConfig | null;
   totalLabel: string;
   totalAmount: number;
   paidLabel: string;
@@ -2717,183 +2898,327 @@ export function exportThermalReceiptPDF(params: {
   const fileName = `Bill_K${params.paperWidthMm}_${safeCode}_${params.dateStr.slice(0, 10)}.pdf`;
   if (typeof document === 'undefined') return fileName;
 
-  const logicalWidth = params.paperWidthMm === 58 ? 380 : 520;
-  const logicalHeight = 640;
-  const scale = 2.5;
-  const marginX = 18;
-  const contentWidth = logicalWidth - marginX * 2;
+  const lineItems: SaleInvoiceLineItem[] =
+    params.items && params.items.length > 0
+      ? params.items
+      : params.productName
+      ? [
+          {
+            productName: params.productName,
+            unit: params.unit || '',
+            quantity: params.quantity ?? 1,
+            unitPrice: params.unitPrice ?? 0,
+            discountAmount: params.discountAmount,
+            dosageGuide: params.dosageGuide,
+          },
+        ]
+      : [];
 
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.round(logicalWidth * scale);
-  canvas.height = Math.round(logicalHeight * scale);
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return fileName;
+  const dosageEntries = lineItems
+    .filter((i) => (i.dosageGuide || '').trim().length > 0)
+    .map((i) => ({ name: i.productName, guide: (i.dosageGuide || '').trim() }));
 
-  ctx.scale(scale, scale);
-  ctx.fillStyle = '#FFFFFF';
-  ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+  const hasValidBank = isValidVietQrConfig(params.bankQrConfig);
+  const qrPayable = params.remainingDebt > 0 ? params.remainingDebt : params.totalAmount;
+  const qrAddInfo = sanitizeVietQrText(`TT ${params.voucherCode} ${params.partnerName}`, 48);
 
-  const baseSize = params.paperWidthMm === 58 ? 13 : 14.5;
-  let y = 28;
+  const renderThermal = (qrImg: HTMLImageElement | null) => {
+    const drawAndExport = (allowQrImg: boolean) => {
+      const logicalWidth = params.paperWidthMm === 58 ? 380 : 520;
+      const estimatedExtraHeight =
+        lineItems.length * 72 + dosageEntries.length * 64 + (hasValidBank ? 320 : 0);
+      const logicalHeight = Math.max(720, 480 + estimatedExtraHeight);
+      const scale = 2.5;
+      const marginX = 18;
+      const contentWidth = logicalWidth - marginX * 2;
 
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#0F172A';
-  ctx.font = `800 ${baseSize + 3}px ${FONT_FAMILY}`;
-  ctx.fillText((params.storeName || 'VTNN TÂM AN').toUpperCase(), logicalWidth / 2, y);
-  y += 20;
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(logicalWidth * scale);
+      canvas.height = Math.round(logicalHeight * scale);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-  ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;
-  ctx.fillStyle = '#475569';
-  ctx.fillText('Vật tư Tâm An — Nhà Nông an tâm', logicalWidth / 2, y);
-  y += 18;
+      ctx.scale(scale, scale);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, logicalWidth, logicalHeight);
 
-  ctx.font = `800 ${baseSize + 2}px ${FONT_FAMILY}`;
-  ctx.fillStyle = '#0F172A';
-  ctx.fillText(params.voucherTitle.toUpperCase(), logicalWidth / 2, y + 6);
-  y += 24;
+      const baseSize = params.paperWidthMm === 58 ? 13 : 14.5;
+      let y = 28;
 
-  ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
-  ctx.fillText(`Số: ${params.voucherCode}  |  ${params.dateStr.slice(0, 16)}`, logicalWidth / 2, y);
-  y += 16;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `800 ${baseSize + 3}px ${FONT_FAMILY}`;
+      ctx.fillText((params.storeName || 'VTNN TÂM AN').toUpperCase(), logicalWidth / 2, y);
+      y += 20;
 
-  const drawDashedLine = (lineY: number) => {
-    ctx.save();
-    ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = '#94A3B8';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(marginX, lineY);
-    ctx.lineTo(logicalWidth - marginX, lineY);
-    ctx.stroke();
-    ctx.restore();
-  };
-
-  drawDashedLine(y);
-  y += 20;
-
-  ctx.textAlign = 'left';
-  ctx.fillStyle = '#0F172A';
-  ctx.font = `600 ${baseSize}px ${FONT_FAMILY}`;
-  const partnerLines = wrapCanvasText(ctx, `${params.partnerLabel}: ${params.partnerName}`, contentWidth);
-  partnerLines.forEach((line) => {
-    ctx.fillText(line, marginX, y);
-    y += 18;
-  });
-  if (params.partnerPhone) {
-    ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
-    ctx.fillText(`SĐT: ${params.partnerPhone}`, marginX, y);
-    y += 18;
-  }
-  ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
-  ctx.fillText(`Thu ngân: ${params.staffName}`, marginX, y);
-  y += 14;
-
-  drawDashedLine(y);
-  y += 20;
-
-  if (params.productName) {
-    ctx.font = `700 ${baseSize}px ${FONT_FAMILY}`;
-    const prodLines = wrapCanvasText(ctx, params.productName, contentWidth);
-    prodLines.forEach((line) => {
-      ctx.fillText(line, marginX, y);
+      ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;
+      ctx.fillStyle = '#475569';
+      ctx.fillText('Vật tư Tâm An — Nhà Nông an tâm', logicalWidth / 2, y);
       y += 18;
-    });
-    const qty = params.quantity ?? 1;
-    const price = params.unitPrice ?? 0;
-    ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
-    ctx.fillText(`${qty} ${params.unit || ''} x ${formatCurrencyPlain(price)}`, marginX, y);
-    ctx.textAlign = 'right';
-    ctx.font = `700 ${baseSize}px ${FONT_FAMILY}`;
-    ctx.fillText(formatCurrencyPlain(qty * price), logicalWidth - marginX, y);
-    ctx.textAlign = 'left';
-    y += 18;
-    if (params.discountAmount && params.discountAmount > 0) {
-      ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
-      ctx.fillText('Chiết khấu / Giảm:', marginX, y);
-      ctx.textAlign = 'right';
-      ctx.fillText(`-${formatCurrencyPlain(params.discountAmount)}`, logicalWidth - marginX, y);
+
+      ctx.font = `800 ${baseSize + 2}px ${FONT_FAMILY}`;
+      ctx.fillStyle = '#0F172A';
+      ctx.fillText(params.voucherTitle.toUpperCase(), logicalWidth / 2, y + 6);
+      y += 24;
+
+      ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
+      ctx.fillText(`Số: ${params.voucherCode}  |  ${params.dateStr.slice(0, 16)}`, logicalWidth / 2, y);
+      y += 16;
+
+      const drawDashedLine = (lineY: number) => {
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = '#94A3B8';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(marginX, lineY);
+        ctx.lineTo(logicalWidth - marginX, lineY);
+        ctx.stroke();
+        ctx.restore();
+      };
+
+      drawDashedLine(y);
+      y += 20;
+
       ctx.textAlign = 'left';
-      y += 18;
-    }
-    drawDashedLine(y);
-    y += 20;
-  }
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `600 ${baseSize}px ${FONT_FAMILY}`;
+      const partnerLines = wrapCanvasText(
+        ctx,
+        `${params.partnerLabel}: ${params.partnerName}`,
+        contentWidth
+      );
+      partnerLines.forEach((line) => {
+        ctx.fillText(line, marginX, y);
+        y += 18;
+      });
+      if (params.partnerPhone) {
+        ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+        ctx.fillText(`SĐT: ${params.partnerPhone}`, marginX, y);
+        y += 18;
+      }
+      ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+      ctx.fillText(`Thu ngân: ${params.staffName}`, marginX, y);
+      y += 14;
 
-  const drawAmountRow = (label: string, amount: number, bold = false) => {
-    ctx.font = `${bold ? 800 : 500} ${bold ? baseSize + 1 : baseSize}px ${FONT_FAMILY}`;
-    ctx.fillText(label, marginX, y);
-    ctx.textAlign = 'right';
-    ctx.fillText(formatCurrencyPlain(amount), logicalWidth - marginX, y);
-    ctx.textAlign = 'left';
-    y += 22;
+      drawDashedLine(y);
+      y += 20;
+
+      if (lineItems.length > 0) {
+        lineItems.forEach((item, idx) => {
+          ctx.fillStyle = '#0F172A';
+          ctx.font = `700 ${baseSize}px ${FONT_FAMILY}`;
+          const prodLines = wrapCanvasText(
+            ctx,
+            lineItems.length > 1 ? `${idx + 1}. ${item.productName}` : item.productName,
+            contentWidth
+          );
+          prodLines.forEach((line) => {
+            ctx.fillText(line, marginX, y);
+            y += 18;
+          });
+          const qty = item.quantity ?? 1;
+          const price = item.unitPrice ?? 0;
+          ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+          ctx.fillText(`${qty} ${item.unit || ''} x ${formatCurrencyPlain(price)}`, marginX, y);
+          ctx.textAlign = 'right';
+          ctx.font = `700 ${baseSize}px ${FONT_FAMILY}`;
+          ctx.fillText(formatCurrencyPlain(qty * price), logicalWidth - marginX, y);
+          ctx.textAlign = 'left';
+          y += 18;
+
+          if (item.discountAmount && item.discountAmount > 0) {
+            ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+            ctx.fillText('Chiết khấu / Giảm:', marginX, y);
+            ctx.textAlign = 'right';
+            ctx.fillText(`-${formatCurrencyPlain(item.discountAmount)}`, logicalWidth - marginX, y);
+            ctx.textAlign = 'left';
+            y += 17;
+          }
+          if (item.giftProductName && (item.giftQuantity || 0) > 0) {
+            ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;
+            ctx.fillStyle = '#15803D';
+            wrapCanvasText(
+              ctx,
+              `+ Tặng KM: ${item.giftQuantity} ${item.giftUnit || ''} ${item.giftProductName}`,
+              contentWidth
+            ).forEach((line) => {
+              ctx.fillText(line, marginX, y);
+              y += 16;
+            });
+            ctx.fillStyle = '#0F172A';
+          }
+          if (idx < lineItems.length - 1) {
+            y += 4;
+          }
+        });
+        drawDashedLine(y);
+        y += 20;
+      }
+
+      const drawAmountRow = (label: string, amount: number, bold = false) => {
+        ctx.fillStyle = '#0F172A';
+        ctx.font = `${bold ? 800 : 500} ${bold ? baseSize + 1 : baseSize}px ${FONT_FAMILY}`;
+        ctx.fillText(label, marginX, y);
+        ctx.textAlign = 'right';
+        ctx.fillText(formatCurrencyPlain(amount), logicalWidth - marginX, y);
+        ctx.textAlign = 'left';
+        y += 22;
+      };
+
+      drawAmountRow(params.totalLabel, params.totalAmount, true);
+      drawAmountRow(params.paidLabel, params.paidAmount, false);
+      drawAmountRow(params.debtLabel, params.remainingDebt, params.remainingDebt > 0);
+
+      if (params.remainingDebt > 0 && params.dueDate) {
+        ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
+        ctx.fillText(`Hạn thanh toán: ${params.dueDate}`, marginX, y);
+        y += 18;
+      }
+      if (params.note) {
+        ctx.font = `400 ${baseSize - 2}px ${FONT_FAMILY}`;
+        ctx.fillStyle = '#475569';
+        wrapCanvasText(ctx, `Ghi chú: ${params.note}`, contentWidth)
+          .slice(0, 2)
+          .forEach((line) => {
+            ctx.fillText(line, marginX, y);
+            y += 16;
+          });
+      }
+
+      // Dosage & Spraying Instructions Section on Thermal Receipt
+      if (dosageEntries.length > 0) {
+        y += 4;
+        drawDashedLine(y);
+        y += 18;
+        ctx.fillStyle = '#166534';
+        ctx.font = `800 ${baseSize - 1}px ${FONT_FAMILY}`;
+        ctx.fillText('HƯỚNG DẪN PHA PHUN / SỬ DỤNG:', marginX, y);
+        y += 18;
+        ctx.fillStyle = '#0F172A';
+        ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;
+        for (const entry of dosageEntries) {
+          wrapCanvasText(ctx, `• ${entry.name}: ${entry.guide}`, contentWidth).forEach((line) => {
+            ctx.fillText(line, marginX, y);
+            y += 16;
+          });
+        }
+      }
+
+      // Dynamic VietQR Block on Thermal Receipt
+      if (hasValidBank && params.bankQrConfig) {
+        y += 6;
+        drawDashedLine(y);
+        y += 18;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#0F766E';
+        ctx.font = `800 ${baseSize - 1}px ${FONT_FAMILY}`;
+        ctx.fillText('QUÉT MÃ VIETQR CHUYỂN KHOẢN', logicalWidth / 2, y);
+        y += 12;
+
+        if (allowQrImg && qrImg) {
+          const qrSize = params.paperWidthMm === 58 ? 160 : 200;
+          ctx.drawImage(qrImg, (logicalWidth - qrSize) / 2, y, qrSize, qrSize + 14);
+          y += qrSize + 26;
+        } else {
+          y += 10;
+        }
+
+        ctx.fillStyle = '#0F172A';
+        ctx.font = `700 ${baseSize - 2}px ${FONT_FAMILY}`;
+        ctx.fillText(
+          `${resolveVietnamBankLabel(params.bankQrConfig.bankCode)} - ${params.bankQrConfig.accountNumber}`,
+          logicalWidth / 2,
+          y
+        );
+        y += 16;
+        if (params.bankQrConfig.accountName) {
+          ctx.font = `600 ${baseSize - 2}px ${FONT_FAMILY}`;
+          ctx.fillText(params.bankQrConfig.accountName, logicalWidth / 2, y);
+          y += 16;
+        }
+        ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;
+        ctx.fillStyle = '#334155';
+        ctx.fillText(`ND: ${qrAddInfo}`, logicalWidth / 2, y);
+        y += 14;
+        ctx.textAlign = 'left';
+      }
+
+      y += 6;
+      drawDashedLine(y);
+      y += 22;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
+      ctx.fillText('Cảm ơn Quý khách — Hẹn gặp lại!', logicalWidth / 2, y);
+
+      const usedLogicalHeight = Math.max(360, Math.min(logicalHeight, y + 26));
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = canvas.width;
+      outCanvas.height = Math.round(usedLogicalHeight * scale);
+      const outCtx = outCanvas.getContext('2d');
+      if (outCtx) {
+        outCtx.fillStyle = '#FFFFFF';
+        outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
+        outCtx.drawImage(
+          canvas,
+          0,
+          0,
+          canvas.width,
+          outCanvas.height,
+          0,
+          0,
+          outCanvas.width,
+          outCanvas.height
+        );
+      }
+
+      const dataUrl = (outCtx ? outCanvas : canvas).toDataURL('image/png', 1.0);
+      if (typeof window !== 'undefined') {
+        (
+          window as unknown as {
+            __lastExportedPdfPreview?: { fileName: string; title: string; dataUrl: string };
+          }
+        ).__lastExportedPdfPreview = {
+          fileName,
+          title: `${params.voucherTitle} (K${params.paperWidthMm})`,
+          dataUrl,
+        };
+        window.dispatchEvent(
+          new CustomEvent('taman-pdf-exported', {
+            detail: { fileName, title: `${params.voucherTitle} (K${params.paperWidthMm})`, dataUrl },
+          })
+        );
+      }
+
+      const heightMm = Math.round((usedLogicalHeight / logicalWidth) * params.paperWidthMm * 10) / 10;
+      const doc = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: [params.paperWidthMm, heightMm],
+        compress: true,
+      });
+      doc.addImage(dataUrl, 'PNG', 0, 0, params.paperWidthMm, heightMm, undefined, 'FAST');
+      doc.save(fileName);
+    };
+
+    try {
+      drawAndExport(Boolean(qrImg));
+    } catch {
+      drawAndExport(false);
+    }
   };
 
-  drawAmountRow(params.totalLabel, params.totalAmount, true);
-  drawAmountRow(params.paidLabel, params.paidAmount, false);
-  drawAmountRow(params.debtLabel, params.remainingDebt, params.remainingDebt > 0);
-
-  if (params.remainingDebt > 0 && params.dueDate) {
-    ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
-    ctx.fillText(`Hạn thanh toán: ${params.dueDate}`, marginX, y);
-    y += 18;
-  }
-  if (params.note) {
-    ctx.font = `400 ${baseSize - 2}px ${FONT_FAMILY}`;
-    ctx.fillStyle = '#475569';
-    wrapCanvasText(ctx, `Ghi chú: ${params.note}`, contentWidth)
-      .slice(0, 2)
-      .forEach((line) => {
-        ctx.fillText(line, marginX, y);
-        y += 16;
-      });
+  if (hasValidBank && params.bankQrConfig && qrPayable > 0 && typeof window !== 'undefined') {
+    const qrUrl = buildVietQrImageUrl(params.bankQrConfig, {
+      amount: qrPayable,
+      addInfo: qrAddInfo,
+    });
+    void loadVietQrImageSafely(qrUrl, 2400).then((img) => renderThermal(img));
+    return fileName;
   }
 
-  y += 6;
-  drawDashedLine(y);
-  y += 22;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#0F172A';
-  ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
-  ctx.fillText('Cảm ơn Quý khách — Hẹn gặp lại!', logicalWidth / 2, y);
-
-  const usedLogicalHeight = Math.max(360, Math.min(logicalHeight, y + 26));
-  const outCanvas = document.createElement('canvas');
-  outCanvas.width = canvas.width;
-  outCanvas.height = Math.round(usedLogicalHeight * scale);
-  const outCtx = outCanvas.getContext('2d');
-  if (outCtx) {
-    outCtx.fillStyle = '#FFFFFF';
-    outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
-    outCtx.drawImage(canvas, 0, 0, canvas.width, outCanvas.height, 0, 0, outCanvas.width, outCanvas.height);
-  }
-
-  const dataUrl = (outCtx ? outCanvas : canvas).toDataURL('image/png', 1.0);
-  if (typeof window !== 'undefined') {
-    (
-      window as unknown as {
-        __lastExportedPdfPreview?: { fileName: string; title: string; dataUrl: string };
-      }
-    ).__lastExportedPdfPreview = {
-      fileName,
-      title: `${params.voucherTitle} (K${params.paperWidthMm})`,
-      dataUrl,
-    };
-    window.dispatchEvent(
-      new CustomEvent('taman-pdf-exported', {
-        detail: { fileName, title: `${params.voucherTitle} (K${params.paperWidthMm})`, dataUrl },
-      })
-    );
-  }
-
-  const heightMm = Math.round((usedLogicalHeight / logicalWidth) * params.paperWidthMm * 10) / 10;
-  const doc = new jsPDF({
-    orientation: 'portrait',
-    unit: 'mm',
-    format: [params.paperWidthMm, heightMm],
-    compress: true,
-  });
-  doc.addImage(dataUrl, 'PNG', 0, 0, params.paperWidthMm, heightMm, undefined, 'FAST');
-  doc.save(fileName);
+  renderThermal(null);
   return fileName;
 }
 

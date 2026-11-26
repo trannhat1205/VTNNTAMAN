@@ -6,11 +6,14 @@ import {
   FileDown,
   FolderPlus,
   Gift,
+  Leaf,
   Lock,
+  MessageCircle,
   PackagePlus,
   Pencil,
   Percent,
   Plus,
+  Printer,
   QrCode,
   RotateCcw,
   Search,
@@ -33,6 +36,7 @@ import {
   SaleTransaction,
   SupplierProfile,
   UserRole,
+  VietQrBankConfig,
 } from '../types';
 import {
   calculateImportSummary,
@@ -51,10 +55,20 @@ import {
   exportImportReceiptPDF,
   exportModuleDataExcel,
   exportSaleInvoicePDF,
+  exportThermalReceiptPDF,
 } from '../utils/exportReports';
+import {
+  allocatePaymentAcrossCartItems,
+  buildZaloInvoiceAndDosageMessage,
+  DOSAGE_GUIDE_PRESETS,
+  findInvoiceGroupSales,
+  PosCartDraftItem,
+  validateCartInventory,
+} from '../utils/smartPosFeatures';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
+import { VietQrPaymentModal } from './VietQrPaymentModal';
 
 interface SalesLogViewProps {
   products: ProductItem[];
@@ -90,7 +104,21 @@ interface SalesLogViewProps {
     giftUnit?: string;
     giftQuantity?: number;
     giftUnitCost?: number;
+    dosageGuide?: string;
   }) => SaleTransaction;
+  onCreateMultiItemSale?: (payload: {
+    customerId: string;
+    customerName: string;
+    customerPhone: string;
+    warehouseName: string;
+    dueDate: string;
+    note: string;
+    totalPaidAmount: number;
+    items: PosCartDraftItem[];
+  }) => SaleTransaction[];
+  bankQrConfig?: VietQrBankConfig | null;
+  onSaveBankQrConfig?: (config: VietQrBankConfig) => void;
+  onNotifyToast?: (msg: string) => void;
   onCreateCustomerInline: (
     data: Omit<CustomerProfile, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
   ) => CustomerProfile;
@@ -117,6 +145,7 @@ interface SalesLogViewProps {
       giftProductName?: string;
       giftUnit?: string;
       giftQuantity?: number;
+      dosageGuide?: string;
     }
   ) => void;
   onDeleteSale: (saleId: string) => void;
@@ -138,6 +167,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   preselectedCustomerId,
   onClearPreselectedCustomer,
   onCreateSale,
+  onCreateMultiItemSale,
+  bankQrConfig,
+  onSaveBankQrConfig,
+  onNotifyToast,
   onCreateCustomerInline,
   onCreateProductInline,
   onImportSalesFromExcel,
@@ -161,6 +194,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [paidAmount, setPaidAmount] = useState<string>('');
   const [dueDate, setDueDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
+  const [dosageGuide, setDosageGuide] = useState<string>('');
+  const [posCartItems, setPosCartItems] = useState<PosCartDraftItem[]>([]);
+  const [lastCreatedOrder, setLastCreatedOrder] = useState<{
+    invoiceCode: string;
+    warehouseName: string;
+    customerName: string;
+    customerPhone: string;
+    customerAddress?: string;
+    sales: SaleTransaction[];
+  } | null>(null);
+  const [vietQrModalTarget, setVietQrModalTarget] = useState<{
+    title: string;
+    subtitle: string;
+    amount: number;
+    addInfo: string;
+    customerPhone?: string;
+    zaloMessage?: string;
+  } | null>(null);
   const [formMessage, setFormMessage] = useState<{
     type: 'error' | 'success';
     text: string;
@@ -222,6 +273,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [editSalePaid, setEditSalePaid] = useState('');
   const [editSaleDueDate, setEditSaleDueDate] = useState('');
   const [editSaleNote, setEditSaleNote] = useState('');
+  const [editSaleDosageGuide, setEditSaleDosageGuide] = useState('');
 
   const openEditSaleModal = (s: SaleTransaction) => {
     if (!canPerformRoleAction(role, 'edit_record')) return;
@@ -241,6 +293,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setEditSalePaid(String(s.paidAmount));
     setEditSaleDueDate(s.dueDate);
     setEditSaleNote(s.note);
+    setEditSaleDosageGuide(s.dosageGuide || '');
   };
 
   useEffect(() => {
@@ -273,6 +326,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setPaidAmount('');
     setDueDate('');
     setNote('');
+    setDosageGuide('');
+    setPosCartItems([]);
     setShowNewCustomerBox(false);
     setNewCustName('');
     setNewCustPhone('');
@@ -362,12 +417,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     const prod = products.find((p) => p.id === prodId);
     if (prod) {
       setUnitPrice(String(prod.sellPrice));
+      setDosageGuide(prod.dosageGuide || '');
       if (!quantity) setQuantity('1');
       if (!selectedWarehouse && !lockedWarehouse && prod.warehouseName) {
         setSelectedWarehouse(prod.warehouseName);
       }
     } else {
       setUnitPrice('');
+      setDosageGuide('');
     }
   };
 
@@ -521,15 +578,311 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         : Math.round((computedDiscountAmount / grossTotal) * 100)
       : 0;
 
-  const netPayableTotal = Math.max(0, grossTotal - computedDiscountAmount);
-  const paidNum = paymentMode === 'full' ? netPayableTotal : Math.max(0, Number(paidAmount) || 0);
-  const summary = calculateSaleSummary(qtyNum, priceNum, paidNum, computedDiscountAmount);
-
   const selectedGiftProductObj =
     hasGiftActive && selectedGiftProductId && selectedGiftProductId !== '__new_gift__'
       ? products.find((p) => p.id === selectedGiftProductId) || null
       : null;
   const giftQtyNum = hasGiftActive ? Math.max(1, Math.round(Number(giftQuantity) || 1)) : 0;
+
+  const netPayableTotal = Math.max(0, grossTotal - computedDiscountAmount);
+  const currentDraftItem: PosCartDraftItem | null =
+    currentProduct && qtyNum > 0
+      ? {
+          id: '__draft__',
+          productId: currentProduct.id,
+          productName: currentProduct.name,
+          unit: currentProduct.unit,
+          quantity: qtyNum,
+          unitPrice: priceNum > 0 ? priceNum : currentProduct.sellPrice,
+          promotionType,
+          discountAmount: computedDiscountAmount,
+          discountPercent: computedDiscountPercent,
+          giftProductId: selectedGiftProductObj?.id,
+          giftProductName: selectedGiftProductObj?.name,
+          giftUnit: selectedGiftProductObj?.unit,
+          giftQuantity: selectedGiftProductObj ? giftQtyNum : 0,
+          dosageGuide: dosageGuide.trim() || undefined,
+        }
+      : null;
+
+  const combinedPreviewItems: PosCartDraftItem[] =
+    posCartItems.length > 0
+      ? currentDraftItem
+        ? [...posCartItems, currentDraftItem]
+        : posCartItems
+      : currentDraftItem
+      ? [currentDraftItem]
+      : [];
+
+  const cartAllocation = allocatePaymentAcrossCartItems(
+    combinedPreviewItems,
+    paymentMode === 'full' ? Number.MAX_SAFE_INTEGER : Math.max(0, Number(paidAmount) || 0)
+  );
+
+  const effectiveTotalPayable =
+    posCartItems.length > 0 ? cartAllocation.netTotal : netPayableTotal;
+  const paidNum =
+    paymentMode === 'full' ? effectiveTotalPayable : Math.max(0, Number(paidAmount) || 0);
+  const summary =
+    posCartItems.length > 0
+      ? {
+          grossAmount: cartAllocation.grossTotal,
+          discountAmount: cartAllocation.totalDiscount,
+          totalAmount: cartAllocation.netTotal,
+          paidAmount: cartAllocation.totalPaid,
+          debtAmount: cartAllocation.totalDebt,
+          status: cartAllocation.status,
+        }
+      : calculateSaleSummary(qtyNum, priceNum, paidNum, computedDiscountAmount);
+
+  const clearCurrentLineInputsOnly = () => {
+    setSelectedProductId('');
+    setQuantity('');
+    setUnitPrice('');
+    setDosageGuide('');
+    setPromotionType('none');
+    setDiscountMode('amount');
+    setDiscountInput('');
+    setSelectedGiftProductId('');
+    setGiftQuantity('1');
+    setShowNewGiftBox(false);
+  };
+
+  const handleAddCurrentItemToCart = () => {
+    setFormMessage(null);
+    let resolvedProduct = products.find((p) => p.id === selectedProductId) || null;
+    if (showNewProductBox || selectedProductId === '__new_product__') {
+      const createdProd = handleConfirmInlineProduct();
+      if (!createdProd) return;
+      resolvedProduct = createdProd;
+    }
+    if (!resolvedProduct) {
+      setFormMessage({
+        type: 'error',
+        text: 'Vui lòng chọn vật tư nông nghiệp trước khi thêm vào giỏ hóa đơn.',
+      });
+      return;
+    }
+    if (qtyNum <= 0) {
+      setFormMessage({ type: 'error', text: 'Vui lòng nhập Số lượng bán lớn hơn 0.' });
+      return;
+    }
+
+    let resolvedGiftProduct: ProductItem | null = null;
+    if (hasGiftActive) {
+      if (showNewGiftBox || selectedGiftProductId === '__new_gift__') {
+        const createdGift = handleConfirmInlineGiftProduct();
+        if (!createdGift) return;
+        resolvedGiftProduct = createdGift;
+      } else if (selectedGiftProductId) {
+        resolvedGiftProduct = products.find((p) => p.id === selectedGiftProductId) || null;
+      }
+      if (!resolvedGiftProduct) {
+        setFormMessage({
+          type: 'error',
+          text: 'Vui lòng chọn mặt hàng Quà tặng khuyến mãi trước khi thêm vào giỏ.',
+        });
+        return;
+      }
+    }
+
+    const effectivePrice = priceNum > 0 ? priceNum : resolvedProduct.sellPrice;
+    const effectiveGross = Math.round(qtyNum * effectivePrice);
+    const effectiveDiscount = hasDiscountActive
+      ? discountMode === 'percent'
+        ? Math.round((effectiveGross * Math.min(100, rawDiscountNum)) / 100)
+        : Math.min(effectiveGross, Math.round(rawDiscountNum))
+      : 0;
+
+    const newItem: PosCartDraftItem = {
+      id: `cart_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      productId: resolvedProduct.id,
+      productName: resolvedProduct.name,
+      unit: resolvedProduct.unit,
+      quantity: qtyNum,
+      unitPrice: effectivePrice,
+      promotionType,
+      discountAmount: effectiveDiscount,
+      discountPercent: computedDiscountPercent,
+      giftProductId: resolvedGiftProduct?.id,
+      giftProductName: resolvedGiftProduct?.name,
+      giftUnit: resolvedGiftProduct?.unit,
+      giftQuantity: resolvedGiftProduct ? giftQtyNum : 0,
+      dosageGuide: dosageGuide.trim() || undefined,
+    };
+
+    const nextCart = [...posCartItems, newItem];
+    const check = validateCartInventory(products, nextCart);
+    if (!check.valid) {
+      setFormMessage({ type: 'error', text: check.error || 'Tồn kho không đủ.' });
+      return;
+    }
+
+    setPosCartItems(nextCart);
+    clearCurrentLineInputsOnly();
+    setFormMessage({
+      type: 'success',
+      text: `Đã thêm "${resolvedProduct.name}" (${qtyNum} ${resolvedProduct.unit}) vào giỏ POS (${nextCart.length} mặt hàng trên 1 hóa đơn). Chọn tiếp vật tư khác hoặc bấm Lưu đơn!`,
+    });
+  };
+
+  const handleUpdateCartItemQty = (itemId: string, delta: number) => {
+    setPosCartItems((prev) => {
+      const next = prev
+        .map((item) =>
+          item.id === itemId ? { ...item, quantity: Math.max(0, item.quantity + delta) } : item
+        )
+        .filter((item) => item.quantity > 0);
+      const check = validateCartInventory(products, next);
+      if (!check.valid) {
+        setFormMessage({ type: 'error', text: check.error || 'Tồn kho không đủ.' });
+        return prev;
+      }
+      return next;
+    });
+  };
+
+  const handleExportGroupedInvoicePdf = (sale: SaleTransaction) => {
+    const groupSales = findInvoiceGroupSales(sales, sale);
+    const cust = customers.find((c) => c.id === sale.customerId);
+    exportSaleInvoicePDF({
+      ...sale,
+      customerAddress: cust?.address,
+      totalAmount: groupSales.reduce((sum, r) => sum + r.totalAmount, 0),
+      paidAmount: groupSales.reduce((sum, r) => sum + r.paidAmount, 0),
+      debtAmount: groupSales.reduce((sum, r) => sum + r.debtAmount, 0),
+      discountAmount: groupSales.reduce((sum, r) => sum + (r.discountAmount || 0), 0),
+      items: groupSales.map((r) => ({
+        productName: r.productName,
+        unit: r.unit,
+        quantity: r.quantity,
+        unitPrice: r.unitPrice,
+        discountAmount: r.discountAmount,
+        giftProductName: r.giftProductName,
+        giftUnit: r.giftUnit,
+        giftQuantity: r.giftQuantity,
+        dosageGuide: r.dosageGuide,
+      })),
+      bankQrConfig,
+    });
+  };
+
+  const handleExportGroupedThermalPdf = (sale: SaleTransaction, paperWidthMm: 58 | 80 = 80) => {
+    const groupSales = findInvoiceGroupSales(sales, sale);
+    exportThermalReceiptPDF({
+      paperWidthMm,
+      storeName: sale.warehouseName || 'VTNN Tâm An',
+      voucherTitle: 'Hóa Đơn Bán Hàng',
+      voucherCode: sale.invoiceCode,
+      dateStr: sale.createdAt.slice(0, 16),
+      partnerLabel: 'Khách hàng',
+      partnerName: sale.customerName,
+      partnerPhone: sale.customerPhone,
+      items: groupSales.map((r) => ({
+        productName: r.productName,
+        unit: r.unit,
+        quantity: r.quantity,
+        unitPrice: r.unitPrice,
+        discountAmount: r.discountAmount,
+        giftProductName: r.giftProductName,
+        giftUnit: r.giftUnit,
+        giftQuantity: r.giftQuantity,
+        dosageGuide: r.dosageGuide,
+      })),
+      bankQrConfig,
+      totalLabel: 'Tổng thanh toán:',
+      totalAmount: groupSales.reduce((sum, r) => sum + r.totalAmount, 0),
+      paidLabel: 'Đã thanh toán:',
+      paidAmount: groupSales.reduce((sum, r) => sum + r.paidAmount, 0),
+      debtLabel: 'Còn ghi nợ:',
+      remainingDebt: groupSales.reduce((sum, r) => sum + r.debtAmount, 0),
+      dueDate: sale.dueDate,
+      staffName: sale.staffName,
+      note: sale.note,
+    });
+  };
+
+  const handleSendInvoiceZalo = (targetSales: SaleTransaction[]) => {
+    if (targetSales.length === 0) return;
+    const first = targetSales[0];
+    const { message, zaloUrl } = buildZaloInvoiceAndDosageMessage({
+      storeName: first.warehouseName || 'VTNN Tâm An',
+      invoiceCode: first.invoiceCode,
+      customerName: first.customerName,
+      customerPhone: first.customerPhone,
+      dateStr: first.createdAt,
+      items: targetSales.map((s) => ({
+        productName: s.productName,
+        quantity: s.quantity,
+        unit: s.unit,
+        unitPrice: s.unitPrice,
+        totalAmount: s.totalAmount,
+        discountAmount: s.discountAmount,
+        giftProductName: s.giftProductName,
+        giftQuantity: s.giftQuantity,
+        giftUnit: s.giftUnit,
+        dosageGuide: s.dosageGuide,
+      })),
+      totalAmount: targetSales.reduce((sum, s) => sum + s.totalAmount, 0),
+      paidAmount: targetSales.reduce((sum, s) => sum + s.paidAmount, 0),
+      debtAmount: targetSales.reduce((sum, s) => sum + s.debtAmount, 0),
+      dueDate: first.dueDate,
+      bankConfig: bankQrConfig,
+    });
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(message).catch(() => undefined);
+    }
+    if (zaloUrl && typeof window !== 'undefined') {
+      window.open(zaloUrl, '_blank', 'noopener,noreferrer');
+      onNotifyToast?.(
+        `Đã sao chép Hóa đơn + Hướng dẫn pha phun (${first.invoiceCode}) & mở Zalo cho ${first.customerName}!`
+      );
+    } else {
+      onNotifyToast?.(
+        `Đã sao chép Hóa đơn + Hướng dẫn pha phun (${first.invoiceCode}) vào bộ nhớ tạm!`
+      );
+    }
+  };
+
+  const handleOpenSaleVietQr = (targetSales: SaleTransaction[]) => {
+    if (targetSales.length === 0) return;
+    const first = targetSales[0];
+    const totalAmt = targetSales.reduce((sum, s) => sum + s.totalAmount, 0);
+    const totalDebt = targetSales.reduce((sum, s) => sum + s.debtAmount, 0);
+    const qrAmount = totalDebt > 0 ? totalDebt : totalAmt;
+    const { message } = buildZaloInvoiceAndDosageMessage({
+      storeName: first.warehouseName || 'VTNN Tâm An',
+      invoiceCode: first.invoiceCode,
+      customerName: first.customerName,
+      customerPhone: first.customerPhone,
+      dateStr: first.createdAt,
+      items: targetSales.map((s) => ({
+        productName: s.productName,
+        quantity: s.quantity,
+        unit: s.unit,
+        unitPrice: s.unitPrice,
+        totalAmount: s.totalAmount,
+        discountAmount: s.discountAmount,
+        giftProductName: s.giftProductName,
+        giftQuantity: s.giftQuantity,
+        giftUnit: s.giftUnit,
+        dosageGuide: s.dosageGuide,
+      })),
+      totalAmount: totalAmt,
+      paidAmount: targetSales.reduce((sum, s) => sum + s.paidAmount, 0),
+      debtAmount: totalDebt,
+      dueDate: first.dueDate,
+      bankConfig: bankQrConfig,
+    });
+    setVietQrModalTarget({
+      title: `VietQR hóa đơn ${first.invoiceCode}`,
+      subtitle: `${first.customerName} · ${targetSales.length} mặt hàng`,
+      amount: qrAmount,
+      addInfo: `TT ${first.invoiceCode} ${first.customerName}`,
+      customerPhone: first.customerPhone,
+      zaloMessage: message,
+    });
+  };
 
   const selectedCustomerObj =
     selectedCustomerId && selectedCustomerId !== '__new_customer__'
@@ -581,6 +934,118 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         type: 'error',
         text: 'Vui lòng chọn khách hàng hoặc bấm "+ Tạo khách hàng mới" để điền thông tin.',
       });
+      return;
+    }
+
+    // MULTI-ITEM POS CART CHECKOUT PATH
+    if (posCartItems.length > 0 && onCreateMultiItemSale) {
+      const finalCartItems: PosCartDraftItem[] = [...posCartItems];
+      // Also include currently selected product in form if user filled it without clicking "+ Thêm vào giỏ"
+      if (selectedProductId && selectedProductId !== '__new_product__' && qtyNum > 0) {
+        const draftProd = products.find((p) => p.id === selectedProductId);
+        if (draftProd) {
+          const effPrice = priceNum > 0 ? priceNum : draftProd.sellPrice;
+          const effGross = Math.round(qtyNum * effPrice);
+          const effDiscount = hasDiscountActive
+            ? discountMode === 'percent'
+              ? Math.round((effGross * Math.min(100, rawDiscountNum)) / 100)
+              : Math.min(effGross, Math.round(rawDiscountNum))
+            : 0;
+          finalCartItems.push({
+            id: `cart_last_${Date.now()}`,
+            productId: draftProd.id,
+            productName: draftProd.name,
+            unit: draftProd.unit,
+            quantity: qtyNum,
+            unitPrice: effPrice,
+            promotionType,
+            discountAmount: effDiscount,
+            discountPercent: computedDiscountPercent,
+            giftProductId: selectedGiftProductObj?.id,
+            giftProductName: selectedGiftProductObj?.name,
+            giftUnit: selectedGiftProductObj?.unit,
+            giftQuantity: selectedGiftProductObj ? giftQtyNum : 0,
+            dosageGuide: dosageGuide.trim() || undefined,
+          });
+        }
+      }
+
+      const invCheck = validateCartInventory(products, finalCartItems);
+      if (!invCheck.valid) {
+        setFormMessage({ type: 'error', text: invCheck.error || 'Tồn kho không đủ.' });
+        return;
+      }
+
+      if (!resolvedWarehouse || resolvedWarehouse === '__new_warehouse__') {
+        const firstProd = products.find((p) => p.id === finalCartItems[0].productId);
+        resolvedWarehouse = firstProd?.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+      }
+
+      try {
+        const alloc = allocatePaymentAcrossCartItems(
+          finalCartItems,
+          paymentMode === 'full' ? Number.MAX_SAFE_INTEGER : Math.max(0, Number(paidAmount) || 0)
+        );
+        const createdSales = onCreateMultiItemSale({
+          customerId: resolvedCustomer.id,
+          customerName: resolvedCustomer.name,
+          customerPhone: resolvedCustomer.phone,
+          warehouseName: resolvedWarehouse,
+          dueDate:
+            alloc.totalDebt > 0
+              ? dueDate || computeDueDateAfterDays(7)
+              : computeDueDateAfterDays(0),
+          note: note.trim(),
+          totalPaidAmount: alloc.totalPaid,
+          items: finalCartItems,
+        });
+
+        const sharedCode = createdSales[0]?.invoiceCode || 'HD';
+        setLastCreatedOrder({
+          invoiceCode: sharedCode,
+          warehouseName: resolvedWarehouse,
+          customerName: resolvedCustomer.name,
+          customerPhone: resolvedCustomer.phone,
+          customerAddress: resolvedCustomer.address,
+          sales: createdSales,
+        });
+
+        if (shouldExportPDF && createdSales.length > 0) {
+          exportSaleInvoicePDF({
+            ...createdSales[0],
+            customerAddress: resolvedCustomer.address,
+            totalAmount: createdSales.reduce((s, r) => s + r.totalAmount, 0),
+            paidAmount: createdSales.reduce((s, r) => s + r.paidAmount, 0),
+            debtAmount: createdSales.reduce((s, r) => s + r.debtAmount, 0),
+            discountAmount: createdSales.reduce((s, r) => s + (r.discountAmount || 0), 0),
+            items: createdSales.map((r) => ({
+              productName: r.productName,
+              unit: r.unit,
+              quantity: r.quantity,
+              unitPrice: r.unitPrice,
+              discountAmount: r.discountAmount,
+              giftProductName: r.giftProductName,
+              giftUnit: r.giftUnit,
+              giftQuantity: r.giftQuantity,
+              dosageGuide: r.dosageGuide,
+            })),
+            bankQrConfig,
+          });
+        }
+
+        resetAllSaleFieldsToBlank();
+        setFormMessage({
+          type: 'success',
+          text: shouldExportPDF
+            ? `Đã lưu & xuất PDF hóa đơn ${sharedCode} gồm ${createdSales.length} mặt hàng (${resolvedCustomer.name}). Dùng thanh nút nhanh bên dưới để Hiện QR VietQR, In K80 hoặc Gửi Zalo!`
+            : `Đã lưu hóa đơn POS ${sharedCode} gồm ${createdSales.length} mặt hàng tại ${resolvedWarehouse}. Dùng thanh nút nhanh bên dưới để Hiện QR VietQR, In K80 hoặc Gửi Zalo!`,
+        });
+      } catch (err) {
+        setFormMessage({
+          type: 'error',
+          text: err instanceof Error ? err.message : 'Có lỗi khi tạo hóa đơn nhiều mặt hàng.',
+        });
+      }
       return;
     }
 
@@ -682,12 +1147,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         giftUnit: resolvedGiftProduct?.unit,
         giftQuantity: resolvedGiftProduct ? giftQtyNum : 0,
         giftUnitCost: resolvedGiftProduct?.importPrice || 0,
+        dosageGuide: dosageGuide.trim() || undefined,
+      });
+
+      setLastCreatedOrder({
+        invoiceCode: createdSale.invoiceCode,
+        warehouseName: resolvedWarehouse,
+        customerName: resolvedCustomer.name,
+        customerPhone: resolvedCustomer.phone,
+        customerAddress: resolvedCustomer.address,
+        sales: [createdSale],
       });
 
       if (shouldExportPDF) {
         exportSaleInvoicePDF({
           ...createdSale,
           customerAddress: resolvedCustomer.address,
+          bankQrConfig,
         });
       }
 
@@ -1574,6 +2050,201 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               )}
             </div>
 
+            {/* Dosage Guide & Multi-Item POS Cart Section */}
+            <div className="space-y-2.5 p-3.5 bg-teal-50/45 rounded-xl border border-teal-200/80">
+              <div className="flex items-center justify-between gap-2">
+                <label
+                  htmlFor="sale-dosage-guide-input"
+                  className="text-xs font-bold text-teal-950 flex items-center gap-1.5"
+                >
+                  <Leaf className="w-3.5 h-3.5 text-teal-700 shrink-0" />
+                  <span>Hướng dẫn liều lượng &amp; cách pha phun (Tự in lên Hóa đơn / Gửi Zalo)</span>
+                </label>
+                {dosageGuide && (
+                  <button
+                    type="button"
+                    onClick={() => setDosageGuide('')}
+                    className="text-[11px] text-slate-500 hover:text-red-600 underline shrink-0"
+                  >
+                    Xóa
+                  </button>
+                )}
+              </div>
+              <textarea
+                id="sale-dosage-guide-input"
+                rows={2}
+                value={dosageGuide}
+                onChange={(e) => setDosageGuide(e.target.value)}
+                placeholder="VD: Pha 25-30ml / bình 25 lít nước, phun đều tán lá lúc sáng sớm..."
+                className="w-full px-3 py-1.5 text-xs bg-white border border-teal-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500"
+              />
+              <div className="flex flex-wrap gap-1">
+                {DOSAGE_GUIDE_PRESETS.slice(0, 3).map((preset, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setDosageGuide(preset)}
+                    className="px-2 py-0.5 text-[10px] font-medium text-teal-900 bg-white hover:bg-teal-100 border border-teal-200 rounded-full transition-colors text-left"
+                  >
+                    + {preset.length > 38 ? `${preset.slice(0, 38)}…` : preset}
+                  </button>
+                ))}
+              </div>
+
+              {onCreateMultiItemSale && (
+                <button
+                  type="button"
+                  onClick={handleAddCurrentItemToCart}
+                  className="w-full py-2 px-3 text-xs font-bold text-emerald-800 bg-white hover:bg-emerald-50 border-2 border-dashed border-emerald-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <Plus className="w-4 h-4 shrink-0" />
+                  <span>
+                    Thêm vật tư vào Giỏ Hóa Đơn ({posCartItems.length} mặt hàng đã chọn)
+                  </span>
+                </button>
+              )}
+
+              {posCartItems.length > 0 && (
+                <div className="p-2.5 bg-white rounded-lg border border-emerald-200 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-bold text-emerald-900">
+                    <span className="flex items-center gap-1.5">
+                      <ShoppingCart className="w-3.5 h-3.5 text-emerald-700" />
+                      <span>Giỏ hàng POS ({posCartItems.length} mặt hàng · Chung 1 Hóa đơn)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setPosCartItems([])}
+                      className="text-[11px] font-semibold text-red-600 hover:underline"
+                    >
+                      Xóa giỏ
+                    </button>
+                  </div>
+                  <div className="divide-y divide-slate-100 max-h-52 overflow-y-auto">
+                    {posCartItems.map((item, idx) => {
+                      const lineNet = Math.max(
+                        0,
+                        Math.round(item.quantity * item.unitPrice) - (item.discountAmount || 0)
+                      );
+                      return (
+                        <div key={item.id} className="py-2 flex items-start justify-between gap-2 text-xs">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-semibold text-slate-900 truncate">
+                              {idx + 1}. {item.productName}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              {formatVND(item.unitPrice)} / {item.unit}
+                              {(item.discountAmount || 0) > 0 && (
+                                <span className="text-amber-700 ml-1.5">
+                                  (-{formatVND(item.discountAmount || 0)})
+                                </span>
+                              )}
+                            </div>
+                            {item.giftProductName && (item.giftQuantity || 0) > 0 && (
+                              <div className="text-[10px] text-emerald-700 font-semibold">
+                                + Quà: {item.giftQuantity} {item.giftUnit || ''} {item.giftProductName}
+                              </div>
+                            )}
+                            {item.dosageGuide && (
+                              <div className="text-[10px] text-teal-800 truncate">
+                                Liều lượng: {item.dosageGuide}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateCartItemQty(item.id, -1)}
+                              aria-label={`Giảm số lượng ${item.productName}`}
+                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
+                            >
+                              -
+                            </button>
+                            <span className="w-7 text-center font-mono font-bold text-slate-900">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateCartItemQty(item.id, 1)}
+                              aria-label={`Tăng số lượng ${item.productName}`}
+                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
+                            >
+                              +
+                            </button>
+                            <span className="font-mono font-bold text-emerald-800 ml-1 min-w-[68px] text-right">
+                              {formatVND(lineNet)}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPosCartItems((prev) => prev.filter((x) => x.id !== item.id))
+                              }
+                              aria-label={`Bỏ ${item.productName} khỏi giỏ`}
+                              className="p-1 text-slate-400 hover:text-red-600"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {lastCreatedOrder && (
+              <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs font-bold text-emerald-900">
+                    Đơn vừa tạo: <span className="font-mono">{lastCreatedOrder.invoiceCode}</span> (
+                    {lastCreatedOrder.sales.length} mặt hàng · {lastCreatedOrder.customerName})
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLastCreatedOrder(null)}
+                    aria-label="Ẩn thanh thao tác nhanh đơn vừa tạo"
+                    className="p-1 text-emerald-700 hover:text-emerald-900"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenSaleVietQr(lastCreatedOrder.sales)}
+                    className="px-2.5 py-1.5 text-[11px] font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg inline-flex items-center justify-center gap-1"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Hiện VietQR</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSendInvoiceZalo(lastCreatedOrder.sales)}
+                    className="px-2.5 py-1.5 text-[11px] font-bold text-white bg-sky-600 hover:bg-sky-700 rounded-lg inline-flex items-center justify-center gap-1"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>Gửi Zalo</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportGroupedThermalPdf(lastCreatedOrder.sales[0], 80)}
+                    className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg inline-flex items-center justify-center gap-1"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>In K80</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportGroupedInvoicePdf(lastCreatedOrder.sales[0])}
+                    className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg inline-flex items-center justify-center gap-1"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>PDF A4</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Payment Method Toggle */}
             <div>
               <span className="block text-xs font-semibold text-slate-700 mb-1.5">
@@ -1807,13 +2478,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
               <button
                 type="submit"
                 className="w-full py-2.5 px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center justify-center gap-1.5"
               >
                 <Plus className="w-4 h-4 shrink-0" />
-                <span>Lưu đơn bán hàng</span>
+                <span>
+                  {posCartItems.length > 0
+                    ? `Lưu đơn (${combinedPreviewItems.length} món)`
+                    : 'Lưu đơn bán hàng'}
+                </span>
               </button>
               <button
                 type="button"
@@ -1821,7 +2496,25 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 className="w-full py-2.5 px-3 text-xs font-semibold text-slate-900 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors flex items-center justify-center gap-1.5"
               >
                 <FileDown className="w-4 h-4 text-emerald-700 shrink-0" />
-                <span>Lưu & Xuất Phiếu PDF</span>
+                <span>Lưu &amp; Xuất PDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setVietQrModalTarget({
+                    title: 'Mã VietQR thu tiền đơn hàng',
+                    subtitle: selectedCustomerObj
+                      ? `${selectedCustomerObj.name} · ${combinedPreviewItems.length || 1} mặt hàng`
+                      : 'Khách hàng mua lẻ',
+                    amount: summary.paidAmount > 0 ? summary.paidAmount : summary.totalAmount,
+                    addInfo: `TT DON HANG ${selectedCustomerObj?.name || 'KHACH LE'}`,
+                    customerPhone: selectedCustomerObj?.phone,
+                  })
+                }
+                className="w-full py-2.5 px-3 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+              >
+                <QrCode className="w-4 h-4 shrink-0" />
+                <span>Hiện VietQR</span>
               </button>
             </div>
           </form>
@@ -1949,6 +2642,12 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           )}
                         </div>
                       )}
+                      {s.dosageGuide && (
+                        <div className="mt-1.5 pt-1.5 border-t border-slate-200/80 text-[11px] text-teal-800 flex items-start gap-1">
+                          <Leaf className="w-3 h-3 shrink-0 mt-0.5 text-teal-700" />
+                          <span>Pha phun: {s.dosageGuide}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1978,13 +2677,38 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   </div>
 
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                    <button
-                      type="button"
-                      onClick={() => exportSaleInvoicePDF(s)}
-                      className="px-3 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
-                    >
-                      Xuất PDF
-                    </button>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleExportGroupedInvoicePdf(s)}
+                        className="px-2.5 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
+                      >
+                        PDF A4
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportGroupedThermalPdf(s, 80)}
+                        className="px-2 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap"
+                      >
+                        K80
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenSaleVietQr(findInvoiceGroupSales(sales, s))}
+                        className="px-2 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <QrCode className="w-3 h-3" />
+                        <span>QR</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSendInvoiceZalo(findInvoiceGroupSales(sales, s))}
+                        className="px-2 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
+                      >
+                        <MessageCircle className="w-3 h-3" />
+                        <span>Zalo</span>
+                      </button>
+                    </div>
 
                     {canPerformRoleAction(role, 'edit_record') ? (
                       <div className="flex items-center gap-1.5">
@@ -2085,6 +2809,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           )}
                         </div>
                       )}
+                      {s.dosageGuide && (
+                        <div className="mt-1 text-[11px] text-teal-800 flex items-start gap-1 max-w-[260px]">
+                          <Leaf className="w-3 h-3 shrink-0 mt-0.5 text-teal-700" />
+                          <span className="truncate" title={s.dosageGuide}>
+                            {s.dosageGuide}
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
                       {formatVND(s.totalAmount)}
@@ -2102,13 +2834,40 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       )}
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
-                      <div className="flex items-center justify-end gap-1.5">
+                      <div className="flex items-center justify-end gap-1">
                         <button
                           type="button"
-                          onClick={() => exportSaleInvoicePDF(s)}
-                          className="px-2.5 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
+                          onClick={() => handleExportGroupedInvoicePdf(s)}
+                          title="Xuất Hóa đơn A4 (kèm Liều lượng & VietQR)"
+                          className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                         >
-                          Xuất PDF
+                          PDF
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportGroupedThermalPdf(s, 80)}
+                          title="In Hóa đơn khổ nhiệt K80"
+                          className="px-1.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap"
+                        >
+                          K80
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSaleVietQr(findInvoiceGroupSales(sales, s))}
+                          title="Hiện mã VietQR thanh toán"
+                          aria-label={`Hiện mã VietQR hóa đơn ${s.invoiceCode}`}
+                          className="p-1.5 text-teal-700 bg-teal-50 hover:bg-teal-100 rounded-md"
+                        >
+                          <QrCode className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSendInvoiceZalo(findInvoiceGroupSales(sales, s))}
+                          title="Gửi hóa đơn & hướng dẫn pha phun qua Zalo"
+                          aria-label={`Gửi Zalo hóa đơn ${s.invoiceCode}`}
+                          className="p-1.5 text-sky-700 bg-sky-50 hover:bg-sky-100 rounded-md"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
                         </button>
                         {canPerformRoleAction(role, 'edit_record') ? (
                           <>
@@ -2232,6 +2991,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   giftProductName: hasGiftVal ? editSaleGiftName.trim() : undefined,
                   giftUnit: hasGiftVal ? editSaleGiftUnit.trim() || 'CÁI' : undefined,
                   giftQuantity: hasGiftVal ? giftQtyVal : 0,
+                  dosageGuide: editSaleDosageGuide.trim() || undefined,
                 });
                 setEditingSale(null);
               }}
@@ -2459,6 +3219,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                   />
                 </div>
+                <div>
+                  <label htmlFor="edit-sale-dosage" className="block text-xs font-semibold text-teal-900 mb-1">
+                    Hướng dẫn liều lượng &amp; cách pha phun
+                  </label>
+                  <textarea
+                    id="edit-sale-dosage"
+                    rows={2}
+                    value={editSaleDosageGuide}
+                    onChange={(e) => setEditSaleDosageGuide(e.target.value)}
+                    placeholder="VD: Pha 25-30ml / bình 25 lít nước..."
+                    className="w-full px-3 py-2 text-xs bg-white border border-teal-200 rounded-lg"
+                  />
+                </div>
               </div>
 
               </div>
@@ -2507,6 +3280,20 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             });
           }
         }}
+      />
+
+      <VietQrPaymentModal
+        isOpen={Boolean(vietQrModalTarget)}
+        onClose={() => setVietQrModalTarget(null)}
+        title={vietQrModalTarget?.title}
+        subtitle={vietQrModalTarget?.subtitle}
+        amount={vietQrModalTarget?.amount || 0}
+        addInfo={vietQrModalTarget?.addInfo || ''}
+        customerPhone={vietQrModalTarget?.customerPhone}
+        zaloMessage={vietQrModalTarget?.zaloMessage}
+        bankConfig={bankQrConfig}
+        onSaveBankConfig={onSaveBankQrConfig}
+        onNotifyToast={onNotifyToast}
       />
     </div>
   );

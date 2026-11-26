@@ -1105,6 +1105,7 @@ export function updateSaleRecord(
     giftUnit?: string;
     giftQuantity?: number;
     giftUnitCost?: number;
+    dosageGuide?: string;
   },
   nowIso: string
 ): SaleTransaction {
@@ -1144,6 +1145,7 @@ export function updateSaleRecord(
     giftQuantity:
       changes.giftQuantity !== undefined ? Math.max(0, Number(changes.giftQuantity) || 0) : existing.giftQuantity,
     giftUnitCost: changes.giftUnitCost ?? existing.giftUnitCost,
+    dosageGuide: changes.dosageGuide !== undefined ? changes.dosageGuide : existing.dosageGuide,
     note: changes.note,
     updatedAt: nowIso,
   };

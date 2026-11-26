@@ -22,7 +22,9 @@ import {
   SaleTransaction,
   SavedVoucherRecord,
   UserRole,
+  VietQrBankConfig,
 } from '../types';
+import { findInvoiceGroupSales } from '../utils/smartPosFeatures';
 import {
   canPerformRoleAction,
   computeDueDateAfterDays,
@@ -64,6 +66,7 @@ interface VoucherPrintCenterProps {
   onDeleteVoucher: (voucherId: string) => void;
   currentStaffName: string;
   lockedWarehouse?: string | null;
+  bankQrConfig?: VietQrBankConfig | null;
   onNotifyToast: (msg: string) => void;
 }
 
@@ -78,6 +81,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   onDeleteVoucher,
   currentStaffName,
   lockedWarehouse,
+  bankQrConfig,
   onNotifyToast,
 }) => {
   const [activeVoucher, setActiveVoucher] = useState<VoucherType>('sale_invoice');
@@ -283,6 +287,29 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
     const effectiveCreatedAt = selectedSourceCreatedAt || todayIso;
     let exportedFileName = '';
 
+    const selectedSaleObj =
+      activeVoucher === 'sale_invoice' && selectedQuickFillId
+        ? sales.find((s) => s.id === selectedQuickFillId) || null
+        : null;
+    const groupedSalesForPrint = selectedSaleObj
+      ? findInvoiceGroupSales(sales, selectedSaleObj)
+      : [];
+    const groupedItemsForPrint =
+      groupedSalesForPrint.length > 1
+        ? groupedSalesForPrint.map((s) => ({
+            productName: s.productName,
+            unit: s.unit,
+            quantity: s.quantity,
+            unitPrice: s.unitPrice,
+            discountAmount: s.discountAmount,
+            giftProductName: s.giftProductName,
+            giftUnit: s.giftUnit,
+            giftQuantity: s.giftQuantity,
+            dosageGuide: s.dosageGuide,
+          }))
+        : undefined;
+    const singleDosageGuide = selectedSaleObj?.dosageGuide;
+
     if (paperFormat === 'k80' || paperFormat === 'k58') {
       const paperWidthMm: 58 | 80 = paperFormat === 'k58' ? 58 : 80;
       const thermalCode =
@@ -321,21 +348,35 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         quantity: qtyNum || 1,
         unitPrice: priceNum,
         discountAmount: discountNum,
+        dosageGuide: singleDosageGuide,
+        items: groupedItemsForPrint,
+        bankQrConfig:
+          activeVoucher === 'sale_invoice' || activeVoucher === 'customer_receipt'
+            ? bankQrConfig
+            : null,
         totalLabel:
           activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
             ? 'Tổng thanh toán:'
             : 'Nợ gốc / Trước GD:',
         totalAmount:
-          activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
+          activeVoucher === 'sale_invoice' && groupedSalesForPrint.length > 1
+            ? groupedSalesForPrint.reduce((s, r) => s + r.totalAmount, 0)
+            : activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
             ? computedTotal
             : prevDebtNum,
         paidLabel:
           activeVoucher === 'supplier_payment' || activeVoucher === 'import_receipt'
             ? 'Đã trả NCC:'
             : 'Đã thanh toán:',
-        paidAmount: paidNum,
+        paidAmount:
+          activeVoucher === 'sale_invoice' && groupedSalesForPrint.length > 1
+            ? groupedSalesForPrint.reduce((s, r) => s + r.paidAmount, 0)
+            : paidNum,
         debtLabel: 'Còn lại:',
-        remainingDebt,
+        remainingDebt:
+          activeVoucher === 'sale_invoice' && groupedSalesForPrint.length > 1
+            ? groupedSalesForPrint.reduce((s, r) => s + r.debtAmount, 0)
+            : remainingDebt,
         dueDate: dueDate || todayIso.slice(0, 10),
         staffName: currentStaffName,
         note: note.trim(),
@@ -353,9 +394,21 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         quantity: qtyNum || 1,
         unitPrice: priceNum,
         discountAmount: discountNum,
-        totalAmount: computedTotal,
-        paidAmount: paidNum,
-        debtAmount: remainingDebt,
+        dosageGuide: singleDosageGuide,
+        items: groupedItemsForPrint,
+        bankQrConfig,
+        totalAmount:
+          groupedSalesForPrint.length > 1
+            ? groupedSalesForPrint.reduce((s, r) => s + r.totalAmount, 0)
+            : computedTotal,
+        paidAmount:
+          groupedSalesForPrint.length > 1
+            ? groupedSalesForPrint.reduce((s, r) => s + r.paidAmount, 0)
+            : paidNum,
+        debtAmount:
+          groupedSalesForPrint.length > 1
+            ? groupedSalesForPrint.reduce((s, r) => s + r.debtAmount, 0)
+            : remainingDebt,
         dueDate: dueDate || todayIso.slice(0, 10),
         note: note.trim(),
         staffName: currentStaffName,
