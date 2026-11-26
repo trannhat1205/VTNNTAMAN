@@ -113,6 +113,7 @@ const MIME_TYPES = {
   '.mjs': 'application/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
@@ -124,7 +125,7 @@ const MIME_TYPES = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-const COMPRESSIBLE_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg', '.txt']);
+const COMPRESSIBLE_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.webmanifest', '.svg', '.txt']);
 
 function applySecurityHeaders(res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -135,19 +136,24 @@ function applySecurityHeaders(res) {
 
 function sendFile(req, res, filePath) {
   const ext = path.extname(filePath).toLowerCase();
+  const baseName = path.basename(filePath).toLowerCase();
   const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-  const isHtml = ext === '.html';
-  const isImmutableAsset = filePath.includes(`${path.sep}assets${path.sep}`) && !isHtml;
+  const isNoCache =
+    ext === '.html' || baseName === 'sw.js' || ext === '.webmanifest';
+  const isHashedAsset =
+    filePath.includes(`${path.sep}assets${path.sep}`) &&
+    !isNoCache &&
+    /-[a-z0-9_-]{6,}\.(js|css|woff2?)$/i.test(baseName);
 
   applySecurityHeaders(res);
   res.setHeader('Content-Type', contentType);
   res.setHeader(
     'Cache-Control',
-    isHtml
+    isNoCache
       ? 'no-cache, no-store, must-revalidate'
-      : isImmutableAsset
+      : isHashedAsset
       ? 'public, max-age=31536000, immutable'
-      : 'public, max-age=86400'
+      : 'public, max-age=3600, must-revalidate'
   );
 
   if (req.method === 'HEAD') {

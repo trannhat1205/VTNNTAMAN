@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules for VTNN Tâm An (gapgold-e6b62.firebasestorage.app)
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isPrimaryAdmin() {
+      return isSignedIn() && (
+        request.auth.uid == 'Gu6OYdsdiWbRvbEINqaWZXj3LV83' ||
+        (request.auth.token.email_verified == true && request.auth.token.email == 'trannhat1205@gmail.com')
+      );
+    }
+
+    // Shared AI Knowledge Cache & Community Market Price Board (JSON <= 10 MB)
+    match /documents/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.resource.size <= 10 * 1024 * 1024;
+      allow delete: if isPrimaryAdmin();
+    }
+
+    match /ai_shared_cache/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.resource.size <= 10 * 1024 * 1024;
+      allow delete: if isPrimaryAdmin();
+    }
+
+    // Zalo-like Internal Chat Attachments (images, videos, documents <= 25 MB)
+    match /internal_chat/{roomId}/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.resource.size <= 25 * 1024 * 1024;
+      allow delete: if isPrimaryAdmin();
+    }
+
+    // Default deny everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

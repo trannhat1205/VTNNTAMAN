@@ -956,7 +956,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              onDeleteProduct(p.id);
+                              if (
+                                window.confirm(
+                                  `Xác nhận xóa vật tư "${p.name}" (${p.code}) khỏi danh mục kho?`
+                                )
+                              ) {
+                                onDeleteProduct(p.id);
+                              }
                             }}
                             aria-label={`Xóa vật tư ${p.name}`}
                             className="p-1.5 text-slate-400 hover:text-red-600 rounded-md border border-slate-200"
@@ -1166,7 +1172,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                               type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onDeleteProduct(p.id);
+                                if (
+                                  window.confirm(
+                                    `Xác nhận xóa vật tư "${p.name}" (${p.code}) khỏi danh mục kho?`
+                                  )
+                                ) {
+                                  onDeleteProduct(p.id);
+                                }
                               }}
                               aria-label={`Xóa vật tư ${p.name}`}
                               className="p-1.5 text-slate-400 hover:text-red-600 rounded-md"

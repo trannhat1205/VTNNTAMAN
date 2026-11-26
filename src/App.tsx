@@ -20,6 +20,7 @@ import {
   Printer,
   ShieldCheck,
   ShoppingCart,
+  Smartphone,
   Sparkles,
   Truck,
   Users,
@@ -163,6 +164,7 @@ import {
 import { NotificationCenter } from './components/NotificationCenter';
 import { MultiWarehouseFilterPopover } from './components/MultiWarehouseFilterPopover';
 import { InitialLoginScreenPortal } from './components/InitialLoginScreenPortal';
+import { InstallPwaModal } from './components/InstallPwaModal';
 
 const CustomerModule = lazy(() =>
   import('./components/CustomerModule').then((m) => ({ default: m.CustomerModule }))
@@ -327,6 +329,52 @@ export default function App() {
     onUndo: () => void;
   } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const [isPwaInstallModalOpen, setIsPwaInstallModalOpen] = useState(false);
+  const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<{
+    prompt: () => Promise<void>;
+    userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+  } | null>(null);
+  const [isStandaloneInstalled, setIsStandaloneInstalled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const nav = window.navigator as Navigator & { standalone?: boolean };
+    return (
+      window.matchMedia?.('(display-mode: standalone)').matches === true ||
+      nav.standalone === true
+    );
+  });
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleBeforeInstall = (e: Event) => {
+      e.preventDefault();
+      setDeferredInstallPrompt(
+        e as unknown as {
+          prompt: () => Promise<void>;
+          userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
+        }
+      );
+    };
+    const handleInstalled = () => {
+      setIsStandaloneInstalled(true);
+      setDeferredInstallPrompt(null);
+      setIsPwaInstallModalOpen(false);
+      showToast('Đã cài đặt ứng dụng VTNN Tâm An lên thiết bị thành công!');
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('appinstalled', handleInstalled);
+
+    // Support PWA manifest shortcut deep-links (?tab=sales|inventory|debts|imports)
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get('tab') as ActiveTab | null;
+    if (tabParam && ['sales', 'imports', 'inventory', 'debts', 'customers', 'reports'].includes(tabParam)) {
+      setActiveTab(tabParam);
+    }
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('appinstalled', handleInstalled);
+    };
+  }, []);
+
   const [autoDailyBackupEnabled, setAutoDailyBackupEnabled] = useState(
     initialWorkspace.autoDailyBackupEnabled
   );
@@ -3700,14 +3748,15 @@ export default function App() {
         prodDeltaById.set(matchedProd.id, (prodDeltaById.get(matchedProd.id) || 0) - qty);
       }
 
+      const batchTs = Date.now();
       const sum = calculateSaleSummary(qty, price, paidRaw);
       addedSales.push({
-        id: `sale_xl_${Date.now()}_${idx}`,
+        id: `sale_xl_${batchTs}_${idx}`,
         invoiceCode: `HD-XL-${sales.length + idx + 1}`,
-        customerId: matchedCust?.id || `cust_xl_${idx}`,
+        customerId: matchedCust?.id || `cust_xl_${batchTs}_${idx}`,
         customerName: matchedCust?.name || custName,
         customerPhone: matchedCust?.phone || custPhone,
-        productId: matchedProd?.id || `prod_xl_${idx}`,
+        productId: matchedProd?.id || `prod_xl_${batchTs}_${idx}`,
         productName: matchedProd?.name || prodName,
         unit: matchedProd?.unit || String(r['Đơn Vị'] || 'Bao').trim(),
         quantity: qty,
@@ -3807,13 +3856,14 @@ export default function App() {
         });
       }
 
+      const batchTs = Date.now();
       const sum = calculateImportSummary(qty, cost, paidRaw);
       addedImports.push({
-        id: `imp_xl_${Date.now()}_${idx}`,
+        id: `imp_xl_${batchTs}_${idx}`,
         receiptCode: `PN-XL-${imports.length + idx + 1}`,
         supplierName: supName,
         supplierPhone: String(r['SĐT Nhà Cung Cấp'] || r['SĐT NCC'] || '').trim(),
-        productId: matchedProd?.id || `prod_xl_${idx}`,
+        productId: matchedProd?.id || `prod_xl_${batchTs}_${idx}`,
         productName: matchedProd?.name || prodName,
         unit: matchedProd?.unit || String(r['Đơn Vị Tính'] || r['Đơn Vị'] || 'Bao').trim(),
         quantity: qty,
@@ -3865,12 +3915,17 @@ export default function App() {
     let updatedCount = 0;
     let skippedCount = 0;
     const nowIso = new Date().toISOString();
+    const activeUid = auth.currentUser?.uid || currentStaff.uid;
+    const allowedSaleIds = new Set(visibleSales.map((s) => s.id));
+    const allowedImportIds = new Set(visibleImports.map((i) => i.id));
     let workingSales = [...sales];
     let workingImports = [...imports];
+    const addedReceipts: CashReceiptVoucher[] = [];
+    const addedPayments: CashPaymentVoucher[] = [];
     let salesChanged = false;
     let importsChanged = false;
 
-    rows.forEach((r) => {
+    rows.forEach((r, rowIdx) => {
       const code = String(r['Mã Hóa Đơn / Mã Phiếu Nhập'] || '').trim();
       const amount = readExcelNumber(r, ['Số Tiền Thanh Toán Đợt Này (VNĐ)'], 0);
       const note = String(r['Ghi Chú Thanh Toán'] || 'Cập nhật từ Excel').trim();
@@ -3882,27 +3937,102 @@ export default function App() {
 
       if (code.startsWith('HD-')) {
         workingSales = workingSales.map((s) => {
-          if (s.invoiceCode !== code || s.debtAmount <= 0) return s;
+          if (!allowedSaleIds.has(s.id) || s.invoiceCode !== code || s.debtAmount <= 0) return s;
           salesChanged = true;
           updatedCount += 1;
-          const noteSuffix = `[Thu nợ Excel: +${Math.min(s.debtAmount, Math.round(amount)).toLocaleString('vi-VN')}đ${note ? ' - ' + note : ''}]`;
-          return applyDebtPayment(
+          const actualCollected = Math.min(s.debtAmount, Math.round(amount));
+          const noteSuffix = `[Thu nợ Excel: +${actualCollected.toLocaleString('vi-VN')}đ${note ? ' - ' + note : ''}]`;
+          const updated = applyDebtPayment(
             { ...s, note: s.note ? `${s.note} | ${noteSuffix}` : noteSuffix },
-            amount,
+            actualCollected,
             nowIso
           );
+          const vCode = generateSequentialVoucherCode('PT', [
+            ...receiptVouchers.map((rv) => rv.voucherCode),
+            ...addedReceipts.map((rv) => rv.voucherCode),
+          ]);
+          addedReceipts.push({
+            id: `rv_xl_${Date.now()}_${rowIdx}`,
+            voucherCode: vCode,
+            groupName: receiptGroups[0] || 'Thu nợ bán hàng khách hàng',
+            warehouseName: s.warehouseName || lockedWarehouse || 'Tâm An Mỹ Ngãi',
+            partnerId: s.customerId,
+            partnerName: s.customerName,
+            partnerPhone: s.customerPhone,
+            amount: actualCollected,
+            paymentMethod: 'Tiền mặt / Chuyển khoản',
+            isDebtSettlement: true,
+            settledAllocations: [
+              {
+                recordId: s.id,
+                code: s.invoiceCode,
+                date: (s.createdAt || '').slice(0, 10),
+                dueDate: s.dueDate,
+                productName: s.productName,
+                previousDebt: s.debtAmount,
+                allocatedAmount: actualCollected,
+                remainingDebt: updated.debtAmount,
+              },
+            ],
+            totalPreviousDebt: s.debtAmount,
+            totalRemainingDebt: updated.debtAmount,
+            countsTowardOtherIncome: false,
+            note: note || `Thu nợ Excel cho HĐ ${s.invoiceCode}`,
+            staffName: currentStaff.displayName,
+            ownerId: activeUid,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+          return updated;
         });
       } else if (code.startsWith('PN-')) {
         workingImports = workingImports.map((i) => {
-          if (i.receiptCode !== code || i.debtAmount <= 0) return i;
+          if (!allowedImportIds.has(i.id) || i.receiptCode !== code || i.debtAmount <= 0) return i;
           importsChanged = true;
           updatedCount += 1;
-          const noteSuffix = `[Trả nợ Excel: -${Math.min(i.debtAmount, Math.round(amount)).toLocaleString('vi-VN')}đ${note ? ' - ' + note : ''}]`;
-          return applyDebtPayment(
+          const actualPaid = Math.min(i.debtAmount, Math.round(amount));
+          const noteSuffix = `[Trả nợ Excel: -${actualPaid.toLocaleString('vi-VN')}đ${note ? ' - ' + note : ''}]`;
+          const updated = applyDebtPayment(
             { ...i, note: i.note ? `${i.note} | ${noteSuffix}` : noteSuffix },
-            amount,
+            actualPaid,
             nowIso
           );
+          const vCode = generateSequentialVoucherCode('PC', [
+            ...paymentVouchers.map((pv) => pv.voucherCode),
+            ...addedPayments.map((pv) => pv.voucherCode),
+          ]);
+          addedPayments.push({
+            id: `pv_xl_${Date.now()}_${rowIdx}`,
+            voucherCode: vCode,
+            groupName: paymentGroups[0] || 'Chi trả nợ Nhà cung cấp',
+            warehouseName: i.warehouseName || lockedWarehouse || 'Tâm An Mỹ Ngãi',
+            partnerName: i.supplierName,
+            partnerPhone: i.supplierPhone,
+            amount: actualPaid,
+            paymentMethod: 'Chuyển khoản ngân hàng',
+            isDebtSettlement: true,
+            settledAllocations: [
+              {
+                recordId: i.id,
+                code: i.receiptCode,
+                date: (i.createdAt || '').slice(0, 10),
+                dueDate: i.dueDate,
+                productName: i.productName,
+                previousDebt: i.debtAmount,
+                allocatedAmount: actualPaid,
+                remainingDebt: updated.debtAmount,
+              },
+            ],
+            totalPreviousDebt: i.debtAmount,
+            totalRemainingDebt: updated.debtAmount,
+            countsTowardOperatingExpense: false,
+            note: note || `Trả nợ NCC Excel cho phiếu ${i.receiptCode}`,
+            staffName: currentStaff.displayName,
+            ownerId: activeUid,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+          return updated;
         });
       }
     });
@@ -3913,6 +4043,12 @@ export default function App() {
     }
     if (importsChanged) {
       setImports(workingImports);
+    }
+    if (addedReceipts.length > 0) {
+      setReceiptVouchers((prev) => [...addedReceipts, ...prev]);
+    }
+    if (addedPayments.length > 0) {
+      setPaymentVouchers((prev) => [...addedPayments, ...prev]);
     }
     if (updatedCount > 0) {
       showToast(
@@ -5696,6 +5832,19 @@ export default function App() {
                 </select>
               )}
 
+              {/* Install App (PWA) Trigger — Hidden once running as installed standalone App */}
+              {!isStandaloneInstalled && (
+                <button
+                  type="button"
+                  onClick={() => setIsPwaInstallModalOpen(true)}
+                  title="Cài đặt VTNN Tâm An thành ứng dụng trên Điện thoại & Máy tính"
+                  className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Smartphone className="w-3.5 h-3.5 shrink-0" />
+                  <span>Cài App</span>
+                </button>
+              )}
+
               {/* Prominent Logout ("Thoát đăng nhập") Button */}
               <button
                 type="button"
@@ -5819,6 +5968,21 @@ export default function App() {
         )}
 
         {/* Toast Notification Banner with 10s Undo Action */}
+        <InstallPwaModal
+          isOpen={isPwaInstallModalOpen}
+          onClose={() => setIsPwaInstallModalOpen(false)}
+          canPromptNativeInstall={Boolean(deferredInstallPrompt)}
+          isStandaloneInstalled={isStandaloneInstalled}
+          onTriggerNativeInstall={async () => {
+            if (!deferredInstallPrompt) return;
+            await deferredInstallPrompt.prompt();
+            const choice = await deferredInstallPrompt.userChoice;
+            if (choice.outcome === 'accepted') {
+              setDeferredInstallPrompt(null);
+              setIsPwaInstallModalOpen(false);
+            }
+          }}
+        />
         {toastBanner && (
           <div
             role="status"

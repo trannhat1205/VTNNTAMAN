@@ -1999,7 +1999,15 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => onDeleteSale(s.id)}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `Xác nhận xóa hóa đơn ${s.invoiceCode} (${s.customerName}) và hoàn lại tồn kho?`
+                              )
+                            ) {
+                              onDeleteSale(s.id);
+                            }
+                          }}
                           aria-label={`Xóa hóa đơn ${s.invoiceCode}`}
                           className="p-1.5 text-slate-400 hover:text-red-600 rounded-md border border-slate-200"
                         >
@@ -2115,7 +2123,15 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={() => onDeleteSale(s.id)}
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Xác nhận xóa hóa đơn ${s.invoiceCode} (${s.customerName}) và hoàn lại tồn kho?`
+                                  )
+                                ) {
+                                  onDeleteSale(s.id);
+                                }
+                              }}
                               aria-label={`Xóa hóa đơn ${s.invoiceCode}`}
                               className="p-1.5 text-slate-400 hover:text-red-600 rounded-md"
                             >
@@ -2286,16 +2302,18 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="sm:col-span-2">
                   <label htmlFor="edit-sale-prod" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Tên vật tư nông nghiệp *
+                    Tên vật tư nông nghiệp (Khóa theo ID tồn kho)
                   </label>
                   <input
                     id="edit-sale-prod"
                     type="text"
-                    required
+                    readOnly
                     value={editSaleProductName}
-                    onChange={(e) => setEditSaleProductName(e.target.value)}
-                    className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
+                    className="w-full px-3 py-2 text-sm bg-slate-100 text-slate-600 border border-slate-200 rounded-lg cursor-not-allowed"
                   />
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    Cố định mặt hàng để bảo toàn chính xác tồn kho; nếu chọn nhầm sản phẩm hãy xóa lập hóa đơn mới.
+                  </p>
                 </div>
                 <div>
                   <label htmlFor="edit-sale-unit" className="block text-xs font-semibold text-slate-700 mb-1">
@@ -2354,6 +2372,21 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label htmlFor="edit-sale-discount" className="block text-xs font-semibold text-slate-700 mb-1">
+                  Chiết khấu / Giảm giá hóa đơn (VNĐ)
+                </label>
+                <input
+                  id="edit-sale-discount"
+                  type="number"
+                  min={0}
+                  value={editSaleDiscount}
+                  onChange={(e) => setEditSaleDiscount(e.target.value)}
+                  placeholder="0"
+                  className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                />
               </div>
 
               <div className="space-y-3">
@@ -3735,7 +3768,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteImport(imp.id)}
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  `Xác nhận xóa phiếu nhập ${imp.receiptCode} (${imp.supplierName})?`
+                                )
+                              ) {
+                                onDeleteImport(imp.id);
+                              }
+                            }}
                             aria-label={`Xóa phiếu nhập ${imp.receiptCode}`}
                             className="p-1.5 text-slate-400 hover:text-red-600 rounded-md border border-slate-200"
                           >
@@ -3861,7 +3902,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => onDeleteImport(imp.id)}
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      `Xác nhận xóa phiếu nhập ${imp.receiptCode} (${imp.supplierName})?`
+                                    )
+                                  ) {
+                                    onDeleteImport(imp.id);
+                                  }
+                                }}
                                 aria-label={`Xóa phiếu nhập ${imp.receiptCode}`}
                                 className="p-1.5 text-slate-400 hover:text-red-600 rounded-md"
                               >
@@ -4017,16 +4066,18 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="sm:col-span-2">
                   <label htmlFor="edit-imp-prod" className="block text-xs font-semibold text-slate-700 mb-1">
-                    Tên vật tư nhập *
+                    Tên vật tư nhập (Khóa theo ID tồn kho)
                   </label>
                   <input
                     id="edit-imp-prod"
                     type="text"
-                    required
+                    readOnly
                     value={editImpProductName}
-                    onChange={(e) => setEditImpProductName(e.target.value)}
-                    className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
+                    className="w-full px-3 py-2 text-sm bg-slate-100 text-slate-600 border border-slate-200 rounded-lg cursor-not-allowed"
                   />
+                  <p className="text-[10px] text-slate-500 mt-0.5">
+                    Cố định mặt hàng để bảo toàn tồn kho và giá vốn bình quân; nếu sai sản phẩm hãy xóa lập phiếu nhập mới.
+                  </p>
                 </div>
                 <div>
                   <label htmlFor="edit-imp-unit" className="block text-xs font-semibold text-slate-700 mb-1">
