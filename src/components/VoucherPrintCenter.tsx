@@ -1246,7 +1246,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
           <div className="flex items-center justify-between border-b border-slate-200 pb-4">
             <div className="flex items-center gap-3">
               <img
-                src="/assets/logo-taman.png"
+                src="/assets/logo-taman.png?v=3"
                 alt="Logo VTNN Tâm An"
                 className="w-12 h-12 rounded-lg object-contain border border-slate-200 p-0.5"
               />

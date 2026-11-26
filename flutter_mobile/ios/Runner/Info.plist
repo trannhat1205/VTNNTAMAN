@@ -47,5 +47,16 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>VTNN Tâm An cần quyền Camera để quét mã vạch vật tư nông nghiệp.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>VTNN Tâm An cần quyền Thư viện ảnh để gửi hình ảnh và chứng từ trong chat nội bộ.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>https</string>
+		<string>tel</string>
+		<string>mailto</string>
+		<string>zalo</string>
+	</array>
 </dict>
 </plist>

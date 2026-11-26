@@ -1439,7 +1439,7 @@ export default function App() {
       try {
         new Notification(title, {
           body,
-          icon: '/assets/logo-taman.png',
+          icon: '/assets/logo-taman.png?v=3',
         });
       } catch {
         // Fallback already shown via toastBanner
@@ -5525,7 +5525,7 @@ export default function App() {
       <div className="min-h-screen bg-slate-100 text-slate-900 flex flex-col items-center justify-center p-4">
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-8 py-7 flex flex-col items-center gap-3 text-center">
           <img
-            src="/assets/logo-taman.png"
+            src="/assets/logo-taman.png?v=3"
             alt="Logo VTNN Tâm An"
             className="w-14 h-14 object-contain rounded-xl border border-emerald-200 p-1.5 bg-emerald-50"
           />
@@ -5565,7 +5565,7 @@ export default function App() {
           {/* Brand Lockup with Attached VTNN Tâm An Logo */}
           <div className="p-5 border-b border-slate-200 flex items-center gap-3">
             <img
-              src="/assets/logo-taman.png"
+              src="/assets/logo-taman.png?v=3"
               alt="Logo VTNN Tâm An"
               referrerPolicy="no-referrer"
               className="w-11 h-11 rounded-lg object-contain bg-white border border-slate-200 shrink-0 p-0.5"
@@ -6025,7 +6025,7 @@ export default function App() {
               <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div className="flex items-start sm:items-center gap-3.5 sm:gap-4">
                   <img
-                    src="/assets/logo-taman.png"
+                    src="/assets/logo-taman.png?v=3"
                     alt="Logo Vật tư Nông nghiệp Tâm An"
                     referrerPolicy="no-referrer"
                     className="w-14 h-14 sm:w-16 sm:h-16 rounded-xl object-contain border border-slate-200 p-1 shrink-0 bg-white"

@@ -5,4 +5,14 @@ coverage/
 *.log
 .env*
 !.env.example
+*.apk
+*.aab
+flutter_mobile/build/
+flutter_mobile/.dart_tool/
+flutter_mobile/.flutter-plugins
+flutter_mobile/.flutter-plugins-dependencies
+flutter_mobile/.idea/
+flutter_mobile/*.iml
+flutter_mobile/android/*.iml
+flutter_mobile/android/.gradle/
 

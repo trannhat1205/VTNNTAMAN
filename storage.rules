@@ -14,6 +14,10 @@ service firebase.storage {
       );
     }
 
+    function isOwnerOrAdmin(userId) {
+      return isSignedIn() && (request.auth.uid == userId || isPrimaryAdmin());
+    }
+
     // Shared AI Knowledge Cache & Community Market Price Board (JSON <= 10 MB)
     match /documents/{allPaths=**} {
       allow read: if isSignedIn();
@@ -28,10 +32,41 @@ service firebase.storage {
     }
 
     // Zalo-like Internal Chat Attachments (images, videos, documents <= 25 MB)
+    match /internal_chat_media/{roomId}/{allPaths=**} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.resource.size <= 25 * 1024 * 1024;
+      allow delete: if isPrimaryAdmin();
+    }
+
     match /internal_chat/{roomId}/{allPaths=**} {
       allow read: if isSignedIn();
       allow write: if isSignedIn() && request.resource.size <= 25 * 1024 * 1024;
       allow delete: if isPrimaryAdmin();
+    }
+
+    // Per-account backups, Excel imports, and user files (owner or Primary Admin only, <= 25 MB)
+    match /backups/{userId}/{allPaths=**} {
+      allow read: if isOwnerOrAdmin(userId);
+      allow write: if isOwnerOrAdmin(userId) && request.resource.size <= 25 * 1024 * 1024;
+      allow delete: if isOwnerOrAdmin(userId);
+    }
+
+    match /uploads/{userId}/{allPaths=**} {
+      allow read: if isOwnerOrAdmin(userId);
+      allow write: if isOwnerOrAdmin(userId) && request.resource.size <= 25 * 1024 * 1024;
+      allow delete: if isOwnerOrAdmin(userId);
+    }
+
+    match /excel_imports/{userId}/{allPaths=**} {
+      allow read: if isOwnerOrAdmin(userId);
+      allow write: if isOwnerOrAdmin(userId) && request.resource.size <= 25 * 1024 * 1024;
+      allow delete: if isOwnerOrAdmin(userId);
+    }
+
+    match /users/{userId}/{allPaths=**} {
+      allow read: if isOwnerOrAdmin(userId);
+      allow write: if isOwnerOrAdmin(userId) && request.resource.size <= 25 * 1024 * 1024;
+      allow delete: if isOwnerOrAdmin(userId);
     }
 
     // Default deny everything else

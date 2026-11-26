@@ -326,7 +326,7 @@ export const InitialLoginScreenPortal: React.FC<InitialLoginScreenPortalProps> =
         <div className="flex flex-col items-center text-center mb-5">
           <div className="w-16 h-16 rounded-2xl bg-emerald-50 border border-emerald-200 p-2 flex items-center justify-center shadow-xs mb-2.5">
             <img
-              src="/assets/logo-taman.png"
+              src="/assets/logo-taman.png?v=3"
               alt="Logo VTNN Tâm An"
               referrerPolicy="no-referrer"
               className="w-full h-full object-contain"

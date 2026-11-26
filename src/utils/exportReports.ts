@@ -30,7 +30,7 @@ let cachedLogoImage: HTMLImageElement | null = null;
 if (typeof window !== 'undefined' && typeof Image !== 'undefined') {
   const img = new Image();
   img.crossOrigin = 'anonymous';
-  img.src = '/assets/logo-taman.png';
+  img.src = '/assets/logo-taman.png?v=3';
   img.onload = () => {
     cachedLogoImage = img;
   };

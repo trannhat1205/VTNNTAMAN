@@ -32,7 +32,7 @@ export const InstallPwaModal: React.FC<InstallPwaModalProps> = ({
         <div className="px-5 py-4 border-b border-slate-200 bg-emerald-50/80 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
             <img
-              src="/assets/logo-taman.png"
+              src="/assets/logo-taman.png?v=3"
               alt="Logo VTNN Tâm An"
               className="w-9 h-9 rounded-xl border border-emerald-200 bg-white p-0.5 object-contain shrink-0"
             />
