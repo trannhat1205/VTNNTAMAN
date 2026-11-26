@@ -23,6 +23,7 @@ import {
   computeProductStockMovementLedger,
   computeReceivedItemsAndDebtReport,
   computeSaleEditStockDeltas,
+  computeSmartDashboardAnalytics,
   computeSmartReorderSuggestions,
   computeSupplierOldDebtSummary,
   computeTaxAuthorityFinancialStatement,
@@ -3357,6 +3358,91 @@ test('Stage 3: Stocktake ledger reconciliation, FEFO expiry, Smart Reorder, Debt
   });
   assert.equal(bctc2026.customerReceivables131, 3500000); // 1.5M (2025) + 2M (2026)
   assert.equal(bctc2026.supplierPayables331, 4500000); // 2.5M (2025) + 2M (2026)
+});
+
+test('Stage 4: computeCustomerLedger blank-phone isolation and computeSmartDashboardAnalytics', () => {
+  const retailA: CustomerProfile = {
+    id: 'c_retail_a',
+    code: 'KH-A',
+    name: 'Khách lẻ A',
+    phone: '',
+    address: '',
+    email: '',
+    note: '',
+    group: 'Khách lẻ',
+    totalPurchased: 0,
+    totalDebt: 0,
+    ownerId: 'u1',
+    createdAt: '2026-11-20T00:00:00Z',
+    updatedAt: '2026-11-20T00:00:00Z',
+  };
+  const retailSales: SaleTransaction[] = [
+    {
+      id: 's_a',
+      invoiceCode: 'HD-A1',
+      customerId: 'c_retail_a',
+      customerName: 'Khách lẻ A',
+      customerPhone: '',
+      productId: 'p1',
+      productName: 'NPK',
+      unit: 'Bao',
+      quantity: 2,
+      unitPrice: 500000,
+      unitCost: 400000,
+      totalAmount: 1000000,
+      paidAmount: 1000000,
+      debtAmount: 0,
+      dueDate: '2026-11-26',
+      status: 'paid',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-25T05:00:00Z',
+      updatedAt: '2026-11-25T05:00:00Z',
+    },
+    {
+      id: 's_b',
+      invoiceCode: 'HD-B1',
+      customerId: 'c_retail_b',
+      customerName: 'Khách lẻ B',
+      customerPhone: '',
+      productId: 'p1',
+      productName: 'NPK',
+      unit: 'Bao',
+      quantity: 3,
+      unitPrice: 500000,
+      unitCost: 400000,
+      totalAmount: 1500000,
+      paidAmount: 0,
+      debtAmount: 1500000,
+      dueDate: '2026-11-30',
+      status: 'unpaid',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-26T05:00:00Z',
+      updatedAt: '2026-11-26T05:00:00Z',
+    },
+  ];
+  const ledgerA = computeCustomerLedger(retailA, retailSales, '2026-11-26');
+  assert.equal(ledgerA.transactionCount, 1);
+  assert.equal(ledgerA.totalPurchased, 1000000);
+  assert.equal(ledgerA.totalDebt, 0);
+
+  const analytics = computeSmartDashboardAnalytics({
+    sales: retailSales,
+    products: [],
+    days: 7,
+    todayStr: '2026-11-26',
+  });
+  assert.equal(analytics.dailyPoints.length, 7);
+  assert.equal(analytics.totalRevenue, 2500000);
+  assert.equal(analytics.totalGrossProfit, 500000); // 2.5M - (2+3)*400k
+  assert.equal(analytics.grossMarginPct, 20);
+  assert.equal(analytics.topProducts[0].qtySold, 5);
+  assert.equal(analytics.topCustomers[0].customerName, 'Khách lẻ B');
 });
 
 

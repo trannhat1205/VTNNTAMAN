@@ -11,6 +11,7 @@ import {
   Pencil,
   Percent,
   Plus,
+  QrCode,
   RotateCcw,
   Search,
   ShoppingCart,
@@ -53,6 +54,7 @@ import {
 } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
+import { BarcodeScannerModal } from './BarcodeScannerModal';
 
 interface SalesLogViewProps {
   products: ProductItem[];
@@ -163,6 +165,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     type: 'error' | 'success';
     text: string;
   } | null>(null);
+  const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState<boolean>(false);
 
   // Inline New Customer Creation State
   const [showNewCustomerBox, setShowNewCustomerBox] = useState<boolean>(false);
@@ -1038,22 +1041,32 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 >
                   2. Chọn vật tư nông nghiệp *
                 </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (onRequestAddNewProductInImports) {
-                      onRequestAddNewProductInImports('');
-                      return;
-                    }
-                    const nextState = !showNewProductBox;
-                    setShowNewProductBox(nextState);
-                    setSelectedProductId(nextState ? '__new_product__' : '');
-                  }}
-                  className="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1 whitespace-nowrap"
-                >
-                  <PackagePlus className="w-3.5 h-3.5" />
-                  <span>{showNewProductBox ? 'Đóng khung thêm VT' : '+ Thêm vật tư mới'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsBarcodeScannerOpen(true)}
+                    className="px-2 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Quét mã</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onRequestAddNewProductInImports) {
+                        onRequestAddNewProductInImports('');
+                        return;
+                      }
+                      const nextState = !showNewProductBox;
+                      setShowNewProductBox(nextState);
+                      setSelectedProductId(nextState ? '__new_product__' : '');
+                    }}
+                    className="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <PackagePlus className="w-3.5 h-3.5" />
+                    <span>{showNewProductBox ? 'Đóng khung thêm VT' : '+ Thêm vật tư mới'}</span>
+                  </button>
+                </div>
               </div>
 
               <SearchableSelect
@@ -2436,6 +2449,32 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
           </div>
         </div>
       )}
+
+      <BarcodeScannerModal
+        isOpen={isBarcodeScannerOpen}
+        onClose={() => setIsBarcodeScannerOpen(false)}
+        title="Quét Mã Vạch Chọn Vật Tư Xuất Bán"
+        onDetected={(scanned) => {
+          const norm = scanned.trim().toLowerCase();
+          const matched = products.find(
+            (p) =>
+              (p.barcode && p.barcode.trim().toLowerCase() === norm) ||
+              p.code.trim().toLowerCase() === norm
+          );
+          if (matched) {
+            handleProductSelectChange(matched.id);
+            setFormMessage({
+              type: 'success',
+              text: `Đã chọn nhanh vật tư "${matched.name}" theo mã "${scanned}".`,
+            });
+          } else {
+            setFormMessage({
+              type: 'error',
+              text: `Không tìm thấy vật tư có mã vạch / mã VT "${scanned}".`,
+            });
+          }
+        }}
+      />
     </div>
   );
 };
@@ -2546,6 +2585,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(
     null
   );
+  const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState<boolean>(false);
 
   // Inline New Product State inside Import Form
   const [showNewProductBox, setShowNewProductBox] = useState<boolean>(false);
@@ -2994,18 +3034,28 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 >
                   1. Chọn vật tư nhập kho *
                 </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const nextState = !showNewProductBox;
-                    setShowNewProductBox(nextState);
-                    setSelectedProductId(nextState ? '__new_product__' : '');
-                  }}
-                  className="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1 whitespace-nowrap"
-                >
-                  <PackagePlus className="w-3.5 h-3.5" />
-                  <span>{showNewProductBox ? 'Đóng khung thêm VT' : '+ Thêm vật tư mới'}</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsBarcodeScannerOpen(true)}
+                    className="px-2 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>Quét mã</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextState = !showNewProductBox;
+                      setShowNewProductBox(nextState);
+                      setSelectedProductId(nextState ? '__new_product__' : '');
+                    }}
+                    className="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <PackagePlus className="w-3.5 h-3.5" />
+                    <span>{showNewProductBox ? 'Đóng khung thêm VT' : '+ Thêm vật tư mới'}</span>
+                  </button>
+                </div>
               </div>
 
               <SearchableSelect
@@ -3025,7 +3075,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   label: `[${p.code}] ${p.name} (${p.warehouseName || 'Tâm An Mỹ Ngãi'} · Tồn: ${p.stock} ${p.unit})`,
                   subLabel: `Giá nhập: ${formatVND(p.importPrice)} · Giá bán: ${formatVND(p.sellPrice)} · NCC: ${p.supplierName}`,
                   badge: `Tồn: ${p.stock} ${p.unit}`,
-                  keywords: `${p.code} ${p.name} ${p.category} ${p.warehouseName || ''} ${p.supplierName}`,
+                  keywords: `${p.code} ${p.name} ${p.barcode || ''} ${p.batchNumber || ''} ${p.category} ${p.warehouseName || ''} ${p.supplierName}`,
                 }))}
               />
 
@@ -4130,6 +4180,32 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
           </div>
         </div>
       )}
+
+      <BarcodeScannerModal
+        isOpen={isBarcodeScannerOpen}
+        onClose={() => setIsBarcodeScannerOpen(false)}
+        title="Quét Mã Vạch Chọn Vật Tư Nhập Kho"
+        onDetected={(scanned) => {
+          const norm = scanned.trim().toLowerCase();
+          const matched = products.find(
+            (p) =>
+              (p.barcode && p.barcode.trim().toLowerCase() === norm) ||
+              p.code.trim().toLowerCase() === norm
+          );
+          if (matched) {
+            handleSelectProduct(matched.id);
+            setFeedback({
+              type: 'success',
+              text: `Đã chọn nhanh vật tư "${matched.name}" theo mã "${scanned}".`,
+            });
+          } else {
+            setFeedback({
+              type: 'error',
+              text: `Không tìm thấy vật tư có mã vạch / mã VT "${scanned}".`,
+            });
+          }
+        }}
+      />
     </div>
   );
 };

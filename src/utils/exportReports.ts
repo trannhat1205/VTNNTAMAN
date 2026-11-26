@@ -234,7 +234,7 @@ function drawSignatureFooterOnCanvas(
   leftName?: string,
   rightName?: string
 ) {
-  const y = Math.min(940, startY + 46);
+  const y = startY > 880 ? startY + 46 : Math.min(940, startY + 46);
   const leftCenterX = pageWidth * 0.26;
   const rightCenterX = pageWidth * 0.74;
 
@@ -320,6 +320,102 @@ function saveCanvasAsA4PDF(
   const pdfHeightMm = orientation === 'portrait' ? 297 : 210;
 
   doc.addImage(dataUrl, 'PNG', 0, 0, pdfWidthMm, pdfHeightMm, undefined, 'FAST');
+  doc.save(fileName);
+  return fileName;
+}
+
+/**
+ * Multi-page A4 canvas renderer that prevents row truncation (`.slice`) on reports
+ * by slicing a tall logical canvas cleanly across consecutive A4 pages.
+ */
+function saveTallCanvasAsMultiPageA4PDF(
+  orientation: 'portrait' | 'landscape',
+  fileName: string,
+  title: string,
+  requiredLogicalHeight: number,
+  drawCallback: (ctx: CanvasRenderingContext2D, width: number, totalHeight: number) => void
+): string {
+  if (typeof document === 'undefined') {
+    return fileName;
+  }
+
+  const logicalWidth = orientation === 'portrait' ? 794 : 1123;
+  const pageLogicalHeight = orientation === 'portrait' ? 1123 : 794;
+  const totalLogicalHeight = Math.max(pageLogicalHeight, Math.ceil(requiredLogicalHeight));
+  const scale =
+    totalLogicalHeight * 2.5 > 16000 ? Math.max(1.2, 16000 / totalLogicalHeight) : 2.5;
+
+  const fullCanvas = document.createElement('canvas');
+  fullCanvas.width = Math.round(logicalWidth * scale);
+  fullCanvas.height = Math.round(totalLogicalHeight * scale);
+  const ctx = fullCanvas.getContext('2d');
+  if (!ctx) return fileName;
+
+  ctx.scale(scale, scale);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, logicalWidth, totalLogicalHeight);
+  drawCallback(ctx, logicalWidth, totalLogicalHeight);
+
+  const pageCount = Math.max(1, Math.ceil(totalLogicalHeight / pageLogicalHeight));
+  const doc = new jsPDF({
+    orientation,
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+  const pdfWidthMm = orientation === 'portrait' ? 210 : 297;
+  const pdfHeightMm = orientation === 'portrait' ? 297 : 210;
+
+  for (let pageIdx = 0; pageIdx < pageCount; pageIdx++) {
+    const sliceCanvas = document.createElement('canvas');
+    sliceCanvas.width = Math.round(logicalWidth * scale);
+    sliceCanvas.height = Math.round(pageLogicalHeight * scale);
+    const sliceCtx = sliceCanvas.getContext('2d');
+    if (!sliceCtx) continue;
+    sliceCtx.fillStyle = '#FFFFFF';
+    sliceCtx.fillRect(0, 0, sliceCanvas.width, sliceCanvas.height);
+
+    const srcY = Math.round(pageIdx * pageLogicalHeight * scale);
+    const availableSrcH = Math.max(0, fullCanvas.height - srcY);
+    const copyH = Math.min(sliceCanvas.height, availableSrcH);
+    if (copyH > 0) {
+      sliceCtx.drawImage(
+        fullCanvas,
+        0,
+        srcY,
+        fullCanvas.width,
+        copyH,
+        0,
+        0,
+        sliceCanvas.width,
+        copyH
+      );
+    }
+
+    const pageDataUrl = sliceCanvas.toDataURL('image/png', 1.0);
+    if (pageIdx === 0 && typeof window !== 'undefined') {
+      (
+        window as unknown as {
+          __lastExportedPdfPreview?: { fileName: string; title: string; dataUrl: string };
+        }
+      ).__lastExportedPdfPreview = {
+        fileName,
+        title,
+        dataUrl: pageDataUrl,
+      };
+      window.dispatchEvent(
+        new CustomEvent('taman-pdf-exported', {
+          detail: { fileName, title, dataUrl: pageDataUrl },
+        })
+      );
+    }
+
+    if (pageIdx > 0) {
+      doc.addPage();
+    }
+    doc.addImage(pageDataUrl, 'PNG', 0, 0, pdfWidthMm, pdfHeightMm, undefined, 'FAST');
+  }
+
   doc.save(fileName);
   return fileName;
 }
@@ -924,10 +1020,18 @@ export function exportPeriodicReportPDF(params: {
   const totalImportCost = params.imports.reduce((sum, i) => sum + i.totalCost, 0);
   const totalSupplierDebt = params.imports.reduce((sum, i) => sum + i.debtAmount, 0);
 
-  return saveCanvasAsA4PDF(
+  const estimatedPeriodicHeight =
+    260 +
+    Math.max(1, params.sales.length) * 44 +
+    90 +
+    Math.max(1, params.imports.length) * 44 +
+    80;
+
+  return saveTallCanvasAsMultiPageA4PDF(
     'landscape',
     fileName,
     `BÁO CÁO TỔNG HỢP (${params.periodLabel})`,
+    estimatedPeriodicHeight,
     (ctx, pageWidth) => {
       const marginX = 44;
       ctx.fillStyle = '#15803D';
@@ -997,7 +1101,7 @@ export function exportPeriodicReportPDF(params: {
         marginX,
         y,
         salesCols,
-        params.sales.slice(0, 5).map((s) => [
+        params.sales.map((s) => [
           s.invoiceCode,
           s.warehouseName || 'Tâm An Mỹ Ngãi',
           s.customerName,
@@ -1033,7 +1137,7 @@ export function exportPeriodicReportPDF(params: {
         marginX,
         y,
         impCols,
-        params.imports.slice(0, 4).map((i) => {
+        params.imports.map((i) => {
           const { urgency } = evaluateDebtUrgency(i.dueDate, i.debtAmount);
           return [
             i.receiptCode,
@@ -1043,11 +1147,13 @@ export function exportPeriodicReportPDF(params: {
             `${i.quantity} ${i.unit}`,
             i.totalCost.toLocaleString('vi-VN'),
             i.debtAmount.toLocaleString('vi-VN'),
-            urgency === 'overdue'
+            i.debtAmount <= 0
+              ? 'Đã trả'
+              : urgency === 'overdue'
               ? 'Quá hạn'
               : urgency === 'due_soon'
               ? 'Sắp hạn'
-              : 'Đã trả',
+              : 'Chưa hạn',
           ];
         }),
         '#B45309'
@@ -1347,12 +1453,15 @@ export function exportCombinedReceivedItemsAndDebtPDF(params: {
   const collectedNow = Math.max(0, Number(params.collectedThisSession) || 0);
   const finalRemainingDebt = Math.max(0, totalDebt - collectedNow);
 
-  return saveCanvasAsA4PDF(
+  const estimatedCombinedHeight = 260 + Math.max(1, params.items.length) * 44 + 260;
+
+  return saveTallCanvasAsMultiPageA4PDF(
     'landscape',
     fileName,
     params.onlyUnpaid
       ? 'PHIẾU TỔNG HỢP HÀNG HÓA CÒN NỢ & THU NỢ'
       : 'PHIẾU TỔNG HỢP CÁC MẶT HÀNG ĐÃ NHẬN & CÔNG NỢ',
+    estimatedCombinedHeight,
     (ctx, pageWidth) => {
       const marginX = 44;
       ctx.fillStyle = '#15803D';
@@ -1396,7 +1505,7 @@ export function exportCombinedReceivedItemsAndDebtPDF(params: {
         { header: 'Còn Nợ', width: 95, align: 'right' },
       ];
 
-      const displayRows = params.items.slice(0, 8).map((item, idx) => [
+      const displayRows = params.items.map((item, idx) => [
         String(idx + 1),
         item.date,
         item.invoiceCode,
@@ -1883,10 +1992,18 @@ export function exportComprehensiveDateRangeReportPDF(params: {
   const netCashflow = totalCashInflow - totalCashOutflow;
   const totalSupplierDebt = params.imports.reduce((sum, i) => sum + i.debtAmount, 0);
 
-  return saveCanvasAsA4PDF(
+  const estimatedCompHeight =
+    260 +
+    Math.max(1, params.sales.length) * 44 +
+    90 +
+    Math.max(1, params.imports.length) * 44 +
+    80;
+
+  return saveTallCanvasAsMultiPageA4PDF(
     'landscape',
     fileName,
     `BÁO CÁO TỔNG HỢP (${periodLabel})`,
+    estimatedCompHeight,
     (ctx, pageWidth) => {
       const marginX = 44;
       ctx.fillStyle = '#15803D';
@@ -1961,7 +2078,7 @@ export function exportComprehensiveDateRangeReportPDF(params: {
         marginX,
         y,
         salesCols,
-        params.sales.slice(0, 5).map((s) => [
+        params.sales.map((s) => [
           (s.createdAt || '').slice(0, 10),
           s.invoiceCode,
           s.customerName,
@@ -2003,7 +2120,7 @@ export function exportComprehensiveDateRangeReportPDF(params: {
         marginX,
         y,
         impCols,
-        params.imports.slice(0, 3).map((i) => [
+        params.imports.map((i) => [
           (i.createdAt || '').slice(0, 10),
           i.receiptCode,
           i.supplierName,
@@ -2568,6 +2685,215 @@ export function exportSmartReorderExcel(
   );
   const fileName = `DeXuat_DatHang_NCC_${today}.xlsx`;
   XLSX.writeFile(wb, fileName);
+  return fileName;
+}
+
+// 13. In Hóa Đơn / Phiếu Thu-Chi Khổ Nhiệt K58 (58mm) & K80 (80mm) — PDF Tiếng Việt
+export function exportThermalReceiptPDF(params: {
+  paperWidthMm: 58 | 80;
+  storeName?: string;
+  voucherTitle: string;
+  voucherCode: string;
+  dateStr: string;
+  partnerLabel: string;
+  partnerName: string;
+  partnerPhone?: string;
+  productName?: string;
+  unit?: string;
+  quantity?: number;
+  unitPrice?: number;
+  discountAmount?: number;
+  totalLabel: string;
+  totalAmount: number;
+  paidLabel: string;
+  paidAmount: number;
+  debtLabel: string;
+  remainingDebt: number;
+  dueDate?: string;
+  staffName: string;
+  note?: string;
+}): string {
+  const safeCode = String(params.voucherCode || 'BILL').replace(/[^a-zA-Z0-9_-]/g, '');
+  const fileName = `Bill_K${params.paperWidthMm}_${safeCode}_${params.dateStr.slice(0, 10)}.pdf`;
+  if (typeof document === 'undefined') return fileName;
+
+  const logicalWidth = params.paperWidthMm === 58 ? 380 : 520;
+  const logicalHeight = 640;
+  const scale = 2.5;
+  const marginX = 18;
+  const contentWidth = logicalWidth - marginX * 2;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(logicalWidth * scale);
+  canvas.height = Math.round(logicalHeight * scale);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return fileName;
+
+  ctx.scale(scale, scale);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+
+  const baseSize = params.paperWidthMm === 58 ? 13 : 14.5;
+  let y = 28;
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#0F172A';
+  ctx.font = `800 ${baseSize + 3}px ${FONT_FAMILY}`;
+  ctx.fillText((params.storeName || 'VTNN TÂM AN').toUpperCase(), logicalWidth / 2, y);
+  y += 20;
+
+  ctx.font = `500 ${baseSize - 2}px ${FONT_FAMILY}`;
+  ctx.fillStyle = '#475569';
+  ctx.fillText('Vật tư Tâm An — Nhà Nông an tâm', logicalWidth / 2, y);
+  y += 18;
+
+  ctx.font = `800 ${baseSize + 2}px ${FONT_FAMILY}`;
+  ctx.fillStyle = '#0F172A';
+  ctx.fillText(params.voucherTitle.toUpperCase(), logicalWidth / 2, y + 6);
+  y += 24;
+
+  ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
+  ctx.fillText(`Số: ${params.voucherCode}  |  ${params.dateStr.slice(0, 16)}`, logicalWidth / 2, y);
+  y += 16;
+
+  const drawDashedLine = (lineY: number) => {
+    ctx.save();
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = '#94A3B8';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(marginX, lineY);
+    ctx.lineTo(logicalWidth - marginX, lineY);
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  drawDashedLine(y);
+  y += 20;
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#0F172A';
+  ctx.font = `600 ${baseSize}px ${FONT_FAMILY}`;
+  const partnerLines = wrapCanvasText(ctx, `${params.partnerLabel}: ${params.partnerName}`, contentWidth);
+  partnerLines.forEach((line) => {
+    ctx.fillText(line, marginX, y);
+    y += 18;
+  });
+  if (params.partnerPhone) {
+    ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+    ctx.fillText(`SĐT: ${params.partnerPhone}`, marginX, y);
+    y += 18;
+  }
+  ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+  ctx.fillText(`Thu ngân: ${params.staffName}`, marginX, y);
+  y += 14;
+
+  drawDashedLine(y);
+  y += 20;
+
+  if (params.productName) {
+    ctx.font = `700 ${baseSize}px ${FONT_FAMILY}`;
+    const prodLines = wrapCanvasText(ctx, params.productName, contentWidth);
+    prodLines.forEach((line) => {
+      ctx.fillText(line, marginX, y);
+      y += 18;
+    });
+    const qty = params.quantity ?? 1;
+    const price = params.unitPrice ?? 0;
+    ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+    ctx.fillText(`${qty} ${params.unit || ''} x ${formatCurrencyPlain(price)}`, marginX, y);
+    ctx.textAlign = 'right';
+    ctx.font = `700 ${baseSize}px ${FONT_FAMILY}`;
+    ctx.fillText(formatCurrencyPlain(qty * price), logicalWidth - marginX, y);
+    ctx.textAlign = 'left';
+    y += 18;
+    if (params.discountAmount && params.discountAmount > 0) {
+      ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
+      ctx.fillText('Chiết khấu / Giảm:', marginX, y);
+      ctx.textAlign = 'right';
+      ctx.fillText(`-${formatCurrencyPlain(params.discountAmount)}`, logicalWidth - marginX, y);
+      ctx.textAlign = 'left';
+      y += 18;
+    }
+    drawDashedLine(y);
+    y += 20;
+  }
+
+  const drawAmountRow = (label: string, amount: number, bold = false) => {
+    ctx.font = `${bold ? 800 : 500} ${bold ? baseSize + 1 : baseSize}px ${FONT_FAMILY}`;
+    ctx.fillText(label, marginX, y);
+    ctx.textAlign = 'right';
+    ctx.fillText(formatCurrencyPlain(amount), logicalWidth - marginX, y);
+    ctx.textAlign = 'left';
+    y += 22;
+  };
+
+  drawAmountRow(params.totalLabel, params.totalAmount, true);
+  drawAmountRow(params.paidLabel, params.paidAmount, false);
+  drawAmountRow(params.debtLabel, params.remainingDebt, params.remainingDebt > 0);
+
+  if (params.remainingDebt > 0 && params.dueDate) {
+    ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
+    ctx.fillText(`Hạn thanh toán: ${params.dueDate}`, marginX, y);
+    y += 18;
+  }
+  if (params.note) {
+    ctx.font = `400 ${baseSize - 2}px ${FONT_FAMILY}`;
+    ctx.fillStyle = '#475569';
+    wrapCanvasText(ctx, `Ghi chú: ${params.note}`, contentWidth)
+      .slice(0, 2)
+      .forEach((line) => {
+        ctx.fillText(line, marginX, y);
+        y += 16;
+      });
+  }
+
+  y += 6;
+  drawDashedLine(y);
+  y += 22;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#0F172A';
+  ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
+  ctx.fillText('Cảm ơn Quý khách — Hẹn gặp lại!', logicalWidth / 2, y);
+
+  const usedLogicalHeight = Math.max(360, Math.min(logicalHeight, y + 26));
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = canvas.width;
+  outCanvas.height = Math.round(usedLogicalHeight * scale);
+  const outCtx = outCanvas.getContext('2d');
+  if (outCtx) {
+    outCtx.fillStyle = '#FFFFFF';
+    outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
+    outCtx.drawImage(canvas, 0, 0, canvas.width, outCanvas.height, 0, 0, outCanvas.width, outCanvas.height);
+  }
+
+  const dataUrl = (outCtx ? outCanvas : canvas).toDataURL('image/png', 1.0);
+  if (typeof window !== 'undefined') {
+    (
+      window as unknown as {
+        __lastExportedPdfPreview?: { fileName: string; title: string; dataUrl: string };
+      }
+    ).__lastExportedPdfPreview = {
+      fileName,
+      title: `${params.voucherTitle} (K${params.paperWidthMm})`,
+      dataUrl,
+    };
+    window.dispatchEvent(
+      new CustomEvent('taman-pdf-exported', {
+        detail: { fileName, title: `${params.voucherTitle} (K${params.paperWidthMm})`, dataUrl },
+      })
+    );
+  }
+
+  const heightMm = Math.round((usedLogicalHeight / logicalWidth) * params.paperWidthMm * 10) / 10;
+  const doc = new jsPDF({
+    orientation: 'portrait',
+    unit: 'mm',
+    format: [params.paperWidthMm, heightMm],
+    compress: true,
+  });
+  doc.addImage(dataUrl, 'PNG', 0, 0, params.paperWidthMm, heightMm, undefined, 'FAST');
+  doc.save(fileName);
   return fileName;
 }
 

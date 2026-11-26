@@ -472,12 +472,13 @@ export function computeCustomerLedger(
   referenceDateStr = getTodayVietnamDateStr(),
   leadDays = 5
 ): CustomerLedgerMetrics {
+  const cleanCustPhone = (customer.phone || '').trim();
   const customerSales = sales
     .filter(
       (s) =>
         s.customerId === customer.id ||
-        s.customerPhone === customer.phone ||
-        s.customerName.toLowerCase() === customer.name.toLowerCase()
+        (Boolean(cleanCustPhone) && (s.customerPhone || '').trim() === cleanCustPhone) ||
+        s.customerName.trim().toLowerCase() === customer.name.trim().toLowerCase()
     )
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
@@ -4488,6 +4489,162 @@ export function buildZaloDebtReminderMessage(params: {
   }
   const zaloUrl = digits.length >= 9 && digits.length <= 11 ? `https://zalo.me/${digits}` : null;
   return { message, zaloUrl };
+}
+
+export interface SmartDashboardDailyPoint {
+  dateStr: string;
+  shortLabel: string;
+  revenue: number;
+  cogs: number;
+  grossProfit: number;
+  orderCount: number;
+}
+
+export interface SmartDashboardTopProduct {
+  productId: string;
+  productName: string;
+  unit: string;
+  qtySold: number;
+  revenue: number;
+  grossProfit: number;
+}
+
+export interface SmartDashboardTopCustomer {
+  customerName: string;
+  customerPhone: string;
+  orderCount: number;
+  totalSpent: number;
+  unpaidDebt: number;
+}
+
+export interface SmartDashboardAnalyticsResult {
+  dailyPoints: SmartDashboardDailyPoint[];
+  totalRevenue: number;
+  totalGrossProfit: number;
+  grossMarginPct: number;
+  totalOrders: number;
+  topProducts: SmartDashboardTopProduct[];
+  topCustomers: SmartDashboardTopCustomer[];
+}
+
+export function computeSmartDashboardAnalytics(params: {
+  sales: SaleTransaction[];
+  products: ProductItem[];
+  days?: number;
+  todayStr?: string;
+}): SmartDashboardAnalyticsResult {
+  const days = Math.max(1, Math.min(31, Math.round(params.days ?? 7)));
+  const todayStr = toVietnamDateStr(params.todayStr) || getTodayVietnamDateStr();
+  const [ty, tm, td] = todayStr.split('-').map(Number);
+
+  const productCostMap = new Map<string, number>();
+  for (const p of params.products || []) {
+    productCostMap.set(p.id, Math.max(0, Number(p.importPrice) || 0));
+  }
+
+  const dailyPoints: SmartDashboardDailyPoint[] = [];
+  const dailyMap = new Map<string, SmartDashboardDailyPoint>();
+  for (let i = days - 1; i >= 0; i--) {
+    const dt = new Date(Date.UTC(ty, tm - 1, td - i));
+    const dateStr = dt.toISOString().slice(0, 10);
+    const point: SmartDashboardDailyPoint = {
+      dateStr,
+      shortLabel: `${dateStr.slice(8, 10)}/${dateStr.slice(5, 7)}`,
+      revenue: 0,
+      cogs: 0,
+      grossProfit: 0,
+      orderCount: 0,
+    };
+    dailyPoints.push(point);
+    dailyMap.set(dateStr, point);
+  }
+
+  const from30Utc = new Date(Date.UTC(ty, tm - 1, td - 29));
+  const from30Str = from30Utc.toISOString().slice(0, 10);
+
+  const prodAgg = new Map<string, SmartDashboardTopProduct>();
+  const custAgg = new Map<string, SmartDashboardTopCustomer>();
+
+  for (const s of params.sales || []) {
+    const saleDate = toVietnamDateStr(s.createdAt);
+    if (!saleDate) continue;
+    const revenue = Math.max(0, Number(s.totalAmount) || 0);
+    const qty = Math.max(0, Number(s.quantity) || 0);
+    const unitCost =
+      typeof s.unitCost === 'number' && Number.isFinite(s.unitCost)
+        ? Math.max(0, s.unitCost)
+        : productCostMap.get(s.productId) || 0;
+    const giftQty = Math.max(0, Number(s.giftQuantity) || 0);
+    const giftCost =
+      giftQty > 0 && s.giftProductId
+        ? giftQty * (productCostMap.get(s.giftProductId) || 0)
+        : 0;
+    const cogs = Math.round(qty * unitCost + giftCost);
+    const grossProfit = revenue - cogs;
+
+    const dp = dailyMap.get(saleDate);
+    if (dp) {
+      dp.revenue += revenue;
+      dp.cogs += cogs;
+      dp.grossProfit += grossProfit;
+      dp.orderCount += 1;
+    }
+
+    if (saleDate >= from30Str && saleDate <= todayStr) {
+      const pKey = s.productId || s.productName;
+      const prevP = prodAgg.get(pKey) || {
+        productId: s.productId,
+        productName: s.productName,
+        unit: s.unit,
+        qtySold: 0,
+        revenue: 0,
+        grossProfit: 0,
+      };
+      prevP.qtySold += qty;
+      prevP.revenue += revenue;
+      prevP.grossProfit += grossProfit;
+      prodAgg.set(pKey, prevP);
+
+      const cleanPhone = (s.customerPhone || '').trim();
+      const cKey =
+        s.customerId ||
+        (cleanPhone ? `phone:${cleanPhone}` : `name:${s.customerName.trim().toLowerCase()}`);
+      const prevC = custAgg.get(cKey) || {
+        customerName: s.customerName,
+        customerPhone: cleanPhone,
+        orderCount: 0,
+        totalSpent: 0,
+        unpaidDebt: 0,
+      };
+      prevC.orderCount += 1;
+      prevC.totalSpent += revenue;
+      prevC.unpaidDebt += Math.max(0, Number(s.debtAmount) || 0);
+      custAgg.set(cKey, prevC);
+    }
+  }
+
+  const totalRevenue = dailyPoints.reduce((sum, p) => sum + p.revenue, 0);
+  const totalGrossProfit = dailyPoints.reduce((sum, p) => sum + p.grossProfit, 0);
+  const totalOrders = dailyPoints.reduce((sum, p) => sum + p.orderCount, 0);
+  const grossMarginPct =
+    totalRevenue > 0 ? Math.round((totalGrossProfit / totalRevenue) * 1000) / 10 : 0;
+
+  const topProducts = Array.from(prodAgg.values())
+    .sort((a, b) => b.revenue - a.revenue)
+    .slice(0, 5);
+  const topCustomers = Array.from(custAgg.values())
+    .sort((a, b) => b.totalSpent - a.totalSpent)
+    .slice(0, 5);
+
+  return {
+    dailyPoints,
+    totalRevenue,
+    totalGrossProfit,
+    grossMarginPct,
+    totalOrders,
+    topProducts,
+    topCustomers,
+  };
 }
 
 

@@ -72,6 +72,7 @@ import {
   canViewAuditHistory,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
+  computeSmartDashboardAnalytics,
   computeWeightedAverageImportPrice,
   createAuditLogEntry,
   evaluateDebtUrgency,
@@ -161,7 +162,7 @@ import {
 } from './services/localPersistence';
 import { NotificationCenter } from './components/NotificationCenter';
 import { MultiWarehouseFilterPopover } from './components/MultiWarehouseFilterPopover';
-import { InitialLoginScreenPortal } from './components/StaffAccountManager';
+import { InitialLoginScreenPortal } from './components/InitialLoginScreenPortal';
 
 const CustomerModule = lazy(() =>
   import('./components/CustomerModule').then((m) => ({ default: m.CustomerModule }))
@@ -321,6 +322,11 @@ export default function App() {
   const [isNotifDrawerOpen, setIsNotifDrawerOpen] = useState(false);
   const [readNotifIds, setReadNotifIds] = useState<Set<string>>(new Set());
   const [toastBanner, setToastBanner] = useState<string | null>(null);
+  const [toastUndoAction, setToastUndoAction] = useState<{
+    label: string;
+    onUndo: () => void;
+  } | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
   const [autoDailyBackupEnabled, setAutoDailyBackupEnabled] = useState(
     initialWorkspace.autoDailyBackupEnabled
   );
@@ -770,11 +776,23 @@ export default function App() {
     };
   }, []);
 
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, undo?: { label?: string; onUndo: () => void }) => {
+    if (toastTimerRef.current !== null && typeof window !== 'undefined') {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
     setToastBanner(msg);
-    setTimeout(() => {
-      setToastBanner((prev) => (prev === msg ? null : prev));
-    }, 4500);
+    setToastUndoAction(undo ? { label: undo.label || 'Hoàn tác', onUndo: undo.onUndo } : null);
+    if (typeof window !== 'undefined') {
+      toastTimerRef.current = window.setTimeout(
+        () => {
+          setToastBanner((prev) => (prev === msg ? null : prev));
+          setToastUndoAction(null);
+          toastTimerRef.current = null;
+        },
+        undo ? 10000 : 4500
+      );
+    }
   };
 
   // Realtime subscription to Admin AI Token Grants & Zalo-like Internal Chat directory
@@ -1348,6 +1366,17 @@ export default function App() {
   const unreadNotifCount = useMemo(
     () => notifications.filter((n) => !readNotifIds.has(n.id)).length,
     [notifications, readNotifIds]
+  );
+
+  const dashboardAnalytics = useMemo(
+    () =>
+      computeSmartDashboardAnalytics({
+        sales: visibleSales,
+        products: visibleProducts,
+        days: 7,
+        todayStr: todayVietnamDate,
+      }),
+    [visibleSales, visibleProducts, todayVietnamDate]
   );
 
   // Push Notification Helper (Web Notification API + In-App Toast)
@@ -2267,7 +2296,9 @@ export default function App() {
   const handleDeleteProduct = (productId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = products.find((p) => p.id === productId);
-    setProducts((prev) => prev.filter((p) => p.id !== productId));
+    const nextList = productsRef.current.filter((p) => p.id !== productId);
+    productsRef.current = nextList;
+    setProducts(nextList);
     if (isGoogleAuthenticated) {
       void deleteFirestoreDocIfAdmin('products', productId);
     }
@@ -2283,8 +2314,27 @@ export default function App() {
         )}. Đã lưu dữ liệu gốc để khôi phục khi cần.`,
         snapshotData: JSON.stringify(target),
       });
+      showToast(`Đã xóa vật tư "${target.name}" (${target.code}).`, {
+        label: 'Hoàn tác (10s)',
+        onUndo: () => {
+          const restored = [target, ...productsRef.current.filter((p) => p.id !== target.id)];
+          productsRef.current = restored;
+          setProducts(restored);
+          if (isGoogleAuthenticated) {
+            void syncProductToFirestore(target, true);
+          }
+          recordAuditLog({
+            actionCategory: 'create',
+            targetEntity: 'product',
+            targetCode: target.code,
+            warehouseName: target.warehouseName,
+            summary: `Hoàn tác khôi phục vật tư ${target.name} (${target.code})`,
+          });
+        },
+      });
+    } else {
+      showToast('Quản lý đã xóa mặt hàng vật tư khỏi danh mục kho.');
     }
-    showToast('Quản lý đã xóa mặt hàng vật tư khỏi danh mục kho (Đã lưu Lịch sử thao tác).');
   };
 
   const handleSaveCustomer = (
@@ -2386,8 +2436,25 @@ export default function App() {
         )}. Đã lưu dữ liệu gốc để khôi phục khi cần.`,
         snapshotData: JSON.stringify(target),
       });
+      showToast(`Đã xóa khách hàng "${target.name}".`, {
+        label: 'Hoàn tác (10s)',
+        onUndo: () => {
+          setCustomers((prev) => [target, ...prev.filter((c) => c.id !== target.id)]);
+          if (isGoogleAuthenticated) {
+            void syncCustomerToFirestore(target, true);
+          }
+          recordAuditLog({
+            actionCategory: 'create',
+            targetEntity: 'customer',
+            targetCode: target.code,
+            warehouseName: target.warehouseName,
+            summary: `Hoàn tác khôi phục khách hàng ${target.name} (${target.code})`,
+          });
+        },
+      });
+    } else {
+      showToast('Quản lý đã xóa hồ sơ khách hàng.');
     }
-    showToast('Quản lý đã xóa hồ sơ khách hàng (Đã ghi vào Lịch sử thao tác).');
   };
 
   const handleSaveVoucher = (
@@ -2795,7 +2862,7 @@ export default function App() {
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     try {
       const fifoResult = applyCustomerFifoDebtSettlement(
-        sales,
+        visibleSales,
         {
           customerId: params.customerId,
           customerName: params.customerName,
@@ -2811,9 +2878,10 @@ export default function App() {
         return;
       }
 
-      setSales(fifoResult.updatedSales);
+      const settledIds = new Set(fifoResult.settledAllocations.map((a) => a.recordId));
+      const updatedSaleMap = new Map(fifoResult.updatedSales.map((s) => [s.id, s]));
+      setSales((prev) => prev.map((s) => updatedSaleMap.get(s.id) || s));
       if (isGoogleAuthenticated) {
-        const settledIds = new Set(fifoResult.settledAllocations.map((a) => a.recordId));
         fifoResult.updatedSales
           .filter((s) => settledIds.has(s.id))
           .forEach((s) => {
@@ -2821,12 +2889,15 @@ export default function App() {
           });
       }
 
-      // Update customer's totalDebt in customers state
+      // Update customer's totalDebt in customers state (scoped to visible warehouse customers)
+      const visibleCustIds = new Set(visibleCustomers.map((c) => c.id));
       setCustomers((prev) =>
         prev.map((c) => {
+          if (!visibleCustIds.has(c.id)) return c;
+          const cleanPhone = (params.customerPhone || '').trim();
           const isMatched =
             (params.customerId && c.id === params.customerId) ||
-            (params.customerPhone && c.phone === params.customerPhone) ||
+            (Boolean(cleanPhone) && (c.phone || '').trim() === cleanPhone) ||
             c.name.trim().toLowerCase() === params.customerName.trim().toLowerCase();
           if (!isMatched) return c;
           const updatedCust = {
@@ -2922,7 +2993,7 @@ export default function App() {
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     try {
       const fifoResult = applySupplierFifoDebtSettlement(
-        imports,
+        visibleImports,
         {
           supplierName: params.supplierName,
           supplierPhone: params.supplierPhone,
@@ -2937,9 +3008,10 @@ export default function App() {
         return;
       }
 
-      setImports(fifoResult.updatedImports);
+      const settledIds = new Set(fifoResult.settledAllocations.map((a) => a.recordId));
+      const updatedImpMap = new Map(fifoResult.updatedImports.map((i) => [i.id, i]));
+      setImports((prev) => prev.map((imp) => updatedImpMap.get(imp.id) || imp));
       if (isGoogleAuthenticated) {
-        const settledIds = new Set(fifoResult.settledAllocations.map((a) => a.recordId));
         fifoResult.updatedImports
           .filter((imp) => settledIds.has(imp.id))
           .forEach((imp) => {
@@ -5746,16 +5818,33 @@ export default function App() {
           </div>
         )}
 
-        {/* Toast Notification Banner */}
+        {/* Toast Notification Banner with 10s Undo Action */}
         {toastBanner && (
           <div
             role="status"
-            className="fixed bottom-4 right-4 left-4 sm:left-auto sm:max-w-md z-50 px-4 py-3 bg-slate-900 text-white text-xs font-medium rounded-xl shadow-xl border border-slate-700 flex items-center justify-between gap-4"
+            className="fixed bottom-4 right-4 left-4 sm:left-auto sm:max-w-lg z-50 px-4 py-3 bg-slate-900 text-white text-xs font-medium rounded-xl shadow-xl border border-slate-700 flex items-center justify-between gap-3"
           >
-            <span>{toastBanner}</span>
+            <span className="flex-1">{toastBanner}</span>
+            {toastUndoAction && (
+              <button
+                type="button"
+                onClick={() => {
+                  const fn = toastUndoAction.onUndo;
+                  setToastUndoAction(null);
+                  fn();
+                  showToast('Đã hoàn tác thao tác vừa rồi!');
+                }}
+                className="px-2.5 py-1 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-md shrink-0 transition-colors"
+              >
+                {toastUndoAction.label}
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setToastBanner(null)}
+              onClick={() => {
+                setToastBanner(null);
+                setToastUndoAction(null);
+              }}
               aria-label="Đóng thông báo nhanh"
               className="text-slate-400 hover:text-white shrink-0"
             >
@@ -5981,6 +6070,137 @@ export default function App() {
                     >
                       Kiểm kho →
                     </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Smart Business Analytics Panel (7-Day Revenue vs Gross Profit + Top 30d Products & Customers) */}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <LayoutDashboard className="w-4 h-4 text-emerald-700 shrink-0" />
+                      <span>Phân Tích Kinh Doanh Thông Minh (7 Ngày Qua &amp; Top 30 Ngày)</span>
+                    </h2>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Doanh thu 7 ngày:{' '}
+                      <strong className="font-mono text-slate-900">
+                        {formatVND(dashboardAnalytics.totalRevenue)}
+                      </strong>{' '}
+                      · Lãi gộp 7 ngày:{' '}
+                      <strong className="font-mono text-emerald-700">
+                        {formatVND(dashboardAnalytics.totalGrossProfit)} ({dashboardAnalytics.grossMarginPct}%)
+                      </strong>{' '}
+                      · {dashboardAnalytics.totalOrders} đơn
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('reports')}
+                    className="text-xs font-semibold text-emerald-700 hover:underline self-start sm:self-auto"
+                  >
+                    Mở Báo cáo &amp; BCTC chi tiết →
+                  </button>
+                </div>
+
+                {/* 7-Day Revenue vs Gross Profit CSS Bar Chart */}
+                {(() => {
+                  const maxRev = Math.max(
+                    1,
+                    ...dashboardAnalytics.dailyPoints.map((d) =>
+                      Math.max(d.revenue, d.grossProfit, 0)
+                    )
+                  );
+                  return (
+                    <div className="grid grid-cols-7 gap-2 items-end h-36 pt-4 px-2 pb-2 bg-slate-50/70 rounded-xl border border-slate-200/80">
+                      {dashboardAnalytics.dailyPoints.map((pt) => {
+                        const revPct = Math.max(
+                          pt.revenue > 0 ? 8 : 2,
+                          Math.round((pt.revenue / maxRev) * 100)
+                        );
+                        const profitPct = Math.max(
+                          pt.grossProfit > 0 ? 8 : 2,
+                          Math.round((Math.max(0, pt.grossProfit) / maxRev) * 100)
+                        );
+                        return (
+                          <div
+                            key={pt.dateStr}
+                            title={`${pt.dateStr}: Doanh thu ${formatVND(pt.revenue)} | Lãi gộp ${formatVND(pt.grossProfit)} (${pt.orderCount} đơn)`}
+                            className="flex flex-col items-center justify-end h-full gap-1"
+                          >
+                            <div className="flex items-end justify-center gap-1 w-full flex-1">
+                              <div
+                                style={{ height: `${revPct}%` }}
+                                className="w-2.5 sm:w-4 bg-emerald-600 rounded-t-sm transition-all"
+                              />
+                              <div
+                                style={{ height: `${profitPct}%` }}
+                                className="w-2.5 sm:w-4 bg-amber-500 rounded-t-sm transition-all"
+                              />
+                            </div>
+                            <span className="text-[10px] font-mono text-slate-600 whitespace-nowrap">
+                              {pt.shortLabel}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <div className="px-3.5 py-2 bg-slate-50 border-b border-slate-200 font-bold text-slate-800">
+                      Top 5 Vật Tư Bán Chạy (30 ngày)
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      {dashboardAnalytics.topProducts.length === 0 ? (
+                        <div className="p-3 text-slate-500 text-center">
+                          Chưa có giao dịch bán hàng trong 30 ngày gần nhất.
+                        </div>
+                      ) : (
+                        dashboardAnalytics.topProducts.map((tp, idx) => (
+                          <div key={`${tp.productId}-${idx}`} className="px-3.5 py-2 flex items-center justify-between gap-2">
+                            <div className="min-w-0 truncate font-medium text-slate-900">
+                              <span className="font-mono text-emerald-700 font-bold mr-1.5">#{idx + 1}</span>
+                              {tp.productName}
+                            </div>
+                            <div className="text-right font-mono shrink-0">
+                              <span className="font-bold text-slate-900">{formatVND(tp.revenue)}</span>
+                              <span className="text-[10px] text-slate-500 ml-1.5">
+                                ({tp.qtySold} {tp.unit})
+                              </span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <div className="px-3.5 py-2 bg-slate-50 border-b border-slate-200 font-bold text-slate-800">
+                      Top 5 Khách Hàng Doanh Số Cao (30 ngày)
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      {dashboardAnalytics.topCustomers.length === 0 ? (
+                        <div className="p-3 text-slate-500 text-center">
+                          Chưa có dữ liệu khách hàng trong 30 ngày gần nhất.
+                        </div>
+                      ) : (
+                        dashboardAnalytics.topCustomers.map((tc, idx) => (
+                          <div key={`${tc.customerName}-${idx}`} className="px-3.5 py-2 flex items-center justify-between gap-2">
+                            <div className="min-w-0 truncate font-medium text-slate-900">
+                              <span className="font-mono text-emerald-700 font-bold mr-1.5">#{idx + 1}</span>
+                              {tc.customerName}
+                            </div>
+                            <div className="text-right font-mono shrink-0">
+                              <span className="font-bold text-slate-900">{formatVND(tc.totalSpent)}</span>
+                              <span className="text-[10px] text-slate-500 ml-1.5">({tc.orderCount} đơn)</span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

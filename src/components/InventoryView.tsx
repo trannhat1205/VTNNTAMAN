@@ -15,6 +15,7 @@ import {
   Lock,
   PackagePlus,
   Pencil,
+  QrCode,
   Search,
   Sparkles,
   Trash2,
@@ -49,6 +50,7 @@ import {
 } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
+import { BarcodeScannerModal } from './BarcodeScannerModal';
 
 interface InventoryViewProps {
   products: ProductItem[];
@@ -144,6 +146,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [stocktakeNote, setStocktakeNote] = useState('');
   const [stocktakeFeedback, setStocktakeFeedback] = useState<string | null>(null);
   const [showSmartReorderPanel, setShowSmartReorderPanel] = useState(true);
+  const [barcodeScanTarget, setBarcodeScanTarget] = useState<'search' | 'product_modal' | null>(null);
 
   // Inline New Product Category Creation inside Modal
   const [showNewCategoryInput, setShowNewCategoryInput] = useState(false);
@@ -680,16 +683,27 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       {/* Filter & Action Toolbar */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 flex-1">
-          <div className="relative flex-1 sm:min-w-[220px]">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm tên vật tư, mã VT, nhà cung cấp hoặc kho..."
-              aria-label="Tìm kiếm vật tư tồn kho"
-              className="w-full pl-10 pr-4 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg"
-            />
+          <div className="flex items-center gap-1.5 flex-1 sm:min-w-[240px]">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Tìm tên vật tư, mã VT, barcode, nhà cung cấp..."
+                aria-label="Tìm kiếm vật tư tồn kho"
+                className="w-full pl-10 pr-4 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setBarcodeScanTarget('search')}
+              title="Quét mã vạch bằng camera hoặc đầu đọc USB"
+              className="px-2.5 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg flex items-center gap-1 shrink-0"
+            >
+              <QrCode className="w-4 h-4" />
+              <span className="hidden sm:inline">Quét mã</span>
+            </button>
           </div>
 
           {lockedWarehouse ? (
@@ -1531,14 +1545,25 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   >
                     Mã vạch / Barcode
                   </label>
-                  <input
-                    id="prod-barcode"
-                    type="text"
-                    value={barcode}
-                    onChange={(e) => setBarcode(e.target.value)}
-                    placeholder="893..."
-                    className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
-                  />
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      id="prod-barcode"
+                      type="text"
+                      value={barcode}
+                      onChange={(e) => setBarcode(e.target.value)}
+                      placeholder="893..."
+                      className="flex-1 min-w-0 px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setBarcodeScanTarget('product_modal')}
+                      title="Quét mã vạch để điền tự động"
+                      aria-label="Quét mã vạch vật tư"
+                      className="p-2 text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg shrink-0"
+                    >
+                      <QrCode className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
                 <div>
                   <label
@@ -2145,6 +2170,23 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           </div>
         </div>
       )}
+
+      <BarcodeScannerModal
+        isOpen={barcodeScanTarget !== null}
+        onClose={() => setBarcodeScanTarget(null)}
+        title={
+          barcodeScanTarget === 'product_modal'
+            ? 'Quét Mã Vạch Gán Cho Vật Tư'
+            : 'Quét Mã Vạch Tìm Kiếm Trong Kho'
+        }
+        onDetected={(scanned) => {
+          if (barcodeScanTarget === 'product_modal') {
+            setBarcode(scanned);
+          } else {
+            setSearchQuery(scanned);
+          }
+        }}
+      />
     </div>
   );
 };

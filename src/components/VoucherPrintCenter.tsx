@@ -40,6 +40,7 @@ import {
   exportImportReceiptPDF,
   exportSaleInvoicePDF,
   exportSupplierPaymentPDF,
+  exportThermalReceiptPDF,
 } from '../utils/exportReports';
 import { AutocompleteTextInput, SearchableSelect } from './SearchableSelect';
 
@@ -80,6 +81,8 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   onNotifyToast,
 }) => {
   const [activeVoucher, setActiveVoucher] = useState<VoucherType>('sale_invoice');
+  const [paperFormat, setPaperFormat] = useState<'a4' | 'k80' | 'k58'>('a4');
+  const [selectedSourceCreatedAt, setSelectedSourceCreatedAt] = useState<string>('');
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [editingVoucherId, setEditingVoucherId] = useState<string | null>(null);
   const [lastExportedPreview, setLastExportedPreview] = useState<{
@@ -157,6 +160,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
     setPaymentMethod('Tiền mặt / Chuyển khoản');
     setNote('');
     setSelectedQuickFillId('');
+    setSelectedSourceCreatedAt('');
   };
 
   const handleLoadSavedVoucherForEdit = (vc: SavedVoucherRecord) => {
@@ -214,6 +218,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         setPaidOrCollected(String(sale.paidAmount));
         setDueDate(sale.dueDate);
         setNote(sale.note);
+        setSelectedSourceCreatedAt(sale.createdAt);
       }
     } else if (activeVoucher === 'customer_receipt') {
       const sale = sales.find((s) => s.id === id);
@@ -227,6 +232,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         setPreviousDebt(String(sale.debtAmount || sale.totalAmount));
         setPaidOrCollected(String(sale.debtAmount || sale.paidAmount));
         setNote(`Thu tiền khách hàng theo hóa đơn ${sale.invoiceCode}`);
+        setSelectedSourceCreatedAt(sale.createdAt);
       }
     } else if (activeVoucher === 'supplier_payment') {
       const imp = imports.find((i) => i.id === id);
@@ -238,6 +244,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         setPreviousDebt(String(imp.debtAmount || imp.totalCost));
         setPaidOrCollected(String(imp.debtAmount || imp.paidAmount));
         setNote(`Thanh toán tiền nhà cung cấp phiếu ${imp.receiptCode}`);
+        setSelectedSourceCreatedAt(imp.createdAt);
       }
     } else if (activeVoucher === 'import_receipt') {
       const imp = imports.find((i) => i.id === id);
@@ -253,6 +260,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         setPaidOrCollected(String(imp.paidAmount));
         setDueDate(imp.dueDate);
         setNote(imp.note);
+        setSelectedSourceCreatedAt(imp.createdAt);
       }
     }
   };
@@ -272,9 +280,67 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   const handleExportPDF = (e: React.FormEvent) => {
     e.preventDefault();
     const todayIso = new Date().toISOString();
+    const effectiveCreatedAt = selectedSourceCreatedAt || todayIso;
     let exportedFileName = '';
 
-    if (activeVoucher === 'sale_invoice') {
+    if (paperFormat === 'k80' || paperFormat === 'k58') {
+      const paperWidthMm: 58 | 80 = paperFormat === 'k58' ? 58 : 80;
+      const thermalCode =
+        voucherCode.trim() ||
+        (activeVoucher === 'sale_invoice'
+          ? `HD-${Date.now().toString().slice(-4)}`
+          : activeVoucher === 'customer_receipt'
+          ? `PT-${Date.now().toString().slice(-4)}`
+          : activeVoucher === 'supplier_payment'
+          ? `PC-${Date.now().toString().slice(-4)}`
+          : `PN-${Date.now().toString().slice(-4)}`);
+      exportedFileName = exportThermalReceiptPDF({
+        paperWidthMm,
+        storeName: warehouseName.trim() || 'VTNN Tâm An',
+        voucherTitle:
+          activeVoucher === 'sale_invoice'
+            ? 'Hóa Đơn Bán Hàng'
+            : activeVoucher === 'customer_receipt'
+            ? 'Phiếu Thu Tiền Khách'
+            : activeVoucher === 'supplier_payment'
+            ? 'Phiếu Chi Trả NCC'
+            : 'Phiếu Nhập Kho',
+        voucherCode: thermalCode,
+        dateStr: effectiveCreatedAt.slice(0, 10),
+        partnerLabel:
+          activeVoucher === 'sale_invoice' || activeVoucher === 'customer_receipt'
+            ? 'Khách hàng'
+            : 'Nhà cung cấp',
+        partnerName: partnerName.trim() || 'Khách lẻ',
+        partnerPhone: partnerPhone.trim(),
+        productName:
+          activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
+            ? productName.trim() || 'Vật tư nông nghiệp Tâm An'
+            : undefined,
+        unit: unit.trim() || 'Đơn vị',
+        quantity: qtyNum || 1,
+        unitPrice: priceNum,
+        discountAmount: discountNum,
+        totalLabel:
+          activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
+            ? 'Tổng thanh toán:'
+            : 'Nợ gốc / Trước GD:',
+        totalAmount:
+          activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
+            ? computedTotal
+            : prevDebtNum,
+        paidLabel:
+          activeVoucher === 'supplier_payment' || activeVoucher === 'import_receipt'
+            ? 'Đã trả NCC:'
+            : 'Đã thanh toán:',
+        paidAmount: paidNum,
+        debtLabel: 'Còn lại:',
+        remainingDebt,
+        dueDate: dueDate || todayIso.slice(0, 10),
+        staffName: currentStaffName,
+        note: note.trim(),
+      });
+    } else if (activeVoucher === 'sale_invoice') {
       const code = voucherCode.trim() || `HD-${Date.now().toString().slice(-4)}`;
       exportedFileName = exportSaleInvoicePDF({
         invoiceCode: code,
@@ -286,13 +352,14 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         unit: unit.trim() || 'Đơn vị',
         quantity: qtyNum || 1,
         unitPrice: priceNum,
+        discountAmount: discountNum,
         totalAmount: computedTotal,
         paidAmount: paidNum,
         debtAmount: remainingDebt,
         dueDate: dueDate || todayIso.slice(0, 10),
         note: note.trim(),
         staffName: currentStaffName,
-        createdAt: todayIso,
+        createdAt: effectiveCreatedAt,
       });
     } else if (activeVoucher === 'customer_receipt') {
       const code = voucherCode.trim() || `PT-${Date.now().toString().slice(-4)}`;
@@ -308,7 +375,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         paymentMethod: paymentMethod.trim() || 'Tiền mặt / Chuyển khoản',
         note: note.trim() || 'Thu tiền công nợ khách hàng',
         staffName: currentStaffName,
-        createdAt: todayIso,
+        createdAt: effectiveCreatedAt,
       });
     } else if (activeVoucher === 'supplier_payment') {
       const code = voucherCode.trim() || `PC-${Date.now().toString().slice(-4)}`;
@@ -323,7 +390,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         paymentMethod: paymentMethod.trim() || 'Chuyển khoản ngân hàng',
         note: note.trim() || 'Thanh toán công nợ nhà cung cấp',
         staffName: currentStaffName,
-        createdAt: todayIso,
+        createdAt: effectiveCreatedAt,
       });
     } else if (activeVoucher === 'import_receipt') {
       const code = voucherCode.trim() || `PN-${Date.now().toString().slice(-4)}`;
@@ -342,7 +409,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         dueDate: dueDate || todayIso.slice(0, 10),
         note: note.trim(),
         staffName: currentStaffName,
-        createdAt: todayIso,
+        createdAt: effectiveCreatedAt,
       });
     }
 
@@ -719,6 +786,36 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
           </div>
 
           <form onSubmit={handleExportPDF} className="p-6 space-y-4">
+            {/* Print Paper Format Selector (A4 / K80 / K58 Thermal) */}
+            <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-emerald-50/60 rounded-lg border border-emerald-200">
+              <span className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
+                <Printer className="w-3.5 h-3.5 text-emerald-700" />
+                <span>Khổ giấy in PDF:</span>
+              </span>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(
+                  [
+                    { id: 'a4', label: 'Khổ chuẩn A4' },
+                    { id: 'k80', label: 'In nhiệt K80 (80mm)' },
+                    { id: 'k58', label: 'In nhiệt K58 (58mm)' },
+                  ] as const
+                ).map((fmt) => (
+                  <button
+                    key={fmt.id}
+                    type="button"
+                    onClick={() => setPaperFormat(fmt.id)}
+                    className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                      paperFormat === fmt.id
+                        ? 'bg-emerald-700 text-white shadow-xs'
+                        : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    {fmt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Optional Quick Prefill from existing records with instant type-ahead search */}
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
               <label
