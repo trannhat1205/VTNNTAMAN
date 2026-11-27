@@ -634,7 +634,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       uploadFileToFirebaseStorage(file, 'backups').catch(() => {});
       const rawText = await file.text();
       const validated = parseAndValidateBackupPayload(rawText);
-      if (!validated.ok) {
+      if ('error' in validated) {
         onNotifyToast(validated.error);
         return;
       }
