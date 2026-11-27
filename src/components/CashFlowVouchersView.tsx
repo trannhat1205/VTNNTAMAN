@@ -1231,6 +1231,38 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
               })
             )}
           </div>
+          {filteredVouchers.length > 0 && (
+            <div className="px-5 py-3 bg-emerald-50/70 border-t border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-stone-700">
+                Tổng kết theo bộ lọc: <strong>{filteredVouchers.length}</strong> phiếu thu
+              </span>
+              <div className="flex flex-wrap items-center gap-3 font-mono">
+                <span className="text-stone-600">
+                  Thu nợ KH:{' '}
+                  <strong className="text-emerald-800">
+                    +{formatVND(
+                      filteredVouchers
+                        .filter((v) => v.isDebtSettlement)
+                        .reduce((s, v) => s + v.amount, 0)
+                    )}
+                  </strong>
+                </span>
+                <span className="text-stone-600">
+                  Thu khác:{' '}
+                  <strong className="text-teal-800">
+                    +{formatVND(
+                      filteredVouchers
+                        .filter((v) => !v.isDebtSettlement)
+                        .reduce((s, v) => s + v.amount, 0)
+                    )}
+                  </strong>
+                </span>
+                <span className="font-bold text-emerald-900 bg-white px-2.5 py-1 rounded border border-emerald-200">
+                  ∑ Tổng thực thu: +{formatVND(filteredVouchers.reduce((s, v) => s + v.amount, 0))}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -2528,6 +2560,38 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
               })
             )}
           </div>
+          {filteredVouchers.length > 0 && (
+            <div className="px-5 py-3 bg-amber-50/70 border-t border-amber-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-stone-700">
+                Tổng kết theo bộ lọc: <strong>{filteredVouchers.length}</strong> phiếu chi
+              </span>
+              <div className="flex flex-wrap items-center gap-3 font-mono">
+                <span className="text-stone-600">
+                  Trả nợ NCC:{' '}
+                  <strong className="text-amber-800">
+                    -{formatVND(
+                      filteredVouchers
+                        .filter((v) => v.isDebtSettlement)
+                        .reduce((s, v) => s + v.amount, 0)
+                    )}
+                  </strong>
+                </span>
+                <span className="text-stone-600">
+                  Chi vận hành/khác:{' '}
+                  <strong className="text-rose-700">
+                    -{formatVND(
+                      filteredVouchers
+                        .filter((v) => !v.isDebtSettlement)
+                        .reduce((s, v) => s + v.amount, 0)
+                    )}
+                  </strong>
+                </span>
+                <span className="font-bold text-amber-950 bg-white px-2.5 py-1 rounded border border-amber-200">
+                  ∑ Tổng thực chi: -{formatVND(filteredVouchers.reduce((s, v) => s + v.amount, 0))}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

@@ -2335,7 +2335,9 @@ export function computeReceivedItemsAndDebtReport(
 
   const customerItems = sales
     .filter((s) => {
-      if (warehouseName && s.warehouseName !== warehouseName) return false;
+      if (warehouseName && !areWarehouseNamesEquivalent(s.warehouseName, warehouseName)) {
+        return false;
+      }
       if (customerId && customerId !== 'all' && s.customerId !== customerId) return false;
       if (!isDateWithinRange(s.createdAt, fromDate, toDate)) return false;
       if (onlyUnpaid && s.debtAmount <= 0) return false;
@@ -2373,7 +2375,9 @@ export function computeReceivedItemsAndDebtReport(
   const normSupplier = supplierName ? normalizeVietnameseSearch(supplierName) : '';
   const supplierItems = (Array.isArray(imports) ? imports : [])
     .filter((imp) => {
-      if (warehouseName && imp.warehouseName !== warehouseName) return false;
+      if (warehouseName && !areWarehouseNamesEquivalent(imp.warehouseName, warehouseName)) {
+        return false;
+      }
       if (normSupplier && normalizeVietnameseSearch(imp.supplierName) !== normSupplier) return false;
       if (!isDateWithinRange(imp.createdAt, fromDate, toDate)) return false;
       if (onlyUnpaid && imp.debtAmount <= 0) return false;
@@ -2558,17 +2562,20 @@ export function generateSmartReportRecommendations(params: {
     });
   }
 
-  // 5. Cashflow & Treasury Inflow / Outflow Recommendation
+  // 5. Cashflow & Treasury Inflow / Outflow Recommendation (date-accurate PT/PC cashflow)
   if (allowed.includes('cashflow_treasury')) {
-    const otherReceiptInflow = rangeReceipts
-      .filter((rv) => !rv.isDebtSettlement)
-      .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
-    const operatingPaymentOutflow = rangePayments
-      .filter((pv) => !pv.isDebtSettlement)
-      .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
-    const totalInflow = totalSalesPaid + otherReceiptInflow;
-    const totalOutflow = totalImportPaid + operatingPaymentOutflow;
-    const netCashflow = totalInflow - totalOutflow;
+    const cfSummary = computeCashflowAndFinancialReport({
+      sales,
+      imports,
+      products,
+      receiptVouchers,
+      paymentVouchers,
+      fromDate,
+      toDate,
+    });
+    const totalInflow = cfSummary.totalCashInflow;
+    const totalOutflow = cfSummary.totalCashOutflow;
+    const netCashflow = cfSummary.netCashflow;
     const advice =
       'Thủ quỹ và Kế toán nên chốt sổ thu - chi theo khoảng ngày để báo cáo số dư quỹ thực tế và chuẩn bị nguồn tiền thanh toán các lô hàng sắp đến hạn.';
     recommendations.push({
@@ -2634,7 +2641,10 @@ export function matchesCustomerRecord(
   sale: SaleTransaction,
   identifier: CustomerMatchIdentifier
 ): boolean {
-  if (identifier.warehouseName && sale.warehouseName !== identifier.warehouseName) {
+  if (
+    identifier.warehouseName &&
+    !areWarehouseNamesEquivalent(sale.warehouseName, identifier.warehouseName)
+  ) {
     return false;
   }
   if (identifier.customerId && sale.customerId === identifier.customerId) {
@@ -2774,7 +2784,10 @@ export function matchesSupplierRecord(
   imp: ImportTransaction,
   identifier: SupplierMatchIdentifier
 ): boolean {
-  if (identifier.warehouseName && imp.warehouseName !== identifier.warehouseName) {
+  if (
+    identifier.warehouseName &&
+    !areWarehouseNamesEquivalent(imp.warehouseName, identifier.warehouseName)
+  ) {
     return false;
   }
   const cleanPhone = (identifier.supplierPhone || '').trim();
@@ -2902,10 +2915,12 @@ export interface VoucherGroupSummaryItem {
 
 export interface CashflowAndFinancialReportSummary {
   // Cashflow metrics (7. Thu - Chi Dòng Tiền)
+  salesInitialPaidInflow: number;
   salesPaidInflow: number;
   otherReceiptInflow: number;
   debtSettlementReceiptTotal: number;
   totalCashInflow: number;
+  importsInitialPaidOutflow: number;
   importsPaidOutflow: number;
   operatingPaymentOutflow: number;
   debtSettlementPaymentTotal: number;
@@ -2934,8 +2949,11 @@ export interface CashflowAndFinancialReportSummary {
 
 /**
  * Computes integrated Cashflow (7. Thu - Chi Dòng Tiền) and Financial Profit (8. Báo Cáo Tài Chính & Lợi Nhuận)
- * combining Sales, Imports, Receipt Vouchers (Phiếu thu tiền), and Payment Vouchers (Phiếu chi tiền)
- * without double-counting debt settlement vouchers that have already updated sale.paidAmount / import.paidAmount.
+ * combining Sales, Imports, Receipt Vouchers (Phiếu thu tiền), and Payment Vouchers (Phiếu chi tiền):
+ * - Separates upfront payment on invoice date (`initialPaidAtSale = paidAmount - allocatedPT`) from
+ *   subsequent debt collection vouchers (`PT-...` on `rv.createdAt`), so BOTH period-by-period cashflow
+ *   AND all-time cashflow are 100% exact without double-counting or cross-month distortion!
+ * - Uses accent- and case-insensitive warehouse matching (`areWarehouseNamesEquivalent`).
  */
 export function computeCashflowAndFinancialReport(params: {
   sales: SaleTransaction[];
@@ -2958,43 +2976,94 @@ export function computeCashflowAndFinancialReport(params: {
     warehouseName,
   } = params;
 
-  const filteredSales = sales.filter((s) => {
-    if (warehouseName && s.warehouseName !== warehouseName) return false;
-    return isDateWithinRange(s.createdAt, fromDate, toDate);
-  });
+  const whSales = warehouseName
+    ? sales.filter((s) => areWarehouseNamesEquivalent(s.warehouseName, warehouseName))
+    : sales;
+  const whImports = warehouseName
+    ? imports.filter((i) => areWarehouseNamesEquivalent(i.warehouseName, warehouseName))
+    : imports;
+  const whReceipts = warehouseName
+    ? receiptVouchers.filter((rv) => areWarehouseNamesEquivalent(rv.warehouseName, warehouseName))
+    : receiptVouchers;
+  const whPayments = warehouseName
+    ? paymentVouchers.filter((pv) => areWarehouseNamesEquivalent(pv.warehouseName, warehouseName))
+    : paymentVouchers;
 
-  const filteredImports = imports.filter((i) => {
-    if (warehouseName && i.warehouseName !== warehouseName) return false;
-    return isDateWithinRange(i.createdAt, fromDate, toDate);
-  });
+  // Map all debt-settlement allocations across ALL active PT/PC vouchers so we can recover exact initial cash paid on invoice creation date
+  const settledOnSaleById = new Map<string, number>();
+  const settledOnSaleByCode = new Map<string, number>();
+  for (const rv of whReceipts) {
+    if (!rv.isDebtSettlement || !rv.settledAllocations?.length) continue;
+    for (const alloc of rv.settledAllocations) {
+      const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
+      if (amt <= 0) continue;
+      if (alloc.recordId) {
+        settledOnSaleById.set(alloc.recordId, (settledOnSaleById.get(alloc.recordId) || 0) + amt);
+      } else if (alloc.code) {
+        settledOnSaleByCode.set(alloc.code, (settledOnSaleByCode.get(alloc.code) || 0) + amt);
+      }
+    }
+  }
 
-  const filteredReceiptVouchers = receiptVouchers.filter((rv) => {
-    if (warehouseName && rv.warehouseName !== warehouseName) return false;
-    return isDateWithinRange(rv.createdAt, fromDate, toDate);
-  });
+  const settledOnImportById = new Map<string, number>();
+  const settledOnImportByCode = new Map<string, number>();
+  for (const pv of whPayments) {
+    if (!pv.isDebtSettlement || !pv.settledAllocations?.length) continue;
+    for (const alloc of pv.settledAllocations) {
+      const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
+      if (amt <= 0) continue;
+      if (alloc.recordId) {
+        settledOnImportById.set(
+          alloc.recordId,
+          (settledOnImportById.get(alloc.recordId) || 0) + amt
+        );
+      } else if (alloc.code) {
+        settledOnImportByCode.set(
+          alloc.code,
+          (settledOnImportByCode.get(alloc.code) || 0) + amt
+        );
+      }
+    }
+  }
 
-  const filteredPaymentVouchers = paymentVouchers.filter((pv) => {
-    if (warehouseName && pv.warehouseName !== warehouseName) return false;
-    return isDateWithinRange(pv.createdAt, fromDate, toDate);
-  });
+  const filteredSales = whSales.filter((s) => isDateWithinRange(s.createdAt, fromDate, toDate));
+  const filteredImports = whImports.filter((i) => isDateWithinRange(i.createdAt, fromDate, toDate));
+  const filteredReceiptVouchers = whReceipts.filter((rv) =>
+    isDateWithinRange(rv.createdAt, fromDate, toDate)
+  );
+  const filteredPaymentVouchers = whPayments.filter((pv) =>
+    isDateWithinRange(pv.createdAt, fromDate, toDate)
+  );
 
-  // Cashflow calculations
-  const salesPaidInflow = filteredSales.reduce((sum, s) => sum + s.paidAmount, 0);
+  // Cashflow calculations (exact cash-timing per period, zero double-count across all time)
+  const salesInitialPaidInflow = filteredSales.reduce((sum, s) => {
+    const settledLater =
+      settledOnSaleById.get(s.id) ?? settledOnSaleByCode.get(s.invoiceCode) ?? 0;
+    const initialPaid = Math.max(0, (Number(s.paidAmount) || 0) - settledLater);
+    return sum + initialPaid;
+  }, 0);
   const debtSettlementReceiptTotal = filteredReceiptVouchers
     .filter((rv) => rv.isDebtSettlement)
-    .reduce((sum, rv) => sum + rv.amount, 0);
+    .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
+  const salesPaidInflow = salesInitialPaidInflow + debtSettlementReceiptTotal;
   const otherReceiptInflow = filteredReceiptVouchers
     .filter((rv) => !rv.isDebtSettlement)
-    .reduce((sum, rv) => sum + rv.amount, 0);
+    .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
   const totalCashInflow = salesPaidInflow + otherReceiptInflow;
 
-  const importsPaidOutflow = filteredImports.reduce((sum, i) => sum + i.paidAmount, 0);
+  const importsInitialPaidOutflow = filteredImports.reduce((sum, i) => {
+    const settledLater =
+      settledOnImportById.get(i.id) ?? settledOnImportByCode.get(i.receiptCode) ?? 0;
+    const initialPaid = Math.max(0, (Number(i.paidAmount) || 0) - settledLater);
+    return sum + initialPaid;
+  }, 0);
   const debtSettlementPaymentTotal = filteredPaymentVouchers
     .filter((pv) => pv.isDebtSettlement)
-    .reduce((sum, pv) => sum + pv.amount, 0);
+    .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
+  const importsPaidOutflow = importsInitialPaidOutflow + debtSettlementPaymentTotal;
   const operatingPaymentOutflow = filteredPaymentVouchers
     .filter((pv) => !pv.isDebtSettlement)
-    .reduce((sum, pv) => sum + pv.amount, 0);
+    .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
   const totalCashOutflow = importsPaidOutflow + operatingPaymentOutflow;
 
   const netCashflow = totalCashInflow - totalCashOutflow;
@@ -3087,10 +3156,12 @@ export function computeCashflowAndFinancialReport(params: {
   const totalPayableDebt = filteredImports.reduce((sum, i) => sum + i.debtAmount, 0);
 
   return {
+    salesInitialPaidInflow,
     salesPaidInflow,
     otherReceiptInflow,
     debtSettlementReceiptTotal,
     totalCashInflow,
+    importsInitialPaidOutflow,
     importsPaidOutflow,
     operatingPaymentOutflow,
     debtSettlementPaymentTotal,
@@ -3577,7 +3648,9 @@ export function computeTaxAuthorityFinancialStatement(params: {
 
   const filteredSales = (params.sales || [])
     .filter((s) => {
-      if (params.warehouseName && s.warehouseName !== params.warehouseName) return false;
+      if (params.warehouseName && !areWarehouseNamesEquivalent(s.warehouseName, params.warehouseName)) {
+        return false;
+      }
       return isDateWithinRange(s.createdAt, fromDate, toDate);
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -3587,7 +3660,9 @@ export function computeTaxAuthorityFinancialStatement(params: {
 
   const filteredImports = (params.imports || [])
     .filter((i) => {
-      if (params.warehouseName && i.warehouseName !== params.warehouseName) return false;
+      if (params.warehouseName && !areWarehouseNamesEquivalent(i.warehouseName, params.warehouseName)) {
+        return false;
+      }
       return isDateWithinRange(i.createdAt, fromDate, toDate);
     })
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -3634,7 +3709,11 @@ export function computeTaxAuthorityFinancialStatement(params: {
   });
 
   const filteredProducts = (params.products || []).filter((p) => {
-    if (params.warehouseName && p.warehouseName && p.warehouseName !== params.warehouseName) {
+    if (
+      params.warehouseName &&
+      p.warehouseName &&
+      !areWarehouseNamesEquivalent(p.warehouseName, params.warehouseName)
+    ) {
       return false;
     }
     return true;
@@ -3670,11 +3749,15 @@ export function computeTaxAuthorityFinancialStatement(params: {
 
   const netCashflow110 = baseReport.netCashflow;
   const cumSalesAsOfToDate = (params.sales || []).filter((s) => {
-    if (params.warehouseName && s.warehouseName !== params.warehouseName) return false;
+    if (params.warehouseName && !areWarehouseNamesEquivalent(s.warehouseName, params.warehouseName)) {
+      return false;
+    }
     return toDate ? isDateWithinRange(s.createdAt, undefined, toDate) : true;
   });
   const cumImportsAsOfToDate = (params.imports || []).filter((i) => {
-    if (params.warehouseName && i.warehouseName !== params.warehouseName) return false;
+    if (params.warehouseName && !areWarehouseNamesEquivalent(i.warehouseName, params.warehouseName)) {
+      return false;
+    }
     return toDate ? isDateWithinRange(i.createdAt, undefined, toDate) : true;
   });
   const customerReceivables131 = cumSalesAsOfToDate.reduce(
@@ -4166,7 +4249,11 @@ export function reconcileCustomersFromSales(
     const matchedSales = sales.filter((s) => {
       if (s.customerId === c.id) return true;
       if ((s.customerId || '').startsWith('cust_xl_')) {
-        if (c.warehouseName && s.warehouseName && c.warehouseName !== s.warehouseName) {
+        if (
+          c.warehouseName &&
+          s.warehouseName &&
+          !areWarehouseNamesEquivalent(c.warehouseName, s.warehouseName)
+        ) {
           return false;
         }
         if (cleanPhone && s.customerPhone && s.customerPhone.trim() === cleanPhone) {
@@ -4409,7 +4496,7 @@ export function computeProductStockMovementLedger(
   const matchesProduct = (recProdId: string | undefined, recProdName: string | undefined, recWh?: string) => {
     if (recProdId && recProdId === product.id) return true;
     if (recProdId && recProdId.startsWith('prod_xl_') && recProdName) {
-      if (prodWh && recWh && prodWh !== recWh) return false;
+      if (prodWh && recWh && !areWarehouseNamesEquivalent(prodWh, recWh)) return false;
       return normalizeVietnameseSearch(recProdName) === normProdName;
     }
     return false;
@@ -5480,6 +5567,209 @@ export function diagnoseSaleVoucher(params: {
     relatedImports,
     statusLevel,
     statusLabel,
+  };
+}
+
+/**
+ * Generates the next non-colliding `VT-XX` SKU code within a warehouse, scanning existing numeric
+ * suffixes (`VT-01`, `VT-02`, ...) so deleting or reordering products NEVER generates duplicate `VT-01` codes.
+ */
+export function generateNextUniqueProductCode(
+  products: ProductItem[],
+  warehouseName?: string | null,
+  excludeProductId?: string
+): string {
+  const usedUpper = new Set<string>();
+  let maxVtNum = 0;
+  for (const p of products || []) {
+    if (!p || (excludeProductId && p.id === excludeProductId)) continue;
+    if (
+      warehouseName &&
+      p.warehouseName &&
+      !areWarehouseNamesEquivalent(p.warehouseName, warehouseName)
+    ) {
+      continue;
+    }
+    const clean = (p.code || '').trim().toUpperCase();
+    if (!clean) continue;
+    usedUpper.add(clean);
+    const match = clean.match(/^VT-(\d+)$/);
+    if (match) {
+      const n = Number(match[1]);
+      if (Number.isFinite(n) && n > maxVtNum) maxVtNum = n;
+    }
+  }
+  let candidateNum = maxVtNum + 1;
+  while (candidateNum < 999999) {
+    const candidate = `VT-${String(candidateNum).padStart(2, '0')}`;
+    if (!usedUpper.has(candidate)) return candidate;
+    candidateNum += 1;
+  }
+  return `VT-${Date.now().toString().slice(-4)}`;
+}
+
+/**
+ * Checks whether a product SKU `code` collides with another product in the same warehouse.
+ */
+export function findCollidingProductCodeInWarehouse(
+  code: string,
+  products: ProductItem[],
+  warehouseName?: string | null,
+  excludeProductId?: string
+): ProductItem | null {
+  const cleanCode = (code || '').trim().toUpperCase();
+  if (!cleanCode) return null;
+  for (const p of products || []) {
+    if (!p || (excludeProductId && p.id === excludeProductId)) continue;
+    if (
+      warehouseName &&
+      p.warehouseName &&
+      !areWarehouseNamesEquivalent(p.warehouseName, warehouseName)
+    ) {
+      continue;
+    }
+    if ((p.code || '').trim().toUpperCase() === cleanCode) {
+      return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * Counts distinct POS / sales invoices (grouping multi-item POS cart rows that share `invoiceGroupId`
+ * or same `invoiceCode` + customer + date) so multi-item POS orders are counted as 1 invoice instead of N lines.
+ */
+export function countDistinctSalesInvoices(sales: SaleTransaction[]): number {
+  const keys = new Set<string>();
+  for (const s of sales || []) {
+    if (!s) continue;
+    if (s.invoiceGroupId && s.invoiceGroupId.trim()) {
+      keys.add(`grp:${s.invoiceGroupId.trim()}`);
+    } else if (s.invoiceCode) {
+      keys.add(`code:${s.invoiceCode}|${s.customerId || s.customerName}|${(s.createdAt || '').slice(0, 10)}`);
+    } else {
+      keys.add(`id:${s.id}`);
+    }
+  }
+  return keys.size;
+}
+
+/**
+ * Counts distinct purchase import receipts (`PN-...`), grouping multi-item import cart rows
+ * that share `importGroupId` or `receiptCode` + supplier + date.
+ */
+export function countDistinctImportReceipts(imports: ImportTransaction[]): number {
+  const keys = new Set<string>();
+  for (const imp of imports || []) {
+    if (!imp) continue;
+    if (imp.importGroupId && imp.importGroupId.trim()) {
+      keys.add(`grp:${imp.importGroupId.trim()}`);
+    } else if (imp.receiptCode) {
+      keys.add(`code:${imp.receiptCode}|${imp.supplierName}|${(imp.createdAt || '').slice(0, 10)}`);
+    } else {
+      keys.add(`id:${imp.id}`);
+    }
+  }
+  return keys.size;
+}
+
+export interface CustomerSaleReturnCalculation {
+  isFullReturn: boolean;
+  returnQuantity: number;
+  remainingQuantity: number;
+  returnGiftQuantity: number;
+  remainingGiftQuantity: number;
+  returnAmount: number;
+  debtReducedAmount: number;
+  cashRefundAmount: number;
+  nextTotalAmount: number;
+  nextDiscountAmount: number;
+  nextPaidAmount: number;
+  nextDebtAmount: number;
+  nextStatus: PaymentStatus;
+}
+
+/**
+ * Pure, zero-discrepancy accounting helper for Customer Return / Exchange (`TH-...`):
+ * - Restores `returnQuantity` (and optional `returnGiftQuantity`) to inventory.
+ * - Offsets unpaid `debtAmount` first; only requires cash refund (`cashRefundAmount`) if the customer
+ *   had already paid more than `nextTotalAmount`.
+ * - Preserves exact balance across Inventory XNT, Customer Debt, COGS/Gross Profit, and Cashflow.
+ */
+export function computeCustomerSaleReturnCalculation(params: {
+  sale: SaleTransaction;
+  returnQuantity: number;
+  returnGiftQuantity?: number;
+}): CustomerSaleReturnCalculation {
+  const { sale } = params;
+  const origQty = Math.max(1, Math.round(Number(sale.quantity) || 1));
+  const returnQuantity = Math.min(
+    origQty,
+    Math.max(1, Math.round(Number(params.returnQuantity) || 1))
+  );
+  const remainingQuantity = Math.max(0, origQty - returnQuantity);
+
+  const origGiftQty = Math.max(0, Math.round(Number(sale.giftQuantity) || 0));
+  const defaultGiftReturn =
+    remainingQuantity === 0
+      ? origGiftQty
+      : params.returnGiftQuantity !== undefined
+      ? Math.round(Number(params.returnGiftQuantity) || 0)
+      : 0;
+  const returnGiftQuantity = Math.min(origGiftQty, Math.max(0, defaultGiftReturn));
+  const remainingGiftQuantity = Math.max(0, origGiftQty - returnGiftQuantity);
+
+  const origTotal = Math.max(0, Math.round(Number(sale.totalAmount) || 0));
+  const origPaid = Math.max(0, Math.round(Number(sale.paidAmount) || 0));
+  const origDebt = Math.max(0, Math.round(Number(sale.debtAmount) || 0));
+  const origDiscount = Math.max(0, Math.round(Number(sale.discountAmount) || 0));
+
+  if (remainingQuantity === 0) {
+    return {
+      isFullReturn: true,
+      returnQuantity,
+      remainingQuantity: 0,
+      returnGiftQuantity,
+      remainingGiftQuantity: 0,
+      returnAmount: origTotal,
+      debtReducedAmount: origDebt,
+      cashRefundAmount: origPaid,
+      nextTotalAmount: 0,
+      nextDiscountAmount: 0,
+      nextPaidAmount: 0,
+      nextDebtAmount: 0,
+      nextStatus: 'paid',
+    };
+  }
+
+  const nextGross = Math.round(remainingQuantity * Math.max(0, Number(sale.unitPrice) || 0));
+  const nextDiscountAmount = Math.min(
+    nextGross,
+    Math.round((origDiscount * remainingQuantity) / origQty)
+  );
+  const nextTotalAmount = Math.max(0, nextGross - nextDiscountAmount);
+  const returnAmount = Math.max(0, origTotal - nextTotalAmount);
+  const nextPaidAmount = Math.min(origPaid, nextTotalAmount);
+  const cashRefundAmount = Math.max(0, origPaid - nextTotalAmount);
+  const nextDebtAmount = Math.max(0, nextTotalAmount - nextPaidAmount);
+  const debtReducedAmount = Math.max(0, origDebt - nextDebtAmount);
+  const nextStatus: PaymentStatus =
+    nextDebtAmount === 0 ? 'paid' : nextPaidAmount > 0 ? 'partial' : 'unpaid';
+
+  return {
+    isFullReturn: false,
+    returnQuantity,
+    remainingQuantity,
+    returnGiftQuantity,
+    remainingGiftQuantity,
+    returnAmount,
+    debtReducedAmount,
+    cashRefundAmount,
+    nextTotalAmount,
+    nextDiscountAmount,
+    nextPaidAmount,
+    nextDebtAmount,
+    nextStatus,
   };
 }
 

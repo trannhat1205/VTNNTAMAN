@@ -1,4 +1,5 @@
 import {
+  ImportTransaction,
   ProductItem,
   ProductNoteTemplate,
   SalePromotionType,
@@ -556,9 +557,210 @@ export function findInvoiceGroupSales(
     if (targetSale.invoiceGroupId && s.invoiceGroupId) {
       return s.invoiceGroupId === targetSale.invoiceGroupId;
     }
-    return s.invoiceCode === targetSale.invoiceCode;
+    return (
+      s.invoiceCode === targetSale.invoiceCode &&
+      (s.customerId === targetSale.customerId || s.customerName === targetSale.customerName) &&
+      (s.createdAt || '').slice(0, 10) === (targetSale.createdAt || '').slice(0, 10)
+    );
   });
   return matched.length > 0 ? matched : [targetSale];
+}
+
+export interface GroupedSaleInvoiceEntry {
+  groupKey: string;
+  invoiceCode: string;
+  warehouseName: string;
+  createdAt: string;
+  customerId: string;
+  customerName: string;
+  customerPhone: string;
+  dueDate: string;
+  items: SaleTransaction[];
+  totalAmount: number;
+  paidAmount: number;
+  debtAmount: number;
+  discountAmount: number;
+  status: 'paid' | 'partial' | 'unpaid';
+}
+
+/**
+ * Preserves chronological order while grouping multi-item POS cart rows sharing the same
+ * `invoiceGroupId` (or `invoiceCode` + customer + date) into a single invoice summary.
+ */
+export function groupSalesByInvoice(sales: SaleTransaction[]): GroupedSaleInvoiceEntry[] {
+  const map = new Map<string, GroupedSaleInvoiceEntry>();
+  const ordered: GroupedSaleInvoiceEntry[] = [];
+
+  for (const s of sales || []) {
+    if (!s) continue;
+    const key =
+      s.invoiceGroupId && s.invoiceGroupId.trim()
+        ? `grp:${s.invoiceGroupId.trim()}`
+        : s.invoiceCode
+        ? `code:${s.invoiceCode}|${s.customerId || s.customerName}|${(s.createdAt || '').slice(0, 10)}`
+        : `id:${s.id}`;
+
+    let existing = map.get(key);
+    if (!existing) {
+      existing = {
+        groupKey: key,
+        invoiceCode: s.invoiceCode,
+        warehouseName: s.warehouseName || 'Tâm An Mỹ Ngãi',
+        createdAt: s.createdAt,
+        customerId: s.customerId,
+        customerName: s.customerName,
+        customerPhone: s.customerPhone,
+        dueDate: s.dueDate,
+        items: [],
+        totalAmount: 0,
+        paidAmount: 0,
+        debtAmount: 0,
+        discountAmount: 0,
+        status: 'paid',
+      };
+      map.set(key, existing);
+      ordered.push(existing);
+    }
+
+    existing.items.push(s);
+    existing.totalAmount += Math.max(0, Number(s.totalAmount) || 0);
+    existing.paidAmount += Math.max(0, Number(s.paidAmount) || 0);
+    existing.debtAmount += Math.max(0, Number(s.debtAmount) || 0);
+    existing.discountAmount += Math.max(0, Number(s.discountAmount) || 0);
+    existing.status =
+      existing.debtAmount === 0 ? 'paid' : existing.paidAmount > 0 ? 'partial' : 'unpaid';
+  }
+
+  return ordered;
+}
+
+// --- MULTI-ITEM IMPORT CART (Giỏ Nhập Hàng Nhiều Vật Tư trên 1 Phiếu PN-...) ---
+
+export interface ImportCartDraftItem {
+  id: string;
+  productId: string;
+  productName: string;
+  unit: string;
+  quantity: number;
+  unitCost: number;
+  batchNumber?: string;
+  expiryDate?: string;
+}
+
+export interface AllocatedImportCartItem extends ImportCartDraftItem {
+  totalCost: number;
+  paidAmount: number;
+  debtAmount: number;
+  status: 'paid' | 'partial' | 'unpaid';
+}
+
+export interface ImportCartAllocationSummary {
+  items: AllocatedImportCartItem[];
+  totalCost: number;
+  totalPaid: number;
+  totalDebt: number;
+  status: 'paid' | 'partial' | 'unpaid';
+}
+
+/**
+ * Allocates a single supplier payment cleanly across multiple import cart items
+ * so sum(item.paidAmount) === totalPaid and sum(item.debtAmount) === totalDebt with zero rounding drift.
+ */
+export function allocatePaymentAcrossImportItems(
+  items: ImportCartDraftItem[],
+  totalPaidInput: number
+): ImportCartAllocationSummary {
+  const sanitized = (items || [])
+    .filter((item) => item.productId && (Number(item.quantity) || 0) > 0)
+    .map((item) => {
+      const quantity = Math.max(1, Math.round(Number(item.quantity) || 0));
+      const unitCost = Math.max(0, Math.round(Number(item.unitCost) || 0));
+      const totalCost = Math.round(quantity * unitCost);
+      return {
+        ...item,
+        quantity,
+        unitCost,
+        totalCost,
+      };
+    });
+
+  const totalCost = sanitized.reduce((sum, item) => sum + item.totalCost, 0);
+  const clampedPaid = Math.min(totalCost, Math.max(0, Math.round(Number(totalPaidInput) || 0)));
+
+  let remainingPaid = clampedPaid;
+  const allocated: AllocatedImportCartItem[] = sanitized.map((item) => {
+    const paidForLine = Math.min(item.totalCost, remainingPaid);
+    remainingPaid = Math.max(0, remainingPaid - paidForLine);
+    const debtForLine = Math.max(0, item.totalCost - paidForLine);
+    const status: 'paid' | 'partial' | 'unpaid' =
+      debtForLine === 0 ? 'paid' : paidForLine > 0 ? 'partial' : 'unpaid';
+    return {
+      ...item,
+      paidAmount: paidForLine,
+      debtAmount: debtForLine,
+      status,
+    };
+  });
+
+  const totalDebt = Math.max(0, totalCost - clampedPaid);
+  const status: 'paid' | 'partial' | 'unpaid' =
+    totalDebt === 0 ? 'paid' : clampedPaid > 0 ? 'partial' : 'unpaid';
+
+  return {
+    items: allocated,
+    totalCost,
+    totalPaid: clampedPaid,
+    totalDebt,
+    status,
+  };
+}
+
+/**
+ * Quick +/- quantity helper inside the Import Product search dropdown.
+ */
+export function upsertQuickImportProductQuantity(
+  cartItems: ImportCartDraftItem[],
+  product: ProductItem,
+  nextQtyRaw: number
+): ImportCartDraftItem[] {
+  const safeQty = Math.max(0, Math.round(Number(nextQtyRaw) || 0));
+  if (safeQty === 0) {
+    return cartItems.filter((item) => item.productId !== product.id);
+  }
+  const existingIdx = cartItems.findIndex((item) => item.productId === product.id);
+  if (existingIdx >= 0) {
+    return cartItems.map((item, idx) =>
+      idx === existingIdx ? { ...item, quantity: safeQty } : item
+    );
+  }
+  return [
+    ...cartItems,
+    {
+      id: `imp_cart_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      productId: product.id,
+      productName: product.name,
+      unit: product.unit,
+      quantity: safeQty,
+      unitCost: Math.max(0, Number(product.importPrice) || 0),
+    },
+  ];
+}
+
+export function findImportGroupTransactions(
+  allImports: ImportTransaction[],
+  targetImport: ImportTransaction
+): ImportTransaction[] {
+  const matched = (allImports || []).filter((imp) => {
+    if (targetImport.importGroupId && imp.importGroupId) {
+      return imp.importGroupId === targetImport.importGroupId;
+    }
+    return (
+      imp.receiptCode === targetImport.receiptCode &&
+      imp.supplierName === targetImport.supplierName &&
+      (imp.createdAt || '').slice(0, 10) === (targetImport.createdAt || '').slice(0, 10)
+    );
+  });
+  return matched.length > 0 ? matched : [targetImport];
 }
 
 // --- OFFLINE QUEUE PERSISTENCE (Priority 4) ---

@@ -3,10 +3,14 @@ import {
   AlertCircle,
   Building2,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   FileDown,
   FolderPlus,
   Gift,
+  Layers,
   Leaf,
+  List,
   Lock,
   MessageCircle,
   PackagePlus,
@@ -44,18 +48,23 @@ import {
   VietQrBankConfig,
 } from '../types';
 import {
+  areWarehouseNamesEquivalent,
   calculateImportSummary,
   calculateSaleSummary,
   canPerformRoleAction,
   computeCustomerOldDebtSummary,
+  computeCustomerSaleReturnCalculation,
   computeDueDateAfterDays,
   computeSupplierOldDebtSummary,
+  countDistinctImportReceipts,
+  countDistinctSalesInvoices,
   DEBT_TERM_DAY_OPTIONS,
   diagnoseImportVoucher,
   diagnoseSaleVoucher,
   evaluateDebtUrgency,
   evaluateProductExpiry,
   formatVND,
+  generateNextUniqueProductCode,
   matchDebtTermDays,
   normalizeVietnameseSearch,
 } from '../utils/businessLogic';
@@ -73,11 +82,16 @@ import {
 } from '../utils/exportReports';
 import {
   allocatePaymentAcrossCartItems,
+  allocatePaymentAcrossImportItems,
   buildZaloInvoiceAndDosageMessage,
   DEFAULT_PRODUCT_NOTE_TEMPLATES,
+  findImportGroupTransactions,
   findInvoiceGroupSales,
+  groupSalesByInvoice,
+  ImportCartDraftItem,
   PosCartDraftItem,
   upsertQuickCartProductQuantity,
+  upsertQuickImportProductQuantity,
   validateCartInventory,
 } from '../utils/smartPosFeatures';
 import { ExcelDataBar } from './ExcelDataBar';
@@ -176,6 +190,13 @@ interface SalesLogViewProps {
     }
   ) => void;
   onDeleteSale: (saleId: string) => void;
+  onDeleteSaleGroup?: (saleIds: string[]) => void;
+  onProcessCustomerReturn?: (params: {
+    saleId: string;
+    returnQuantity: number;
+    returnGiftQuantity?: number;
+    reason: string;
+  }) => void;
   onOpenDebtRecord?: (recordId: string) => void;
   onRequestAddNewProductInImports?: (initialKeyword?: string) => void;
 }
@@ -212,6 +233,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   onImportSalesFromExcel,
   onUpdateSale,
   onDeleteSale,
+  onDeleteSaleGroup,
+  onProcessCustomerReturn,
   onOpenDebtRecord,
   onRequestAddNewProductInImports,
 }) => {
@@ -561,15 +584,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     const importNum = Math.max(0, Number(newProdImportPrice) || Math.round(sellNum * 0.82));
     const stockNum = Math.max(1, Number(newProdStock) || 30);
 
+    const resolvedProdWh =
+      lockedWarehouse ||
+      (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+        ? selectedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
+
     const created = onCreateProductInline({
-      code: newProdCode.trim() || `VT-0${products.length + 1}`,
+      code: newProdCode.trim() || generateNextUniqueProductCode(products, resolvedProdWh),
       name: newProdName.trim(),
       category: newProdCategory,
-      warehouseName:
-        lockedWarehouse ||
-        (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
-          ? selectedWarehouse
-          : warehouses[0] || 'Tâm An Mỹ Ngãi'),
+      warehouseName: resolvedProdWh,
       unit: newProdUnit.trim(),
       importPrice: importNum,
       sellPrice: sellNum,
@@ -1297,21 +1322,59 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
   const filteredSales = sales.filter((s) => {
     const sWh = s.warehouseName || 'Tâm An Mỹ Ngãi';
-    if (lockedWarehouse && sWh !== lockedWarehouse) return false;
-    if (!lockedWarehouse && warehouseTableFilter !== 'all' && sWh !== warehouseTableFilter) {
+    if (lockedWarehouse && !areWarehouseNamesEquivalent(sWh, lockedWarehouse)) return false;
+    if (
+      !lockedWarehouse &&
+      warehouseTableFilter !== 'all' &&
+      !areWarehouseNamesEquivalent(sWh, warehouseTableFilter)
+    ) {
       return false;
     }
     if (statusFilter !== 'all' && s.status !== statusFilter) return false;
-    const q = searchQuery.trim().toLowerCase();
+    const q = normalizeVietnameseSearch(searchQuery);
     if (!q) return true;
-    return (
-      s.invoiceCode.toLowerCase().includes(q) ||
-      s.customerName.toLowerCase().includes(q) ||
-      s.productName.toLowerCase().includes(q) ||
-      s.customerPhone.toLowerCase().includes(q) ||
-      sWh.toLowerCase().includes(q)
-    );
+    return normalizeVietnameseSearch(
+      `${s.invoiceCode} ${s.customerName} ${s.productName} ${s.customerPhone} ${sWh} ${s.note || ''}`
+    ).includes(q);
   });
+
+  const [salesViewMode, setSalesViewMode] = useState<'grouped' | 'flat'>('grouped');
+  const [expandedInvoiceGroups, setExpandedInvoiceGroups] = useState<Record<string, boolean>>({});
+  const [salesRowLimit, setSalesRowLimit] = useState<number>(80);
+
+  useEffect(() => {
+    setSalesRowLimit(80);
+  }, [searchQuery, statusFilter, warehouseTableFilter]);
+
+  const groupedFilteredSales = groupSalesByInvoice(filteredSales);
+  const distinctFilteredInvoicesCount = groupedFilteredSales.length;
+  const hasMultiItemInvoices = filteredSales.length > distinctFilteredInvoicesCount;
+
+  const displayedFlatSales =
+    focusedSaleRecord && filteredSales.findIndex((s) => s.id === focusedSaleRecord.id) >= salesRowLimit
+      ? filteredSales
+      : filteredSales.slice(0, salesRowLimit);
+
+  const displayedGroupedSales =
+    focusedSaleRecord &&
+    groupedFilteredSales.findIndex((g) => g.items.some((i) => i.id === focusedSaleRecord.id)) >=
+      salesRowLimit
+      ? groupedFilteredSales
+      : groupedFilteredSales.slice(0, salesRowLimit);
+
+  // Customer Return / Exchange Modal State (TH-...)
+  const [returningSale, setReturningSale] = useState<SaleTransaction | null>(null);
+  const [returnQtyInput, setReturnQtyInput] = useState<string>('1');
+  const [returnGiftQtyInput, setReturnGiftQtyInput] = useState<string>('0');
+  const [returnReasonInput, setReturnReasonInput] = useState<string>('Dư sau mùa vụ');
+
+  const openCustomerReturnModal = (s: SaleTransaction) => {
+    if (!canPerformRoleAction(role, 'edit_record') || !onProcessCustomerReturn) return;
+    setReturningSale(s);
+    setReturnQtyInput('1');
+    setReturnGiftQtyInput('0');
+    setReturnReasonInput('Dư sau mùa vụ');
+  };
 
   return (
     <div className="space-y-5">
@@ -2948,14 +3011,43 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
           <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                Nhật Ký Bán Hàng ({filteredSales.length} đơn)
+                Nhật Ký Bán Hàng ({distinctFilteredInvoicesCount} hóa đơn
+                {hasMultiItemInvoices ? ` · ${filteredSales.length} món` : ''})
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Lưu thông tin kho xuất bán và hỗ trợ Xuất Phiếu PDF gửi khách hàng
+                Hỗ trợ gom nhóm Hóa đơn gộp POS, Khách trả hàng (TH-...) và Xuất Phiếu PDF / Zalo
               </p>
             </div>
 
             <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto">
+              <div className="hidden md:inline-flex items-center p-0.5 bg-slate-100 rounded-lg border border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setSalesViewMode('grouped')}
+                  title="Gom các mặt hàng cùng hóa đơn POS thành 1 dòng gọn gàng"
+                  className={`px-2 py-1 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 transition-colors ${
+                    salesViewMode === 'grouped'
+                      ? 'bg-white text-emerald-800 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Layers className="w-3 h-3" />
+                  <span>Gộp HĐ</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSalesViewMode('flat')}
+                  title="Hiển thị tách rời từng dòng vật tư"
+                  className={`px-2 py-1 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 transition-colors ${
+                    salesViewMode === 'flat'
+                      ? 'bg-white text-emerald-800 shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <List className="w-3 h-3" />
+                  <span>Từng món</span>
+                </button>
+              </div>
               {!lockedWarehouse && (
                 <select
                   aria-label="Lọc đơn bán theo kho"
@@ -3048,7 +3140,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 Không có hóa đơn bán hàng nào khớp với bộ lọc hiện tại.
               </div>
             ) : (
-              filteredSales.map((s) => {
+              displayedFlatSales.map((s) => {
                 const diag = diagnoseSaleVoucher({
                   sale: s,
                   products,
@@ -3268,7 +3360,18 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     </div>
 
                     {canPerformRoleAction(role, 'edit_record') ? (
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {onProcessCustomerReturn && (
+                          <button
+                            type="button"
+                            onClick={() => openCustomerReturnModal(s)}
+                            aria-label={`Khách trả hàng hóa đơn ${s.invoiceCode}`}
+                            className="px-2.5 py-1.5 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Khách trả</span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openEditSaleModal(s)}
@@ -3305,39 +3408,231 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
           </div>
 
           {/* Desktop Balanced Table (>= md) */}
-          <div className="hidden md:block overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto max-h-[72vh]">
             <table className="w-full min-w-[940px] text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
+              <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs shadow-2xs">
+                <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
                   <th className="py-3 px-4 w-[145px] whitespace-nowrap">Mã HĐ & Kho xuất</th>
                   <th className="py-3 px-4 min-w-[180px]">Khách hàng</th>
                   <th className="py-3 px-4 min-w-[220px]">Vật tư & SL</th>
                   <th className="py-3 px-4 w-[120px] text-right whitespace-nowrap">Thành tiền</th>
                   <th className="py-3 px-4 w-[160px] text-right whitespace-nowrap">Đã thu / Còn nợ</th>
-                  <th className="py-3 px-4 w-[165px] text-right whitespace-nowrap">
-                    Phiếu PDF / Sửa & Xóa (Quản lý)
+                  <th className="py-3 px-4 w-[185px] text-right whitespace-nowrap">
+                    PDF / Trả hàng / Sửa &amp; Hủy
                   </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-sm">
-                {filteredSales.map((s) => {
-                  const diag = diagnoseSaleVoucher({
-                    sale: s,
-                    products,
-                    customers,
-                    imports,
-                    receiptVouchers,
-                  });
-                  const isFocused = focusedSaleRecord?.id === s.id;
-                  return (
-                  <tr
-                    key={s.id}
-                    className={`transition-colors ${
-                      isFocused
-                        ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-500'
-                        : 'hover:bg-slate-50'
-                    }`}
-                  >
+                {(salesViewMode === 'grouped' ? displayedGroupedSales.length === 0 : displayedFlatSales.length === 0) ? (
+                  <tr>
+                    <td colSpan={6} className="py-10 px-4 text-center text-xs text-slate-500">
+                      Không có hóa đơn bán hàng nào khớp với bộ lọc hiện tại.
+                    </td>
+                  </tr>
+                ) : (
+                  (salesViewMode === 'grouped'
+                    ? displayedGroupedSales.flatMap((grp) => {
+                        if (grp.items.length === 1) {
+                          return [{ kind: 'single' as const, sale: grp.items[0] }];
+                        }
+                        const isExpanded =
+                          Boolean(expandedInvoiceGroups[grp.groupKey]) ||
+                          Boolean(focusedSaleRecord && grp.items.some((x) => x.id === focusedSaleRecord.id));
+                        const entries: Array<
+                          | { kind: 'group'; group: typeof grp; isExpanded: boolean }
+                          | { kind: 'single'; sale: SaleTransaction; isSubRow?: boolean }
+                        > = [{ kind: 'group', group: grp, isExpanded }];
+                        if (isExpanded) {
+                          grp.items.forEach((sub) =>
+                            entries.push({ kind: 'single', sale: sub, isSubRow: true })
+                          );
+                        }
+                        return entries;
+                      })
+                    : displayedFlatSales.map((s) => ({ kind: 'single' as const, sale: s, isSubRow: false }))
+                  ).map((entry) => {
+                    if (entry.kind === 'group') {
+                      const { group: grp, isExpanded } = entry;
+                      const firstSale = grp.items[0];
+                      const matchedCust = customers.find((c) => c.id === grp.customerId);
+                      return (
+                        <tr
+                          key={grp.groupKey}
+                          className="bg-emerald-50/45 hover:bg-emerald-50/80 transition-colors"
+                        >
+                          <td className="py-3 px-4 whitespace-nowrap align-middle">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-xs font-bold text-slate-900">
+                                {grp.invoiceCode}
+                              </span>
+                              <span className="px-1.5 py-0.5 text-[10px] font-bold bg-emerald-700 text-white rounded">
+                                {grp.items.length} món
+                              </span>
+                            </div>
+                            <div className="text-xs font-semibold text-emerald-800 mt-0.5">
+                              {grp.warehouseName}
+                            </div>
+                            <div className="text-[11px] font-mono text-slate-500">
+                              {(grp.createdAt || '').slice(0, 10)}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 min-w-[180px] align-middle">
+                            {onNavigateCrossLink && matchedCust ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'customers',
+                                    recordId: matchedCust.id,
+                                    label: `Khách hàng ${matchedCust.name}`,
+                                  })
+                                }
+                                className="font-semibold text-slate-900 hover:text-emerald-800 hover:underline leading-snug text-left"
+                              >
+                                {grp.customerName}
+                              </button>
+                            ) : (
+                              <div className="font-semibold text-slate-900 leading-snug">
+                                {grp.customerName}
+                              </div>
+                            )}
+                            <div className="text-xs font-mono text-slate-500 mt-0.5">
+                              {grp.customerPhone}
+                            </div>
+                          </td>
+                          <td className="py-3 px-4 min-w-[220px] align-middle">
+                            <div className="space-y-0.5 text-xs text-slate-800">
+                              {grp.items.map((line, lIdx) => (
+                                <div key={line.id} className="flex items-center justify-between gap-2">
+                                  <span className="truncate max-w-[210px]">
+                                    <span className="font-mono text-emerald-800 font-semibold mr-1">
+                                      {lIdx + 1}.
+                                    </span>
+                                    {line.productName}
+                                  </span>
+                                  <span className="font-mono text-[11px] text-slate-600 shrink-0">
+                                    {line.quantity} {line.unit}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedInvoiceGroups((prev) => ({
+                                  ...prev,
+                                  [grp.groupKey]: !isExpanded,
+                                }))
+                              }
+                              className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800 hover:underline"
+                            >
+                              {isExpanded ? (
+                                <>
+                                  <ChevronUp className="w-3 h-3" />
+                                  <span>Thu gọn từng dòng vật tư</span>
+                                </>
+                              ) : (
+                                <>
+                                  <ChevronDown className="w-3 h-3" />
+                                  <span>Mở {grp.items.length} dòng để Sửa / Khách trả lẻ</span>
+                                </>
+                              )}
+                            </button>
+                          </td>
+                          <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-extrabold text-slate-900 whitespace-nowrap align-middle">
+                            {formatVND(grp.totalAmount)}
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                            <div className="font-mono tabular-nums text-xs font-semibold text-emerald-700">
+                              Thu: {formatVND(grp.paidAmount)}
+                            </div>
+                            {grp.debtAmount > 0 ? (
+                              <div className="font-mono tabular-nums text-xs font-bold text-red-600 mt-0.5">
+                                Nợ: {formatVND(grp.debtAmount)}
+                              </div>
+                            ) : (
+                              <div className="text-xs text-slate-500 mt-0.5">Đã tất toán</div>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleExportGroupedInvoicePdf(firstSale)}
+                                title="Xuất Hóa đơn gộp A4"
+                                className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-white border border-emerald-200 hover:bg-emerald-100 rounded-md whitespace-nowrap"
+                              >
+                                PDF
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleExportGroupedThermalPdf(firstSale, 80)}
+                                title="In Hóa đơn gộp K80"
+                                className="px-1.5 py-1 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-md whitespace-nowrap"
+                              >
+                                K80
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenSaleVietQr(grp.items)}
+                                title="Hiện mã VietQR cả hóa đơn"
+                                className="p-1.5 text-teal-700 bg-white border border-teal-200 hover:bg-teal-100 rounded-md"
+                              >
+                                <QrCode className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSendInvoiceZalo(grp.items)}
+                                title="Gửi Zalo cả hóa đơn gộp"
+                                className="p-1.5 text-sky-700 bg-white border border-sky-200 hover:bg-sky-100 rounded-md"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                              </button>
+                              {canPerformRoleAction(role, 'delete_record') && onDeleteSaleGroup && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (
+                                      window.confirm(
+                                        `Xác nhận hủy trọn bộ hóa đơn gộp ${grp.invoiceCode} (${grp.items.length} mặt hàng · ${formatVND(grp.totalAmount)}) và hoàn lại đầy đủ tồn kho?`
+                                      )
+                                    ) {
+                                      onDeleteSaleGroup(grp.items.map((x) => x.id));
+                                    }
+                                  }}
+                                  className="px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Hủy HĐ ({grp.items.length})</span>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    const s = entry.sale;
+                    const isSubRow = Boolean(entry.isSubRow);
+                    const diag = diagnoseSaleVoucher({
+                      sale: s,
+                      products,
+                      customers,
+                      imports,
+                      receiptVouchers,
+                    });
+                    const isFocused = focusedSaleRecord?.id === s.id;
+                    return (
+                    <tr
+                      key={s.id}
+                      className={`transition-colors ${
+                        isFocused
+                          ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-500'
+                          : isSubRow
+                          ? 'bg-slate-50/75 border-l-4 border-l-emerald-500 hover:bg-slate-100/80'
+                          : 'hover:bg-slate-50'
+                      }`}
+                    >
                     <td className="py-3 px-4 whitespace-nowrap align-middle">
                       <div className="font-mono text-xs font-semibold text-slate-900">
                         {s.invoiceCode}
@@ -3559,6 +3854,18 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         </button>
                         {canPerformRoleAction(role, 'edit_record') ? (
                           <>
+                            {onProcessCustomerReturn && (
+                              <button
+                                type="button"
+                                onClick={() => openCustomerReturnModal(s)}
+                                title="Khách trả lại bớt hoặc toàn bộ mặt hàng này (Tự cộng lại kho & trừ nợ)"
+                                aria-label={`Khách trả hàng ${s.invoiceCode}`}
+                                className="px-2 py-1 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>Trả</span>
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => openEditSaleModal(s)}
@@ -3591,10 +3898,52 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     </td>
                   </tr>
                   );
-                })}
+                })
+                )}
               </tbody>
+              {filteredSales.length > 0 && (
+                <tfoot className="border-t-2 border-emerald-200 bg-emerald-50/70 text-xs font-semibold text-slate-800">
+                  <tr>
+                    <td colSpan={3} className="py-3 px-4">
+                      Tổng kết bộ lọc: <strong>{distinctFilteredInvoicesCount}</strong> hóa đơn
+                      {hasMultiItemInvoices ? ` (${filteredSales.length} mặt hàng)` : ''}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap font-bold text-slate-900">
+                      {formatVND(filteredSales.reduce((sum, s) => sum + s.totalAmount, 0))}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                      <div className="text-emerald-800">
+                        ∑ Thu: {formatVND(filteredSales.reduce((sum, s) => sum + s.paidAmount, 0))}
+                      </div>
+                      <div className="text-red-700 font-bold">
+                        ∑ Nợ: {formatVND(filteredSales.reduce((sum, s) => sum + s.debtAmount, 0))}
+                      </div>
+                    </td>
+                    <td className="py-3 px-4 text-right text-[11px] text-slate-500">
+                      Khớp 100% báo cáo doanh thu
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
+          {(salesViewMode === 'grouped'
+            ? groupedFilteredSales.length > displayedGroupedSales.length
+            : filteredSales.length > displayedFlatSales.length) && (
+            <div className="p-3.5 border-t border-slate-200 bg-slate-50/70 text-center">
+              <button
+                type="button"
+                onClick={() => setSalesRowLimit((prev) => prev + 80)}
+                className="px-4 py-2 text-xs font-semibold text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-lg shadow-2xs transition-colors"
+              >
+                Hiển thị thêm hóa đơn (Đang xem{' '}
+                {salesViewMode === 'grouped'
+                  ? `${displayedGroupedSales.length} / ${groupedFilteredSales.length} hóa đơn`
+                  : `${displayedFlatSales.length} / ${filteredSales.length} dòng`}
+                )
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -3965,6 +4314,207 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         />
       )}
 
+      {/* Customer Return / Partial Return Modal (Phiếu Khách Trả Hàng TH-...) */}
+      {returningSale && onProcessCustomerReturn && (() => {
+        const retPreview = computeCustomerSaleReturnCalculation({
+          sale: returningSale,
+          returnQuantity: Number(returnQtyInput) || 1,
+          returnGiftQuantity: Number(returnGiftQtyInput) || 0,
+        });
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-3 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Lập phiếu khách trả hàng từ hóa đơn ${returningSale.invoiceCode}`}
+          >
+            <div className="bg-white rounded-2xl border border-amber-200 shadow-2xl w-full max-w-md overflow-hidden">
+              <div className="px-5 py-4 bg-amber-50/90 border-b border-amber-200 flex items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                    <RotateCcw className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>Phiếu Khách Trả / Đổi Hàng ({returningSale.invoiceCode})</span>
+                  </h3>
+                  <p className="text-[11px] text-amber-900 mt-0.5">
+                    Tự động cộng lại tồn kho, cấn trừ công nợ KH và tính lại lãi gộp chuẩn
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReturningSale(null)}
+                  className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  onProcessCustomerReturn({
+                    saleId: returningSale.id,
+                    returnQuantity: retPreview.returnQuantity,
+                    returnGiftQuantity: retPreview.returnGiftQuantity,
+                    reason: returnReasonInput,
+                  });
+                  setReturningSale(null);
+                }}
+                className="p-5 space-y-4 text-xs"
+              >
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1">
+                  <div className="font-bold text-slate-900">{returningSale.productName}</div>
+                  <div className="text-slate-600 font-mono">
+                    Khách: <strong>{returningSale.customerName}</strong> · Đã mua:{' '}
+                    <strong>
+                      {returningSale.quantity} {returningSale.unit}
+                    </strong>{' '}
+                    × {formatVND(returningSale.unitPrice)} = {formatVND(returningSale.totalAmount)}
+                  </div>
+                  <div className="text-slate-600 font-mono">
+                    Đã thu: <span className="text-emerald-700 font-semibold">{formatVND(returningSale.paidAmount)}</span> · Còn nợ:{' '}
+                    <span className="text-red-600 font-semibold">{formatVND(returningSale.debtAmount)}</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      SL khách trả lại ({returningSale.unit}) *
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={returningSale.quantity}
+                      required
+                      value={returnQtyInput}
+                      onChange={(e) => setReturnQtyInput(e.target.value)}
+                      className="w-full px-3 py-2 text-sm font-mono font-bold bg-white border border-slate-300 rounded-lg"
+                    />
+                    <div className="mt-1 flex gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setReturnQtyInput('1')}
+                        className="px-2 py-0.5 text-[11px] bg-slate-100 hover:bg-slate-200 rounded font-medium"
+                      >
+                        Trả 1 {returningSale.unit}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setReturnQtyInput(String(returningSale.quantity))}
+                        className="px-2 py-0.5 text-[11px] bg-amber-100 hover:bg-amber-200 text-amber-900 rounded font-semibold"
+                      >
+                        Trả hết ({returningSale.quantity})
+                      </button>
+                    </div>
+                  </div>
+
+                  {(returningSale.giftQuantity || 0) > 0 && (
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        SL quà KM trả lại ({returningSale.giftUnit || 'CÁI'})
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={returningSale.giftQuantity || 0}
+                        value={returnGiftQtyInput}
+                        onChange={(e) => setReturnGiftQtyInput(e.target.value)}
+                        className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-300 rounded-lg"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Lý do trả / đổi hàng
+                  </label>
+                  <div className="flex flex-wrap gap-1.5 mb-1.5">
+                    {['Dư sau mùa vụ', 'Đổi sang thuốc khác', 'Lỗi bao bì / NSX'].map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setReturnReasonInput(preset)}
+                        className={`px-2 py-1 rounded-md border text-[11px] font-medium ${
+                          returnReasonInput === preset
+                            ? 'bg-emerald-700 text-white border-emerald-700'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="text"
+                    value={returnReasonInput}
+                    onChange={(e) => setReturnReasonInput(e.target.value)}
+                    placeholder="Ghi chú lý do khách trả hàng..."
+                    className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg"
+                  />
+                </div>
+
+                <div className="p-3 bg-emerald-50/80 rounded-xl border border-emerald-200 space-y-1.5 font-mono">
+                  <div className="flex justify-between">
+                    <span className="text-slate-700">Nhập lại tồn kho:</span>
+                    <strong className="text-emerald-800">
+                      +{retPreview.returnQuantity} {returningSale.unit}
+                      {retPreview.returnGiftQuantity > 0
+                        ? ` (+${retPreview.returnGiftQuantity} quà)`
+                        : ''}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-700">Giá trị hàng trả lại:</span>
+                    <strong className="text-slate-900">-{formatVND(retPreview.returnAmount)}</strong>
+                  </div>
+                  {retPreview.debtReducedAmount > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-slate-700">Cấn trừ giảm nợ KH:</span>
+                      <strong className="text-emerald-700">
+                        -{formatVND(retPreview.debtReducedAmount)}
+                      </strong>
+                    </div>
+                  )}
+                  {retPreview.cashRefundAmount > 0 && (
+                    <div className="flex justify-between text-rose-700">
+                      <span className="font-sans font-semibold">Tiền mặt cần hoàn lại khách:</span>
+                      <strong>{formatVND(retPreview.cashRefundAmount)}</strong>
+                    </div>
+                  )}
+                  <div className="flex justify-between pt-1.5 border-t border-emerald-200">
+                    <span className="font-sans font-semibold text-slate-800">
+                      {retPreview.isFullReturn ? 'Trạng thái sau trả:' : 'HĐ còn lại sau trả:'}
+                    </span>
+                    <strong className="text-slate-900">
+                      {retPreview.isFullReturn
+                        ? 'Hủy trọn dòng HĐ (0 đ)'
+                        : `${retPreview.remainingQuantity} ${returningSale.unit} · ${formatVND(retPreview.nextTotalAmount)}`}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setReturningSale(null)}
+                    className="px-3.5 py-2 font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50"
+                  >
+                    Đóng
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-lg"
+                  >
+                    Xác nhận nhận hàng trả &amp; Lưu phiếu TH
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
       <BarcodeScannerModal
         isOpen={isBarcodeScannerOpen}
         onClose={() => setIsBarcodeScannerOpen(false)}
@@ -4038,6 +4588,15 @@ interface ImportLogViewProps {
     batchNumber?: string;
     expiryDate?: string;
   }) => ImportTransaction;
+  onCreateMultiItemImport?: (payload: {
+    supplierName: string;
+    supplierPhone: string;
+    warehouseName: string;
+    dueDate: string;
+    note: string;
+    totalPaidAmount: number;
+    items: ImportCartDraftItem[];
+  }) => ImportTransaction[];
   onCreateProductInline: (
     data: Omit<ProductItem, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
   ) => ProductItem;
@@ -4083,6 +4642,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   onClearFocusedImport,
   onNavigateCrossLink,
   onCreateImport,
+  onCreateMultiItemImport,
   onCreateProductInline,
   onCreateSupplierInline,
   onImportWarehouseFromExcel,
@@ -4153,10 +4713,16 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [batchNumber, setBatchNumber] = useState<string>('');
   const [expiryDate, setExpiryDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
+  const [importCartItems, setImportCartItems] = useState<ImportCartDraftItem[]>([]);
+  const [importRowLimit, setImportRowLimit] = useState<number>(80);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(
     null
   );
   const [isBarcodeScannerOpen, setIsBarcodeScannerOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    setImportRowLimit(80);
+  }, [importSearchQuery, importStatusFilter]);
 
   // Inline New Product State inside Import Form
   const [showNewProductBox, setShowNewProductBox] = useState<boolean>(false);
@@ -4196,6 +4762,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     setBatchNumber('');
     setExpiryDate('');
     setNote('');
+    setImportCartItems([]);
     setShowNewProductBox(false);
     setNewProdCode('');
     setNewProdName('');
@@ -4311,15 +4878,17 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       0,
       Number(newProdSellPrice) || Math.round(impPriceNum * 1.18)
     );
+    const resolvedProdWh =
+      lockedWarehouse ||
+      (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+        ? selectedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
+
     const created = onCreateProductInline({
-      code: newProdCode.trim() || `VT-0${products.length + 1}`,
+      code: newProdCode.trim() || generateNextUniqueProductCode(products, resolvedProdWh),
       name: newProdName.trim(),
       category: newProdCategory,
-      warehouseName:
-        lockedWarehouse ||
-        (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
-          ? selectedWarehouse
-          : warehouses[0] || 'Tâm An Mỹ Ngãi'),
+      warehouseName: resolvedProdWh,
       unit: newProdUnit.trim(),
       importPrice: impPriceNum,
       sellPrice: sellPriceNum,
@@ -4375,12 +4944,136 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const qtyNum = Math.max(0, Number(quantity) || 0);
   const costNum = Math.max(0, Number(unitCost) || 0);
   const paidNum = Math.max(0, Number(paidAmount) || 0);
-  const summary = calculateImportSummary(qtyNum, costNum, paidNum);
+
+  const currentImportDraftItem: ImportCartDraftItem | null =
+    currentProduct && qtyNum > 0
+      ? {
+          id: '__imp_draft__',
+          productId: currentProduct.id,
+          productName: currentProduct.name,
+          unit: currentProduct.unit,
+          quantity: qtyNum,
+          unitCost: costNum > 0 ? costNum : currentProduct.importPrice,
+          batchNumber: batchNumber.trim() || undefined,
+          expiryDate: expiryDate || undefined,
+        }
+      : null;
+
+  const combinedImportPreviewItems: ImportCartDraftItem[] =
+    importCartItems.length > 0
+      ? currentImportDraftItem
+        ? [...importCartItems, currentImportDraftItem]
+        : importCartItems
+      : currentImportDraftItem
+      ? [currentImportDraftItem]
+      : [];
+
+  const importCartAlloc = allocatePaymentAcrossImportItems(combinedImportPreviewItems, paidNum);
+  const summary =
+    importCartItems.length > 0
+      ? {
+          totalCost: importCartAlloc.totalCost,
+          paidAmount: importCartAlloc.totalPaid,
+          debtAmount: importCartAlloc.totalDebt,
+          status: importCartAlloc.status,
+        }
+      : calculateImportSummary(qtyNum, costNum, paidNum);
+
   const supplierOldDebt = computeSupplierOldDebtSummary(
     selectedSupplierName,
     imports,
     summary.debtAmount
   );
+
+  const clearCurrentImportLineOnly = () => {
+    setSelectedProductId('');
+    setQuantity('');
+    setUnitCost('');
+    setBatchNumber('');
+    setExpiryDate('');
+  };
+
+  const quickImportQuantities = importCartItems.reduce<Record<string, number>>((acc, item) => {
+    acc[item.productId] = (acc[item.productId] || 0) + item.quantity;
+    return acc;
+  }, {});
+
+  const handleQuickSetImportProductQuantity = (productId: string, nextQty: number) => {
+    const prod = products.find((p) => p.id === productId);
+    if (!prod) return;
+    setFeedback(null);
+    const nextItems = upsertQuickImportProductQuantity(importCartItems, prod, nextQty);
+    setImportCartItems(nextItems);
+    if (selectedProductId === productId) {
+      clearCurrentImportLineOnly();
+    }
+    if (!selectedWarehouse && !lockedWarehouse && prod.warehouseName && nextQty > 0) {
+      setSelectedWarehouse(prod.warehouseName);
+    }
+    if (!selectedSupplierName && prod.supplierName && nextQty > 0) {
+      setSelectedSupplierName(prod.supplierName);
+      const matchedSup = suppliers.find((s) => s.name === prod.supplierName);
+      if (matchedSup) setSupplierPhone(matchedSup.phone);
+    }
+  };
+
+  const handleAddCurrentImportItemToCart = () => {
+    setFeedback(null);
+    let resolvedProduct = products.find((p) => p.id === selectedProductId) || null;
+    if (showNewProductBox || selectedProductId === '__new_product__') {
+      const createdProd = handleConfirmInlineProductInImport();
+      if (!createdProd) return;
+      resolvedProduct = createdProd;
+    }
+    if (!resolvedProduct) {
+      setFeedback({
+        type: 'error',
+        text: 'Vui lòng chọn vật tư trước khi thêm vào giỏ phiếu nhập chung.',
+      });
+      return;
+    }
+    if (qtyNum <= 0) {
+      setFeedback({ type: 'error', text: 'Vui lòng nhập Số lượng nhập lớn hơn 0.' });
+      return;
+    }
+    const effectiveCost = costNum > 0 ? costNum : resolvedProduct.importPrice;
+    const newItem: ImportCartDraftItem = {
+      id: `imp_cart_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      productId: resolvedProduct.id,
+      productName: resolvedProduct.name,
+      unit: resolvedProduct.unit,
+      quantity: qtyNum,
+      unitCost: effectiveCost,
+      batchNumber: batchNumber.trim() || undefined,
+      expiryDate: expiryDate || undefined,
+    };
+    const nextCart = [...importCartItems, newItem];
+    setImportCartItems(nextCart);
+    clearCurrentImportLineOnly();
+    setFeedback({
+      type: 'success',
+      text: `Đã thêm "+${qtyNum} ${resolvedProduct.unit} ${resolvedProduct.name}" vào Giỏ phiếu nhập chung (${nextCart.length} mặt hàng). Chọn tiếp vật tư khác hoặc bấm Lưu phiếu!`,
+    });
+  };
+
+  const handleExportGroupedImportPdf = (imp: ImportTransaction) => {
+    const groupImps = findImportGroupTransactions(imports, imp);
+    exportImportReceiptPDF({
+      ...imp,
+      totalCost: groupImps.reduce((s, r) => s + r.totalCost, 0),
+      paidAmount: groupImps.reduce((s, r) => s + r.paidAmount, 0),
+      debtAmount: groupImps.reduce((s, r) => s + r.debtAmount, 0),
+      items: groupImps.map((r) => ({
+        productName: r.productName,
+        unit: r.unit,
+        quantity: r.quantity,
+        unitCost: r.unitCost,
+        totalCost: r.totalCost,
+        batchNumber: r.batchNumber,
+        expiryDate: r.expiryDate,
+      })),
+    });
+  };
 
   const submitImport = (shouldExportPDF: boolean) => {
     setFeedback(null);
@@ -4390,6 +5083,94 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       const createdWh = handleConfirmInlineWarehouseInImport();
       if (!createdWh) return;
       resolvedWarehouse = createdWh;
+    }
+
+    let resolvedSupplierName =
+      selectedSupplierName && selectedSupplierName !== '__new_supplier__'
+        ? selectedSupplierName
+        : '';
+    let resolvedSupplierPhone = supplierPhone.trim();
+
+    if (showNewSupplierBox || selectedSupplierName === '__new_supplier__') {
+      const createdSup = handleConfirmInlineSupplierInImport();
+      if (!createdSup) return;
+      resolvedSupplierName = createdSup.name;
+      resolvedSupplierPhone = createdSup.phone;
+    }
+
+    // MULTI-ITEM IMPORT CART CHECKOUT PATH
+    if (importCartItems.length > 0 && onCreateMultiItemImport) {
+      if (!resolvedSupplierName.trim()) {
+        setFeedback({
+          type: 'error',
+          text: 'Vui lòng chọn Nhà cung cấp trước khi lưu Giỏ phiếu nhập nhiều mặt hàng.',
+        });
+        return;
+      }
+      const finalCartItems: ImportCartDraftItem[] = [...importCartItems];
+      if (selectedProductId && selectedProductId !== '__new_product__' && qtyNum > 0) {
+        const draftProd = products.find((p) => p.id === selectedProductId);
+        if (draftProd) {
+          finalCartItems.push({
+            id: `imp_cart_last_${Date.now()}`,
+            productId: draftProd.id,
+            productName: draftProd.name,
+            unit: draftProd.unit,
+            quantity: qtyNum,
+            unitCost: costNum > 0 ? costNum : draftProd.importPrice,
+            batchNumber: batchNumber.trim() || undefined,
+            expiryDate: expiryDate || undefined,
+          });
+        }
+      }
+      if (!resolvedWarehouse || resolvedWarehouse === '__new_warehouse__') {
+        const firstProd = products.find((p) => p.id === finalCartItems[0]?.productId);
+        resolvedWarehouse = firstProd?.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+      }
+      try {
+        const alloc = allocatePaymentAcrossImportItems(finalCartItems, paidNum);
+        const createdImports = onCreateMultiItemImport({
+          supplierName: resolvedSupplierName.trim(),
+          supplierPhone: resolvedSupplierPhone,
+          warehouseName: resolvedWarehouse,
+          dueDate:
+            alloc.totalDebt > 0
+              ? dueDate || computeDueDateAfterDays(30)
+              : computeDueDateAfterDays(0),
+          note: note.trim(),
+          totalPaidAmount: alloc.totalPaid,
+          items: finalCartItems,
+        });
+        const sharedCode = createdImports[0]?.receiptCode || 'PN';
+        if (shouldExportPDF && createdImports.length > 0) {
+          exportImportReceiptPDF({
+            ...createdImports[0],
+            totalCost: createdImports.reduce((s, r) => s + r.totalCost, 0),
+            paidAmount: createdImports.reduce((s, r) => s + r.paidAmount, 0),
+            debtAmount: createdImports.reduce((s, r) => s + r.debtAmount, 0),
+            items: createdImports.map((r) => ({
+              productName: r.productName,
+              unit: r.unit,
+              quantity: r.quantity,
+              unitCost: r.unitCost,
+              totalCost: r.totalCost,
+              batchNumber: r.batchNumber,
+              expiryDate: r.expiryDate,
+            })),
+          });
+        }
+        resetAllImportFieldsToBlank();
+        setFeedback({
+          type: 'success',
+          text: `Đã lưu phiếu nhập kho gộp ${sharedCode} gồm ${createdImports.length} mặt hàng tại ${resolvedWarehouse}!`,
+        });
+      } catch (err) {
+        setFeedback({
+          type: 'error',
+          text: err instanceof Error ? err.message : 'Có lỗi khi lập phiếu nhập nhiều mặt hàng.',
+        });
+      }
+      return;
     }
 
     let resolvedProduct = products.find((p) => p.id === selectedProductId) || null;
@@ -4408,19 +5189,6 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
     if (!resolvedWarehouse || resolvedWarehouse === '__new_warehouse__') {
       resolvedWarehouse = resolvedProduct.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
-    }
-
-    let resolvedSupplierName =
-      selectedSupplierName && selectedSupplierName !== '__new_supplier__'
-        ? selectedSupplierName
-        : '';
-    let resolvedSupplierPhone = supplierPhone.trim();
-
-    if (showNewSupplierBox || selectedSupplierName === '__new_supplier__') {
-      const createdSup = handleConfirmInlineSupplierInImport();
-      if (!createdSup) return;
-      resolvedSupplierName = createdSup.name;
-      resolvedSupplierPhone = createdSup.phone;
     }
 
     if (!resolvedSupplierName.trim()) {
@@ -4633,7 +5401,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 id="import-product-select"
                 value={selectedProductId === '__new_product__' ? '' : selectedProductId}
                 onChange={(val) => handleSelectProduct(val)}
-                placeholder="Gõ tên vật tư, mã VT hoặc kho để tìm nhanh vật tư nhập kho..."
+                placeholder="Gõ tên vật tư, mã VT hoặc kho để tìm nhanh (hoặc bấm +/- chọn nhiều món)..."
                 emptyOptionLabel="-- Chưa chọn vật tư nhập --"
                 createActionLabel="+ Thêm vật tư nhập kho mới trực tiếp tại đây..."
                 onCreateAction={(kw) => {
@@ -4641,6 +5409,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   setShowNewProductBox(true);
                   if (kw) setNewProdName(kw);
                 }}
+                quickQuantities={onCreateMultiItemImport ? quickImportQuantities : undefined}
+                onQuickQuantityChange={
+                  onCreateMultiItemImport ? handleQuickSetImportProductQuantity : undefined
+                }
+                quickCartSummaryLabel={
+                  importCartItems.length > 0
+                    ? `Giỏ nhập: ${importCartItems.length} mặt hàng`
+                    : undefined
+                }
                 options={products.map((p) => ({
                   value: p.id,
                   label: `[${p.code}] ${p.name} (${p.warehouseName || 'Tâm An Mỹ Ngãi'} · Tồn: ${p.stock} ${p.unit})`,
@@ -4649,6 +5426,116 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   keywords: `${p.code} ${p.name} ${p.barcode || ''} ${p.batchNumber || ''} ${p.category} ${p.warehouseName || ''} ${p.supplierName}`,
                 }))}
               />
+
+              {importCartItems.length > 0 && (
+                <div className="p-3 bg-emerald-50/75 rounded-xl border border-emerald-300 space-y-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-bold text-emerald-950 flex items-center gap-1.5">
+                      <Truck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                      <span>
+                        Giỏ phiếu nhập chung NCC ({importCartItems.length} mặt hàng ·{' '}
+                        {formatVND(
+                          importCartItems.reduce((s, i) => s + Math.round(i.quantity * i.unitCost), 0)
+                        )}
+                        )
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setImportCartItems([])}
+                      className="text-[11px] font-semibold text-rose-600 hover:underline"
+                    >
+                      Xóa giỏ
+                    </button>
+                  </div>
+                  <div className="bg-white rounded-lg border border-emerald-200 divide-y divide-slate-100">
+                    {importCartItems.map((item, idx) => (
+                      <div
+                        key={item.id}
+                        className="p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-bold text-slate-900 truncate">
+                            {idx + 1}. {item.productName}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5 mt-0.5 text-[11px] text-slate-600 font-mono">
+                            <span>Giá nhập:</span>
+                            <input
+                              type="number"
+                              min={0}
+                              value={item.unitCost}
+                              onChange={(e) => {
+                                const nextCost = Math.max(0, Number(e.target.value) || 0);
+                                setImportCartItems((prev) =>
+                                  prev.map((x) =>
+                                    x.id === item.id ? { ...x, unitCost: nextCost } : x
+                                  )
+                                );
+                              }}
+                              aria-label={`Đơn giá nhập ${item.productName}`}
+                              className="w-24 px-1.5 py-0.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded"
+                            />
+                            <span>đ/{item.unit}</span>
+                            {item.batchNumber && (
+                              <span className="px-1.5 py-0.2 bg-slate-100 rounded text-[10px]">
+                                Lô: {item.batchNumber}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setImportCartItems((prev) =>
+                                prev
+                                  .map((x) =>
+                                    x.id === item.id
+                                      ? { ...x, quantity: Math.max(0, x.quantity - 1) }
+                                      : x
+                                  )
+                                  .filter((x) => x.quantity > 0)
+                              )
+                            }
+                            className="w-6 h-6 rounded border border-slate-300 bg-white hover:bg-slate-100 font-bold"
+                          >
+                            -
+                          </button>
+                          <span className="w-8 text-center font-mono font-bold text-slate-900">
+                            {item.quantity}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setImportCartItems((prev) =>
+                                prev.map((x) =>
+                                  x.id === item.id ? { ...x, quantity: x.quantity + 1 } : x
+                                )
+                              )
+                            }
+                            className="w-6 h-6 rounded border border-slate-300 bg-white hover:bg-slate-100 font-bold"
+                          >
+                            +
+                          </button>
+                          <span className="font-mono font-bold text-emerald-800 min-w-[82px] text-right">
+                            {formatVND(Math.round(item.quantity * item.unitCost))}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setImportCartItems((prev) => prev.filter((x) => x.id !== item.id))
+                            }
+                            aria-label={`Xóa ${item.productName} khỏi giỏ nhập`}
+                            className="p-1 text-slate-400 hover:text-rose-600"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {showNewProductBox && (
                 <div className="p-3.5 bg-emerald-50/60 rounded-lg border border-emerald-200 space-y-3">
@@ -4989,6 +5876,19 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
               </div>
             </div>
 
+            {onCreateMultiItemImport && (
+              <button
+                type="button"
+                onClick={handleAddCurrentImportItemToCart}
+                className="w-full py-2 px-3 text-xs font-bold text-emerald-800 bg-emerald-50/40 hover:bg-emerald-50 border-2 border-dashed border-emerald-400 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+              >
+                <Plus className="w-4 h-4 shrink-0" />
+                <span>
+                  Thêm vật tư này vào Giỏ phiếu nhập chung ({importCartItems.length} mặt hàng)
+                </span>
+              </button>
+            )}
+
             <div className="space-y-3 p-3.5 bg-amber-50/40 rounded-lg border border-amber-200/80">
               <div>
                 <label
@@ -5165,7 +6065,11 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 className="w-full py-2.5 px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors flex items-center justify-center gap-1.5"
               >
                 <Plus className="w-4 h-4 shrink-0" />
-                <span>Lưu phiếu nhập kho</span>
+                <span>
+                  {importCartItems.length > 0
+                    ? `Lưu phiếu nhập (${combinedImportPreviewItems.length} món)`
+                    : 'Lưu phiếu nhập kho'}
+                </span>
               </button>
               <button
                 type="button"
@@ -5204,13 +6108,24 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
             return hay.includes(qNorm);
           });
           const issuesCount = importEntries.filter((e) => e.diag.statusLevel !== 'ok').length;
+          const distinctReceiptsCount = countDistinctImportReceipts(
+            filteredImportEntries.map((e) => e.imp)
+          );
+          const hasMultiLineReceipts = filteredImportEntries.length > distinctReceiptsCount;
+          const displayedImportEntries =
+            focusedImportRecord &&
+            filteredImportEntries.findIndex((e) => e.imp.id === focusedImportRecord.id) >=
+              importRowLimit
+              ? filteredImportEntries
+              : filteredImportEntries.slice(0, importRowLimit);
 
           return (
         <div className="xl:col-span-7 bg-white rounded-xl border border-slate-200 overflow-hidden">
           <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 className="text-base font-bold text-slate-900">
-                Nhật Ký Nhập Hàng ({filteredImportEntries.length} phiếu)
+                Nhật Ký Nhập Hàng ({distinctReceiptsCount} phiếu
+                {hasMultiLineReceipts ? ` · ${filteredImportEntries.length} dòng VT` : ''})
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
                 Hỗ trợ Sửa / Hủy phiếu mua hàng và liên kết đối soát nhanh Tồn kho, Công nợ &amp; Phiếu chi
@@ -5291,7 +6206,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 Chưa có phiếu nhập kho nào khớp với bộ lọc hiện tại.
               </div>
             ) : (
-              filteredImportEntries.map(({ imp, diag }) => {
+              displayedImportEntries.map(({ imp, diag }) => {
                 const { urgency } = evaluateDebtUrgency(imp.dueDate, imp.debtAmount);
                 const isFocused = focusedImportRecord?.id === imp.id;
                 return (
@@ -5446,7 +6361,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => exportImportReceiptPDF(imp)}
+                          onClick={() => handleExportGroupedImportPdf(imp)}
                           className="px-3 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                         >
                           Xuất PDF
@@ -5502,10 +6417,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
           </div>
 
           {/* Desktop Balanced Table (>= md) */}
-          <div className="hidden md:block overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto max-h-[72vh]">
             <table className="w-full min-w-[980px] text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
+              <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs shadow-2xs">
+                <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
                   <th className="py-3 px-4 w-[155px] whitespace-nowrap">Mã phiếu &amp; Kho nhập</th>
                   <th className="py-3 px-4 min-w-[175px]">Nhà cung cấp</th>
                   <th className="py-3 px-4 min-w-[240px]">Vật tư nhập &amp; Liên kết chứng từ</th>
@@ -5524,7 +6439,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredImportEntries.map(({ imp, diag }) => {
+                  displayedImportEntries.map(({ imp, diag }) => {
                   const { urgency } = evaluateDebtUrgency(imp.dueDate, imp.debtAmount);
                   const isFocused = focusedImportRecord?.id === imp.id;
                   return (
@@ -5696,7 +6611,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
-                            onClick={() => exportImportReceiptPDF(imp)}
+                            onClick={() => handleExportGroupedImportPdf(imp)}
                             className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                           >
                             PDF
@@ -5738,8 +6653,43 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 })
                 )}
               </tbody>
+              {filteredImportEntries.length > 0 && (
+                <tfoot className="border-t-2 border-amber-200 bg-amber-50/70 text-xs font-semibold text-slate-800">
+                  <tr>
+                    <td colSpan={3} className="py-3 px-4">
+                      Tổng kết bộ lọc: <strong>{distinctReceiptsCount}</strong> phiếu nhập
+                      {hasMultiLineReceipts ? ` (${filteredImportEntries.length} dòng vật tư)` : ''}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap font-bold text-slate-900">
+                      {formatVND(filteredImportEntries.reduce((sum, e) => sum + e.imp.totalCost, 0))}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap">
+                      <div className="text-emerald-800">
+                        ∑ Trả: {formatVND(filteredImportEntries.reduce((sum, e) => sum + e.imp.paidAmount, 0))}
+                      </div>
+                      <div className="text-red-700 font-bold">
+                        ∑ Nợ: {formatVND(filteredImportEntries.reduce((sum, e) => sum + e.imp.debtAmount, 0))}
+                      </div>
+                    </td>
+                    <td className="py-3 px-4 text-right text-[11px] text-slate-500">
+                      Khớp 100% sổ nhập &amp; công nợ NCC
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
+          {filteredImportEntries.length > displayedImportEntries.length && (
+            <div className="p-3.5 border-t border-slate-200 bg-slate-50/70 text-center">
+              <button
+                type="button"
+                onClick={() => setImportRowLimit((prev) => prev + 80)}
+                className="px-4 py-2 text-xs font-semibold text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-lg shadow-2xs transition-colors"
+              >
+                Hiển thị thêm phiếu nhập (Đang xem {displayedImportEntries.length} / {filteredImportEntries.length} dòng)
+              </button>
+            </div>
+          )}
         </div>
           );
         })()}

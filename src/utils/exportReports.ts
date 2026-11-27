@@ -957,6 +957,15 @@ export function exportImportReceiptPDF(imp: {
   warehouseName?: string;
   staffName: string;
   createdAt: string;
+  items?: Array<{
+    productName: string;
+    unit: string;
+    quantity: number;
+    unitCost: number;
+    totalCost: number;
+    batchNumber?: string;
+    expiryDate?: string;
+  }>;
 }): string {
   const dateStr = (imp.createdAt || new Date().toISOString()).slice(0, 10);
   const fileName = `PhieuNhapKho_${imp.receiptCode}_${dateStr}.pdf`;
@@ -997,21 +1006,35 @@ export function exportImportReceiptPDF(imp: {
         { header: 'Thành Tiền (VNĐ)', width: 110, align: 'right' },
       ];
 
+      const lineRows =
+        imp.items && imp.items.length > 0
+          ? imp.items.map((line, idx) => [
+              String(idx + 1),
+              line.batchNumber
+                ? `${line.productName} (Lô: ${line.batchNumber}${line.expiryDate ? ` · HSD: ${line.expiryDate}` : ''})`
+                : line.productName,
+              line.unit,
+              String(line.quantity),
+              line.unitCost.toLocaleString('vi-VN'),
+              line.totalCost.toLocaleString('vi-VN'),
+            ])
+          : [
+              [
+                '1',
+                imp.productName,
+                imp.unit,
+                String(imp.quantity),
+                imp.unitCost.toLocaleString('vi-VN'),
+                imp.totalCost.toLocaleString('vi-VN'),
+              ],
+            ];
+
       const tableEndY = drawCanvasTable(
         ctx,
         marginX,
         y,
         columns,
-        [
-          [
-            '1',
-            imp.productName,
-            imp.unit,
-            String(imp.quantity),
-            imp.unitCost.toLocaleString('vi-VN'),
-            imp.totalCost.toLocaleString('vi-VN'),
-          ],
-        ],
+        lineRows,
         '#0F172A'
       );
 

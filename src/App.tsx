@@ -19,6 +19,7 @@ import {
   MessageCircle,
   Printer,
   RefreshCw,
+  Search,
   ShieldCheck,
   ShoppingCart,
   Smartphone,
@@ -59,10 +60,12 @@ import {
 } from './types';
 import {
   allocatePaymentAcrossCartItems,
+  allocatePaymentAcrossImportItems,
   bindProductNoteToProduct,
   clearOfflineQueueStorage,
   deleteProductNoteTemplate,
   enqueueOfflineQueueItem,
+  ImportCartDraftItem,
   loadOfflineQueue,
   OfflineQueueItem,
   PosCartDraftItem,
@@ -94,10 +97,13 @@ import {
   canViewAuditHistory,
   computeAtomicProductImportAddition,
   computeAtomicProductStockDelta,
+  computeCustomerSaleReturnCalculation,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
   computeSmartDashboardAnalytics,
   computeWeightedAverageImportPrice,
+  countDistinctImportReceipts,
+  countDistinctSalesInvoices,
   createAuditLogEntry,
   dedupeWarehouseNames,
   doesRecordMatchProduct,
@@ -112,11 +118,13 @@ import {
   extractMaxVoucherSequence,
   buildVoucherCounterMeta,
   filterRecordsBySelectedWarehouses,
+  findCollidingProductCodeInWarehouse,
   findLinkedPaymentVouchersForImport,
   findLinkedReceiptVouchersForSale,
   formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
   formatVND,
+  generateNextUniqueProductCode,
   generateSequentialVoucherCode,
   generateSmartNotifications,
   generateUniqueRecordId,
@@ -218,6 +226,7 @@ import { NotificationCenter } from './components/NotificationCenter';
 import { MultiWarehouseFilterPopover } from './components/MultiWarehouseFilterPopover';
 import { InitialLoginScreenPortal } from './components/InitialLoginScreenPortal';
 import { InstallPwaModal } from './components/InstallPwaModal';
+import { GlobalQuickSearchModal } from './components/GlobalQuickSearchModal';
 
 const CustomerModule = lazy(() =>
   import('./components/CustomerModule').then((m) => ({ default: m.CustomerModule }))
@@ -2677,6 +2686,20 @@ export default function App() {
     return newSale;
   };
 
+  const [isQuickSearchOpen, setIsQuickSearchOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    const onGlobalKeyDown = (e: KeyboardEvent) => {
+      if (!isSessionLoggedIn) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsQuickSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onGlobalKeyDown);
+    return () => window.removeEventListener('keydown', onGlobalKeyDown);
+  }, [isSessionLoggedIn]);
+
   const handleSaveBankQrConfig = (nextConfig: VietQrBankConfig) => {
     setBankQrConfig(nextConfig);
     trackOfflineOperation(
@@ -3145,6 +3168,286 @@ export default function App() {
     showToast('Đã xóa hóa đơn khỏi nhật ký bán hàng & hoàn lại tồn kho.');
   };
 
+  const handleDeleteSaleGroup = (saleIds: string[]) => {
+    if (!canPerformRoleAction(role, 'delete_record')) return;
+    const uniqueIds = Array.from(new Set(saleIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return;
+    if (uniqueIds.length === 1) {
+      handleDeleteSale(uniqueIds[0]);
+      return;
+    }
+
+    const targets = sales.filter((s) => uniqueIds.includes(s.id));
+    if (targets.length === 0) return;
+
+    for (const target of targets) {
+      const linkedReceipts = findLinkedReceiptVouchersForSale(target, receiptVouchers);
+      if (linkedReceipts.length > 0) {
+        const codes = linkedReceipts.map((r) => r.voucherCode).join(', ');
+        const firstReceipt = linkedReceipts[0];
+        showToast(
+          `Hóa đơn gộp ${target.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi hủy đơn!`,
+          {
+            label: `Mở ${firstReceipt.voucherCode} →`,
+            isNavigation: true,
+            onUndo: () =>
+              handleNavigateCrossLink({
+                tab: 'receipt_vouchers',
+                recordId: firstReceipt.id,
+                voucherCode: firstReceipt.voucherCode,
+                label: `Phiếu thu ${firstReceipt.voucherCode}`,
+              }),
+          }
+        );
+        return;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    markRecordsDeleted(uniqueIds, nowIso);
+    const idSet = new Set(uniqueIds);
+    const nextSales = sales.filter((s) => !idSet.has(s.id));
+    setSales(nextSales);
+
+    setProducts((prev) => {
+      const nextList = prev.map((p) => {
+        let restoreQty = 0;
+        for (const target of targets) {
+          if (doesRecordMatchProduct(p, target.productId, target.productName, target.warehouseName)) {
+            restoreQty += target.quantity;
+          }
+          if (
+            target.giftProductId &&
+            (target.giftQuantity || 0) > 0 &&
+            doesRecordMatchProduct(p, target.giftProductId, target.giftProductName, target.warehouseName)
+          ) {
+            restoreQty += target.giftQuantity || 0;
+          }
+        }
+        if (restoreQty <= 0) return p;
+        const restored = { ...p, stock: p.stock + restoreQty, updatedAt: nowIso };
+        if (isGoogleAuthenticated) void syncProductToFirestore(restored, false);
+        dispatchAtomicProductMutation(
+          restored.ownerId || resolveOwnerUidForWarehouse(restored.warehouseName),
+          restored,
+          (cur) => computeAtomicProductStockDelta(cur, restoreQty, nowIso)
+        );
+        return restored;
+      });
+      productsRef.current = nextList;
+      return nextList;
+    });
+
+    const firstTarget = targets[0];
+    setCustomers((prev) => {
+      const custHasRemainingSales = nextSales.some((s) => s.customerId === firstTarget.customerId);
+      if (custHasRemainingSales) {
+        const reconciled = reconcileCustomersFromSales(prev, nextSales, nowIso);
+        if (isGoogleAuthenticated) {
+          reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+        }
+        return reconciled.customers;
+      }
+      const groupTotal = targets.reduce((sum, t) => sum + t.totalAmount, 0);
+      const groupDebt = targets.reduce((sum, t) => sum + t.debtAmount, 0);
+      return prev.map((c) => {
+        if (c.id !== firstTarget.customerId) return c;
+        const nextCust = {
+          ...c,
+          totalPurchased: Math.max(0, c.totalPurchased - groupTotal),
+          totalDebt: Math.max(0, c.totalDebt - groupDebt),
+          updatedAt: nowIso,
+        };
+        if (isGoogleAuthenticated) void syncCustomerToFirestore(nextCust, false);
+        return nextCust;
+      });
+    });
+
+    if (isGoogleAuthenticated) {
+      uniqueIds.forEach((sid) => void deleteFirestoreDocIfAdmin('sales', sid));
+    }
+
+    const totalVal = targets.reduce((sum, t) => sum + t.totalAmount, 0);
+    recordAuditLog({
+      actionCategory: 'delete',
+      targetEntity: 'sale',
+      targetCode: firstTarget.invoiceCode,
+      warehouseName: firstTarget.warehouseName,
+      summary: `Hủy trọn bộ hóa đơn gộp ${firstTarget.invoiceCode} (${targets.length} mặt hàng · ${formatVND(
+        totalVal
+      )}) của khách ${firstTarget.customerName}`,
+      details: targets.map((t) => `${t.quantity} ${t.unit} ${t.productName}`).join(' + '),
+      snapshotData: JSON.stringify(targets),
+    });
+    showToast(
+      `Đã hủy hóa đơn gộp ${firstTarget.invoiceCode} (${targets.length} mặt hàng) & hoàn lại đầy đủ tồn kho!`
+    );
+  };
+
+  const handleProcessCustomerReturn = (params: {
+    saleId: string;
+    returnQuantity: number;
+    returnGiftQuantity?: number;
+    reason: string;
+  }) => {
+    if (!canPerformRoleAction(role, 'edit_record')) {
+      showToast('Chỉ Quản lý kho mới có quyền lập phiếu khách trả hàng / điều chỉnh hóa đơn.');
+      return;
+    }
+    const existing = sales.find((s) => s.id === params.saleId);
+    if (!existing) return;
+
+    const calc = computeCustomerSaleReturnCalculation({
+      sale: existing,
+      returnQuantity: params.returnQuantity,
+      returnGiftQuantity: params.returnGiftQuantity,
+    });
+
+    const linkedReceipts = findLinkedReceiptVouchersForSale(existing, receiptVouchers);
+    if (linkedReceipts.length > 0 && (calc.isFullReturn || calc.cashRefundAmount > 0)) {
+      const codes = linkedReceipts.map((r) => r.voucherCode).join(', ');
+      const firstReceipt = linkedReceipts[0];
+      showToast(
+        `Đơn bán ${existing.invoiceCode} đã thu nợ qua phiếu ${codes}. Vui lòng sửa/xóa phiếu thu trước khi hoàn trả vượt số dư nợ còn lại!`,
+        {
+          label: `Mở ${firstReceipt.voucherCode} →`,
+          isNavigation: true,
+          onUndo: () =>
+            handleNavigateCrossLink({
+              tab: 'receipt_vouchers',
+              recordId: firstReceipt.id,
+              voucherCode: firstReceipt.voucherCode,
+              label: `Phiếu thu ${firstReceipt.voucherCode}`,
+            }),
+        }
+      );
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    const resolvedWh = existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const retOwnerUid = existing.ownerId || resolveOwnerUidForWarehouse(resolvedWh);
+    const returnCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: retOwnerUid,
+      prefix: 'TH',
+      existingCodes: auditLogs.map((l) => l.targetCode),
+    });
+
+    // 1. Atomically restore returned stock (and any returned gift stock)
+    setProducts((prev) => {
+      const nextList = prev.map((p) => {
+        let restoreQty = 0;
+        if (doesRecordMatchProduct(p, existing.productId, existing.productName, existing.warehouseName)) {
+          restoreQty += calc.returnQuantity;
+        }
+        if (
+          calc.returnGiftQuantity > 0 &&
+          existing.giftProductId &&
+          doesRecordMatchProduct(
+            p,
+            existing.giftProductId,
+            existing.giftProductName,
+            existing.warehouseName
+          )
+        ) {
+          restoreQty += calc.returnGiftQuantity;
+        }
+        if (restoreQty <= 0) return p;
+        const restored = { ...p, stock: p.stock + restoreQty, updatedAt: nowIso };
+        if (isGoogleAuthenticated) void syncProductToFirestore(restored, false);
+        dispatchAtomicProductMutation(
+          restored.ownerId || resolveOwnerUidForWarehouse(restored.warehouseName),
+          restored,
+          (cur) => computeAtomicProductStockDelta(cur, restoreQty, nowIso)
+        );
+        return restored;
+      });
+      productsRef.current = nextList;
+      return nextList;
+    });
+
+    const cleanReason = (params.reason || '').trim() || 'Khách trả hàng dư sau vụ';
+    const returnTag = `[${returnCode}: Khách trả ${calc.returnQuantity} ${existing.unit}${
+      calc.returnGiftQuantity > 0 ? ` + ${calc.returnGiftQuantity} quà` : ''
+    } (-${formatVND(calc.returnAmount)}) - ${cleanReason}]`;
+
+    let nextSales: SaleTransaction[];
+    if (calc.isFullReturn) {
+      markRecordsDeleted(existing.id, nowIso);
+      nextSales = sales.filter((s) => s.id !== existing.id);
+      setSales(nextSales);
+      if (isGoogleAuthenticated) {
+        void deleteFirestoreDocIfAdmin('sales', existing.id);
+      }
+    } else {
+      const updatedSale: SaleTransaction = {
+        ...existing,
+        quantity: calc.remainingQuantity,
+        giftQuantity: calc.remainingGiftQuantity,
+        discountAmount: calc.nextDiscountAmount,
+        totalAmount: calc.nextTotalAmount,
+        paidAmount: calc.nextPaidAmount,
+        debtAmount: calc.nextDebtAmount,
+        status: calc.nextStatus,
+        note: existing.note ? `${existing.note} | ${returnTag}` : returnTag,
+        updatedAt: nowIso,
+      };
+      nextSales = sales.map((s) => (s.id === existing.id ? updatedSale : s));
+      setSales(nextSales);
+      if (isGoogleAuthenticated) {
+        void syncSaleToFirestore(updatedSale, false);
+      }
+    }
+
+    // 2. Reconcile customer purchased & debt totals
+    setCustomers((prev) => {
+      const custHasRemainingSales = nextSales.some((s) => s.customerId === existing.customerId);
+      if (custHasRemainingSales) {
+        const reconciled = reconcileCustomersFromSales(prev, nextSales, nowIso);
+        if (isGoogleAuthenticated) {
+          reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+        }
+        return reconciled.customers;
+      }
+      return prev.map((c) => {
+        if (c.id !== existing.customerId) return c;
+        const nextCust = {
+          ...c,
+          totalPurchased: Math.max(0, c.totalPurchased - calc.returnAmount),
+          totalDebt: Math.max(0, c.totalDebt - calc.debtReducedAmount),
+          updatedAt: nowIso,
+        };
+        if (isGoogleAuthenticated) void syncCustomerToFirestore(nextCust, false);
+        return nextCust;
+      });
+    });
+
+    const financialEffectDesc = [
+      calc.debtReducedAmount > 0 ? `Giảm nợ KH: -${formatVND(calc.debtReducedAmount)}` : '',
+      calc.cashRefundAmount > 0 ? `Hoàn tiền mặt cho khách: ${formatVND(calc.cashRefundAmount)}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+
+    recordAuditLog({
+      actionCategory: calc.isFullReturn ? 'delete' : 'update',
+      targetEntity: 'sale',
+      targetCode: returnCode,
+      warehouseName: resolvedWh,
+      summary: `Phiếu khách trả hàng ${returnCode} từ HĐ ${existing.invoiceCode} (${existing.customerName}): +${calc.returnQuantity} ${existing.unit} ${existing.productName}`,
+      details: `Lý do: ${cleanReason} · Giá trị trả: ${formatVND(calc.returnAmount)}${
+        financialEffectDesc ? ` · ${financialEffectDesc}` : ''
+      }`,
+      snapshotData: JSON.stringify(existing),
+    });
+
+    showToast(
+      `Đã lập phiếu trả hàng ${returnCode}: Nhập lại kho +${calc.returnQuantity} ${existing.unit} ${
+        existing.productName
+      }${financialEffectDesc ? ` (${financialEffectDesc})` : ''}!`
+    );
+  };
+
   const handleCreateImport = (payload: {
     supplierName: string;
     supplierPhone: string;
@@ -3275,6 +3578,165 @@ export default function App() {
       void syncImportToFirestore(newImport, true, updatedProduct);
     }
     return newImport;
+  };
+
+  const handleCreateMultiItemImport = (payload: {
+    supplierName: string;
+    supplierPhone: string;
+    warehouseName: string;
+    dueDate: string;
+    note: string;
+    totalPaidAmount: number;
+    items: ImportCartDraftItem[];
+  }): ImportTransaction[] => {
+    const allocation = allocatePaymentAcrossImportItems(payload.items, payload.totalPaidAmount);
+    if (allocation.items.length === 0) {
+      throw new Error('Giỏ phiếu nhập chưa có vật tư hợp lệ.');
+    }
+
+    const nowIso = new Date().toISOString();
+    const resolvedImpWh = lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const impOwnerUid = resolveOwnerUidForWarehouse(resolvedImpWh);
+    const sharedImportGroupId = generateUniqueRecordId('impgrp');
+    const sharedReceiptCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: impOwnerUid,
+      prefix: 'PN',
+      existingCodes: imports.map((i) => i.receiptCode),
+      onReassigned: (committedCode) => {
+        setImports((prev) =>
+          prev.map((i) =>
+            i.importGroupId === sharedImportGroupId
+              ? { ...i, receiptCode: committedCode, updatedAt: new Date().toISOString() }
+              : i
+          )
+        );
+      },
+    });
+
+    let workingProducts = productsRef.current;
+    const createdImports: ImportTransaction[] = [];
+    const touchedProductsMap = new Map<string, ProductItem>();
+    const perProductMutations = new Map<
+      string,
+      Array<{ qty: number; unitCost: number; batchNumber?: string; expiryDate?: string }>
+    >();
+
+    allocation.items.forEach((line, idx) => {
+      const { updatedProducts: baseUpdated, updatedProduct: baseProd } = applyImportToInventory(
+        workingProducts,
+        line.productId,
+        line.quantity,
+        line.unitCost,
+        nowIso
+      );
+      const prevStock = Math.max(0, (Number(baseProd.stock) || 0) - line.quantity);
+      const fefo = pickEarlierFefoBatch(
+        baseProd.batchNumber,
+        baseProd.expiryDate,
+        line.batchNumber,
+        line.expiryDate,
+        prevStock
+      );
+      const updatedProd: ProductItem = {
+        ...baseProd,
+        ...(fefo.batchNumber ? { batchNumber: fefo.batchNumber } : {}),
+        ...(fefo.expiryDate ? { expiryDate: fefo.expiryDate } : {}),
+      };
+      workingProducts = baseUpdated.map((p) => (p.id === updatedProd.id ? updatedProd : p));
+      touchedProductsMap.set(updatedProd.id, updatedProd);
+      const ops = perProductMutations.get(updatedProd.id) || [];
+      ops.push({
+        qty: line.quantity,
+        unitCost: line.unitCost,
+        batchNumber: line.batchNumber?.trim() || undefined,
+        expiryDate: line.expiryDate?.trim() || undefined,
+      });
+      perProductMutations.set(updatedProd.id, ops);
+
+      const newImport: ImportTransaction = {
+        id: generateUniqueRecordId(`imp_${idx}`),
+        receiptCode: sharedReceiptCode,
+        importGroupId: sharedImportGroupId,
+        supplierName: payload.supplierName,
+        supplierPhone: payload.supplierPhone,
+        productId: updatedProd.id,
+        productName: updatedProd.name,
+        unit: updatedProd.unit,
+        quantity: line.quantity,
+        unitCost: line.unitCost,
+        totalCost: line.totalCost,
+        paidAmount: line.paidAmount,
+        debtAmount: line.debtAmount,
+        dueDate: payload.dueDate,
+        status: line.status,
+        ...(line.batchNumber?.trim() ? { batchNumber: line.batchNumber.trim() } : {}),
+        ...(line.expiryDate?.trim() ? { expiryDate: line.expiryDate.trim() } : {}),
+        note: payload.note,
+        warehouseName: resolvedImpWh,
+        staffName: currentStaff.displayName,
+        ownerId: updatedProd.ownerId || impOwnerUid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      createdImports.push(newImport);
+    });
+
+    productsRef.current = workingProducts;
+    setProducts(workingProducts);
+    setImports((prev) => [...createdImports, ...prev]);
+
+    // Atomic server-side stock addition + weighted-average cost per distinct SKU
+    perProductMutations.forEach((ops, prodId) => {
+      const touched = touchedProductsMap.get(prodId);
+      if (!touched || ops.length === 0) return;
+      const pOwner = touched.ownerId || impOwnerUid;
+      dispatchAtomicProductMutation(pOwner, touched, (cur) => {
+        let running = cur;
+        for (const op of ops) {
+          running = computeAtomicProductImportAddition({
+            currentProduct: running,
+            importQty: op.qty,
+            unitCost: op.unitCost,
+            nowIso,
+            batchNumber: op.batchNumber,
+            expiryDate: op.expiryDate,
+          });
+        }
+        return running;
+      });
+    });
+
+    recordAuditLog({
+      actionCategory: 'create',
+      targetEntity: 'import',
+      targetCode: sharedReceiptCode,
+      warehouseName: resolvedImpWh,
+      summary: `Lập phiếu nhập kho gộp ${sharedReceiptCode} (${createdImports.length} mặt hàng) từ ${payload.supplierName} (${formatVND(
+        allocation.totalCost
+      )})`,
+      details: `${createdImports
+        .map((i) => `+${i.quantity} ${i.unit} ${i.productName}`)
+        .join(' · ')} · Đã trả NCC: ${formatVND(allocation.totalPaid)} · Nợ NCC: ${formatVND(
+        allocation.totalDebt
+      )}`,
+      snapshotData: JSON.stringify(createdImports),
+    });
+
+    showToast(
+      `Đã lưu phiếu nhập kho ${sharedReceiptCode} gồm ${createdImports.length} mặt hàng tại ${resolvedImpWh} (${formatVND(
+        allocation.totalCost
+      )})!`
+    );
+
+    if (isGoogleAuthenticated) {
+      touchedProductsMap.forEach((prod) => void syncProductToFirestore(prod, false));
+      createdImports.forEach((imp) => {
+        const prod = touchedProductsMap.get(imp.productId);
+        void syncImportToFirestore(imp, true, prod);
+      });
+    }
+
+    return createdImports;
   };
 
   const handleUpdateImport = (
@@ -3634,27 +4096,61 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh = lockedWarehouse || data.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const rawCode = (data.code || '').trim();
+    const autoSafeCode = generateNextUniqueProductCode(
+      productsRef.current,
+      resolvedWh,
+      editingId
+    );
+    const colliding = rawCode
+      ? findCollidingProductCodeInWarehouse(rawCode, productsRef.current, resolvedWh, editingId)
+      : null;
+    const resolvedCode = !rawCode
+      ? autoSafeCode
+      : colliding && !editingId
+      ? autoSafeCode
+      : rawCode;
+
     if (editingId) {
-      const existing = products.find((p) => p.id === editingId);
+      const existing = productsRef.current.find((p) => p.id === editingId);
       let updatedRef: ProductItem | null = null;
-      setProducts((prev) =>
-        prev.map((p) => {
+      setProducts((prev) => {
+        const nextList = prev.map((p) => {
           if (p.id !== editingId) return p;
-          const updated = { ...p, ...data, warehouseName: resolvedWh, updatedAt: nowIso };
+          const updated: ProductItem = {
+            ...p,
+            ...data,
+            code: resolvedCode,
+            warehouseName: resolvedWh,
+            updatedAt: nowIso,
+          };
           updatedRef = updated;
           if (isGoogleAuthenticated) {
             void syncProductToFirestore(updated, false);
           }
+          dispatchAtomicProductMutation(
+            updated.ownerId || resolveOwnerUidForWarehouse(resolvedWh),
+            updated,
+            (cur) => ({
+              ...cur,
+              ...data,
+              code: resolvedCode,
+              warehouseName: resolvedWh,
+              updatedAt: nowIso,
+            })
+          );
           return updated;
-        })
-      );
+        });
+        productsRef.current = nextList;
+        return nextList;
+      });
       if (existing) {
         recordAuditLog({
           actionCategory: 'update',
           targetEntity: 'product',
-          targetCode: data.code || existing.code,
+          targetCode: resolvedCode || existing.code,
           warehouseName: resolvedWh,
-          summary: `Cập nhật vật tư ${data.name} (${data.code || existing.code}) tại ${resolvedWh}`,
+          summary: `Cập nhật vật tư ${data.name} (${resolvedCode || existing.code}) tại ${resolvedWh}`,
           details: `Tồn kho: ${existing.stock} -> ${data.stock} ${data.unit} · Giá bán: ${formatVND(
             existing.sellPrice
           )} -> ${formatVND(data.sellPrice)}`,
@@ -3665,6 +4161,7 @@ export default function App() {
       return (
         updatedRef || {
           ...data,
+          code: resolvedCode,
           warehouseName: resolvedWh,
           id: editingId,
           ownerId: activeUid,
@@ -3675,6 +4172,7 @@ export default function App() {
     } else {
       const created: ProductItem = {
         ...data,
+        code: resolvedCode,
         warehouseName: resolvedWh,
         id: generateUniqueRecordId('prod'),
         ownerId: resolveOwnerUidForWarehouse(resolvedWh),
@@ -3694,7 +4192,7 @@ export default function App() {
         )} · Giá bán: ${formatVND(created.sellPrice)}`,
         snapshotData: JSON.stringify(created),
       });
-      showToast(`Đã thêm vật tư mới: ${created.name} (${resolvedWh})`);
+      showToast(`Đã thêm vật tư mới: ${created.name} (${created.code} · ${resolvedWh})`);
       if (isGoogleAuthenticated) {
         void syncProductToFirestore(created, true);
       }
@@ -3790,6 +4288,63 @@ export default function App() {
       void syncProductToFirestore(updatedProduct, false);
     }
     return record;
+  };
+
+  const handleDeleteStockAdjustment = (adjustmentId: string) => {
+    if (!canPerformRoleAction(role, 'delete_record')) {
+      showToast('Chỉ Quản lý nhiều kho mới có quyền hủy phiếu kiểm kê kho.');
+      return;
+    }
+    const targetAdj = stockAdjustments.find((a) => a.id === adjustmentId);
+    if (!targetAdj) return;
+    const nowIso = new Date().toISOString();
+    markRecordsDeleted(adjustmentId, nowIso);
+    setStockAdjustments((prev) => prev.filter((a) => a.id !== adjustmentId));
+
+    if (targetAdj.diffQty !== 0) {
+      const reverseDelta = -targetAdj.diffQty;
+      setProducts((prev) => {
+        const nextList = prev.map((p) => {
+          if (
+            !doesRecordMatchProduct(
+              p,
+              targetAdj.productId,
+              targetAdj.productName,
+              targetAdj.warehouseName
+            )
+          ) {
+            return p;
+          }
+          const reversed = {
+            ...p,
+            stock: Math.max(0, p.stock + reverseDelta),
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncProductToFirestore(reversed, false);
+          dispatchAtomicProductMutation(
+            reversed.ownerId || resolveOwnerUidForWarehouse(reversed.warehouseName),
+            reversed,
+            (cur) => computeAtomicProductStockDelta(cur, reverseDelta, nowIso)
+          );
+          return reversed;
+        });
+        productsRef.current = nextList;
+        return nextList;
+      });
+    }
+
+    recordAuditLog({
+      actionCategory: 'delete',
+      targetEntity: 'product',
+      targetCode: targetAdj.adjustmentCode,
+      warehouseName: targetAdj.warehouseName,
+      summary: `Hủy phiếu kiểm kê ${targetAdj.adjustmentCode} (${targetAdj.productName})`,
+      details: `Đã hoàn nguyên chênh lệch kiểm kê (${targetAdj.diffQty > 0 ? `+${targetAdj.diffQty}` : targetAdj.diffQty} ${targetAdj.unit}) về tồn kho trước kiểm kê.`,
+      snapshotData: JSON.stringify(targetAdj),
+    });
+    showToast(
+      `Đã hủy phiếu kiểm kê ${targetAdj.adjustmentCode} & hoàn nguyên tồn kho "${targetAdj.productName}"!`
+    );
   };
 
   const handleDeleteProduct = (productId: string) => {
@@ -8030,6 +8585,20 @@ export default function App() {
                 </button>
               )}
 
+              {/* Global Quick Search Trigger (Ctrl+K) */}
+              <button
+                type="button"
+                onClick={() => setIsQuickSearchOpen(true)}
+                title="Tìm nhanh vật tư, SĐT khách hàng, mã HĐ/PN/PT/PC (Phím tắt: Ctrl + K)"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-semibold text-slate-700 bg-slate-100/90 hover:bg-emerald-50 hover:text-emerald-800 border border-slate-200 transition-colors shrink-0"
+              >
+                <Search className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                <span className="hidden lg:inline">Tìm nhanh</span>
+                <kbd className="hidden xl:inline px-1 py-0.2 bg-white border border-slate-300 rounded text-[10px] font-mono text-slate-500">
+                  Ctrl+K
+                </kbd>
+              </button>
+
               {/* Desktop/Tablet Multi-Warehouse Selector */}
               <div className="hidden md:block shrink-0">
                 <MultiWarehouseFilterPopover
@@ -8355,7 +8924,7 @@ export default function App() {
         )}
 
         {/* Main Workspace Content Viewport */}
-        <main className="flex-1 p-3 sm:p-6 max-w-[1400px] w-full mx-auto space-y-5 sm:space-y-6 overflow-x-hidden">
+        <main className="flex-1 p-3 sm:p-6 pb-20 md:pb-6 max-w-[1400px] w-full mx-auto space-y-5 sm:space-y-6 overflow-x-hidden">
           {activeTab === 'dashboard' && (
             <div className="space-y-5 sm:space-y-6">
               {/* Brand Hero Banner + Admin / Single-Warehouse Status Indicator */}
@@ -8536,14 +9105,33 @@ export default function App() {
               )}
 
               {/* 4 KPI Strip */}
+              {(() => {
+                const distinctSalesCount = countDistinctSalesInvoices(visibleSales);
+                const todaySales = visibleSales.filter(
+                  (s) => (s.createdAt || '').slice(0, 10) === todayVietnamDate
+                );
+                const todayRevenue = todaySales.reduce((sum, s) => sum + s.totalAmount, 0);
+                const todayOrderCount = countDistinctSalesInvoices(todaySales);
+                const distinctImportsCount = countDistinctImportReceipts(visibleImports);
+                return (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200">
-                  <div className="text-xs text-slate-500">Tổng Doanh Thu Bán Hàng</div>
+                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 border-t-4 border-t-emerald-600 shadow-2xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-slate-600">Tổng Doanh Thu Bán Hàng</span>
+                    <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded">
+                      Hôm nay: {formatVND(todayRevenue)} ({todayOrderCount} đơn)
+                    </span>
+                  </div>
                   <div className="text-xl font-bold font-mono tabular-nums text-slate-900 mt-1.5">
                     {formatVND(totalRevenue)}
                   </div>
                   <div className="text-xs text-slate-500 mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
-                    <span>{visibleSales.length} hóa đơn</span>
+                    <span>
+                      <strong>{distinctSalesCount}</strong> hóa đơn
+                      {visibleSales.length > distinctSalesCount
+                        ? ` (${visibleSales.length} món)`
+                        : ''}
+                    </span>
                     <span aria-hidden="true">·</span>
                     <button
                       type="button"
@@ -8555,8 +9143,8 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200">
-                  <div className="text-xs text-slate-500">Công Nợ Phải Thu Khách Hàng</div>
+                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 border-t-4 border-t-rose-500 shadow-2xs">
+                  <div className="text-xs font-medium text-slate-600">Công Nợ Phải Thu Khách Hàng</div>
                   <div className="text-xl font-bold font-mono tabular-nums text-red-600 mt-1.5">
                     {formatVND(totalCustomerDebt)}
                   </div>
@@ -8573,8 +9161,11 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200">
-                  <div className="text-xs text-slate-500">Công Nợ Phải Trả Nhà Cung Cấp</div>
+                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 border-t-4 border-t-amber-500 shadow-2xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-slate-600">Công Nợ Phải Trả Nhà Cung Cấp</span>
+                    <span className="text-[10px] font-mono text-slate-500">{distinctImportsCount} phiếu PN</span>
+                  </div>
                   <div className="text-xl font-bold font-mono tabular-nums text-amber-700 mt-1.5">
                     {formatVND(totalSupplierDebt)}
                   </div>
@@ -8602,8 +9193,8 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200">
-                  <div className="text-xs text-slate-500">Cảnh Báo Tồn Kho Sắp Hết</div>
+                <div className="bg-white p-4 sm:p-5 rounded-xl border border-slate-200 border-t-4 border-t-indigo-500 shadow-2xs">
+                  <div className="text-xs font-medium text-slate-600">Cảnh Báo Tồn Kho Sắp Hết</div>
                   <div className="text-xl font-bold font-mono tabular-nums text-slate-900 mt-1.5">
                     {lowStockProducts.length} / {visibleProducts.length} mặt hàng
                   </div>
@@ -8631,6 +9222,8 @@ export default function App() {
                   </div>
                 </div>
               </div>
+                );
+              })()}
 
               {/* Smart Business Analytics Panel (7-Day Revenue vs Gross Profit + Top 30d Products & Customers) */}
               <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 space-y-4">
@@ -9010,6 +9603,8 @@ export default function App() {
               onImportSalesFromExcel={handleImportSalesFromExcel}
               onUpdateSale={handleUpdateSale}
               onDeleteSale={handleDeleteSale}
+              onDeleteSaleGroup={handleDeleteSaleGroup}
+              onProcessCustomerReturn={handleProcessCustomerReturn}
               onOpenDebtRecord={(recId) => {
                 setFocusedDebtRecordId(recId);
                 setActiveTab('debts');
@@ -9045,6 +9640,7 @@ export default function App() {
               onClearFocusedImport={() => setFocusedImportId(null)}
               onNavigateCrossLink={handleNavigateCrossLink}
               onCreateImport={handleCreateImport}
+              onCreateMultiItemImport={handleCreateMultiItemImport}
               onCreateProductInline={(data) => handleSaveProduct(data)}
               onCreateSupplierInline={handleCreateSupplierInline}
               onImportWarehouseFromExcel={handleImportWarehouseFromExcel}
@@ -9075,6 +9671,7 @@ export default function App() {
               onSaveProduct={handleSaveProduct}
               onDeleteProduct={handleDeleteProduct}
               onExecuteStocktake={handleExecuteStocktake}
+              onDeleteStockAdjustment={handleDeleteStockAdjustment}
               onReconcileProductStock={handleReconcileProductStock}
               onImportProductsFromExcel={handleImportProductsFromExcel}
               onQuickRestock={(prodId) => {
@@ -9338,7 +9935,109 @@ export default function App() {
           )}
           </Suspense>
         </main>
+
+        {/* Mobile Thumb-Friendly Bottom Quick-Action Bar (< md) */}
+        {isSessionLoggedIn && (
+          <nav
+            aria-label="Thanh thao tác nhanh trên điện thoại"
+            className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white/95 backdrop-blur-xs border-t border-slate-200 px-1.5 py-1 flex items-center justify-around shadow-lg"
+          >
+            {(
+              [
+                {
+                  id: 'dashboard' as ActiveTab,
+                  shortLabel: 'Tổng quan',
+                  icon: <LayoutDashboard className="w-4 h-4" />,
+                },
+                {
+                  id: 'sales' as ActiveTab,
+                  shortLabel: 'Bán hàng',
+                  icon: <ShoppingCart className="w-4 h-4" />,
+                },
+                {
+                  id: 'imports' as ActiveTab,
+                  shortLabel: 'Nhập kho',
+                  icon: <Truck className="w-4 h-4" />,
+                },
+                {
+                  id: 'inventory' as ActiveTab,
+                  shortLabel: 'Tồn kho',
+                  icon: <Boxes className="w-4 h-4" />,
+                  badge: lowStockProducts.length > 0 ? lowStockProducts.length : undefined,
+                },
+                {
+                  id: 'debts' as ActiveTab,
+                  shortLabel: 'Công nợ',
+                  icon: <Wallet className="w-4 h-4" />,
+                  badge: urgentSupplierDebts.length > 0 ? urgentSupplierDebts.length : undefined,
+                },
+              ] as Array<{
+                id: ActiveTab;
+                shortLabel: string;
+                icon: React.ReactNode;
+                badge?: number;
+              }>
+            )
+              .filter((t) => navItems.some((n) => n.id === t.id))
+              .map((tabItem) => {
+                const active = activeTab === tabItem.id;
+                return (
+                  <button
+                    key={tabItem.id}
+                    type="button"
+                    onClick={() => {
+                      if (tabItem.id === 'sales') {
+                        setSaleFormResetKey((prev) => prev + 1);
+                      }
+                      setActiveTab(tabItem.id);
+                      setMobileMenuOpen(false);
+                      scrollToTopOfPage();
+                    }}
+                    className={`relative flex-1 min-w-0 py-1.5 px-1 rounded-lg flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold transition-colors ${
+                      active
+                        ? 'text-emerald-800 bg-emerald-50/90 font-bold'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <span className="relative">
+                      {tabItem.icon}
+                      {tabItem.badge !== undefined && tabItem.badge > 0 && (
+                        <span className="absolute -top-1.5 -right-2.5 px-1 min-w-[15px] h-[15px] rounded-full bg-rose-600 text-white text-[9px] font-mono font-bold flex items-center justify-center">
+                          {tabItem.badge > 99 ? '99+' : tabItem.badge}
+                        </span>
+                      )}
+                    </span>
+                    <span className="truncate max-w-full">{tabItem.shortLabel}</span>
+                  </button>
+                );
+              })}
+          </nav>
+        )}
       </div>
+
+      {/* Global Quick Search Modal (Ctrl+K) */}
+      <GlobalQuickSearchModal
+        isOpen={isQuickSearchOpen && isSessionLoggedIn}
+        onClose={() => setIsQuickSearchOpen(false)}
+        allowedTabs={navItems.map((n) => n.id)}
+        products={visibleProducts}
+        customers={visibleCustomers}
+        sales={visibleSales}
+        imports={visibleImports}
+        receiptVouchers={visibleReceiptVouchers}
+        paymentVouchers={visiblePaymentVouchers}
+        onNavigateCrossLink={handleNavigateCrossLink}
+        onQuickCreateSaleForCustomer={(custId) => {
+          setPreselectedCustomerId(custId);
+          setActiveTab('sales');
+          scrollToTopOfPage();
+        }}
+        onQuickRestockProduct={(prodId) => {
+          setPreselectedProductId(prodId);
+          setActiveTab('imports');
+          scrollToTopOfPage();
+        }}
+      />
 
       {/* Push Notification & Preference Drawer */}
       <NotificationCenter

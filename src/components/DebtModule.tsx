@@ -1805,10 +1805,10 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
           </div>
 
           {/* Desktop Balanced Table (>= md) */}
-          <div className="hidden md:block overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto max-h-[72vh]">
             <table className="w-full min-w-[1000px] text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
+              <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs shadow-2xs">
+                <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
                   <th className="py-3 px-4 w-[135px] whitespace-nowrap">Mã phiếu & Ngày</th>
                   <th className="py-3 px-4 min-w-[190px]">Nhà cung cấp</th>
                   <th className="py-3 px-4 min-w-[210px]">Vật tư nhập</th>
@@ -2061,6 +2061,27 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   })
                 )}
               </tbody>
+              {filteredSupplierDebts.length > 0 && (
+                <tfoot className="border-t-2 border-amber-200 bg-amber-50/70 text-xs font-semibold text-slate-800">
+                  <tr>
+                    <td colSpan={3} className="py-3 px-4">
+                      Tổng cộng theo bộ lọc: <strong>{filteredSupplierDebts.length}</strong> phiếu công nợ NCC
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap text-slate-800">
+                      {formatVND(filteredSupplierDebts.reduce((sum, i) => sum + i.totalCost, 0))}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap text-emerald-700">
+                      {formatVND(filteredSupplierDebts.reduce((sum, i) => sum + i.paidAmount, 0))}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap font-bold text-red-700">
+                      {formatVND(filteredSupplierDebts.reduce((sum, i) => sum + i.debtAmount, 0))}
+                    </td>
+                    <td colSpan={2} className="py-3 px-4 text-right text-[11px] text-slate-500">
+                      Đã đối soát trực tiếp từ sổ Nhập hàng
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         </div>
@@ -2277,10 +2298,10 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
           </div>
 
           {/* Desktop Balanced Table (>= md) */}
-          <div className="hidden md:block overflow-x-auto">
+          <div className="hidden md:block overflow-x-auto max-h-[72vh]">
             <table className="w-full min-w-[1000px] text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
+              <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs shadow-2xs">
+                <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
                   <th className="py-3 px-4 w-[135px] whitespace-nowrap">Mã HĐ & Ngày</th>
                   <th className="py-3 px-4 min-w-[190px]">Khách hàng</th>
                   <th className="py-3 px-4 min-w-[210px]">Vật tư mua</th>
@@ -2548,6 +2569,27 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   })
                 )}
               </tbody>
+              {filteredCustomerDebts.length > 0 && (
+                <tfoot className="border-t-2 border-emerald-200 bg-emerald-50/70 text-xs font-semibold text-slate-800">
+                  <tr>
+                    <td colSpan={3} className="py-3 px-4">
+                      Tổng cộng theo bộ lọc: <strong>{filteredCustomerDebts.length}</strong> hóa đơn công nợ KH
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap text-slate-800">
+                      {formatVND(filteredCustomerDebts.reduce((sum, s) => sum + s.totalAmount, 0))}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap text-emerald-700">
+                      {formatVND(filteredCustomerDebts.reduce((sum, s) => sum + s.paidAmount, 0))}
+                    </td>
+                    <td className="py-3 px-4 text-right font-mono tabular-nums whitespace-nowrap font-bold text-red-700">
+                      {formatVND(filteredCustomerDebts.reduce((sum, s) => sum + s.debtAmount, 0))}
+                    </td>
+                    <td colSpan={2} className="py-3 px-4 text-right text-[11px] text-slate-500">
+                      Đã đối soát trực tiếp từ sổ Bán hàng
+                    </td>
+                  </tr>
+                </tfoot>
+              )}
             </table>
           </div>
         </div>

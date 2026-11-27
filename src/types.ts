@@ -125,6 +125,7 @@ export interface ProductNoteTemplate {
 export interface ImportTransaction {
   id: string;
   receiptCode: string;
+  importGroupId?: string;
   supplierName: string;
   supplierPhone: string;
   productId: string;

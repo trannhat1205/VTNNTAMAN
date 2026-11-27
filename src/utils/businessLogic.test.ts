@@ -18,6 +18,7 @@ import {
   computeCashflowAndFinancialReport,
   computeCustomerLedger,
   computeCustomerOldDebtSummary,
+  computeCustomerSaleReturnCalculation,
   computeDebtAgingSummary,
   computeDueDateAfterDays,
   computeProductStockMovementLedger,
@@ -28,6 +29,8 @@ import {
   computeSupplierOldDebtSummary,
   computeTaxAuthorityFinancialStatement,
   computeWeightedAverageImportPrice,
+  countDistinctImportReceipts,
+  countDistinctSalesInvoices,
   createAuditLogEntry,
   DEBT_TERM_DAY_OPTIONS,
   diagnoseImportVoucher,
@@ -45,10 +48,12 @@ import {
   filterCustomers,
   filterRecordsBySelectedWarehouses,
   filterSearchableOptions,
+  findCollidingProductCodeInWarehouse,
   findLinkedPaymentVouchersForImport,
   findLinkedReceiptVouchersForSale,
   formatSelectedWarehousesBadge,
   generateFiscalYearOptions,
+  generateNextUniqueProductCode,
   generateSmartNotifications,
   generateSmartReportRecommendations,
   getDefaultPermissionsForPosition,
@@ -3826,6 +3831,308 @@ test('evaluateProductStockIntegrity, doesRecordMatchProduct, diagnoseImportVouch
   assert.equal(saleDiagOk.statusLevel, 'ok');
   assert.equal(saleDiagOk.linkedReceiptVouchers.length, 0);
 });
+
+test('Phase 2: Cross-month cashflow separates upfront invoice cash from PT/PC debt settlement dates without double-counting and matches warehouse names case-insensitively', () => {
+  const octCreditSaleSettledInNov: SaleTransaction = {
+    id: 'sale_oct_1',
+    invoiceCode: 'HD-2610-001',
+    customerId: 'c1',
+    customerName: 'Nông dân A',
+    customerPhone: '0911222333',
+    productId: 'p1',
+    productName: 'NPK Đầu Trâu',
+    unit: 'Bao',
+    quantity: 10,
+    unitPrice: 1000000,
+    unitCost: 800000,
+    totalAmount: 10000000,
+    // Initially paid 2,000,000 in Oct, then settled 5,000,000 via PT in Nov -> paidAmount is now 7,000,000
+    paidAmount: 7000000,
+    debtAmount: 3000000,
+    dueDate: '2026-11-30',
+    status: 'partial',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-10-15T08:00:00Z',
+    updatedAt: '2026-11-10T09:00:00Z',
+  };
+
+  const novReceipt: CashReceiptVoucher = {
+    id: 'rv_nov_1',
+    voucherCode: 'PT-2611-001',
+    groupName: 'Thu nợ bán hàng khách hàng',
+    warehouseName: 'tâm an mỹ ngãi',
+    partnerId: 'c1',
+    partnerName: 'Nông dân A',
+    partnerPhone: '0911222333',
+    amount: 5000000,
+    paymentMethod: 'Chuyển khoản ngân hàng',
+    isDebtSettlement: true,
+    settledAllocations: [
+      {
+        recordId: 'sale_oct_1',
+        code: 'HD-2610-001',
+        date: '2026-10-15',
+        dueDate: '2026-11-30',
+        productName: 'NPK Đầu Trâu',
+        previousDebt: 8000000,
+        allocatedAmount: 5000000,
+        remainingDebt: 3000000,
+      },
+    ],
+    note: 'Thu nợ tháng 10',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-10T09:00:00Z',
+    updatedAt: '2026-11-10T09:00:00Z',
+  };
+
+  const octReport = computeCashflowAndFinancialReport({
+    sales: [octCreditSaleSettledInNov],
+    imports: [],
+    products: [],
+    receiptVouchers: [novReceipt],
+    paymentVouchers: [],
+    fromDate: '2026-10-01',
+    toDate: '2026-10-31',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+  });
+  // Oct cashflow MUST only reflect the 2,000,000 upfront cash, NOT the 5,000,000 collected in Nov!
+  assert.equal(octReport.salesInitialPaidInflow, 2000000);
+  assert.equal(octReport.debtSettlementReceiptTotal, 0);
+  assert.equal(octReport.totalCashInflow, 2000000);
+  assert.equal(octReport.netSalesRevenue, 10000000);
+
+  const novReport = computeCashflowAndFinancialReport({
+    sales: [octCreditSaleSettledInNov],
+    imports: [],
+    products: [],
+    receiptVouchers: [novReceipt],
+    paymentVouchers: [],
+    fromDate: '2026-11-01',
+    toDate: '2026-11-30',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+  });
+  // Nov cashflow MUST reflect the 5,000,000 PT collected in Nov!
+  assert.equal(novReport.salesInitialPaidInflow, 0);
+  assert.equal(novReport.debtSettlementReceiptTotal, 5000000);
+  assert.equal(novReport.totalCashInflow, 5000000);
+
+  const allTimeReport = computeCashflowAndFinancialReport({
+    sales: [octCreditSaleSettledInNov],
+    imports: [],
+    products: [],
+    receiptVouchers: [novReceipt],
+    paymentVouchers: [],
+    warehouseName: 'Tâm An Mỹ Ngãi',
+  });
+  // All-time = 2,000,000 + 5,000,000 = 7,000,000 (zero double-counting!)
+  assert.equal(allTimeReport.totalCashInflow, 7000000);
+});
+
+test('Phase 2 & 3: Non-colliding SKU generator, distinct grouped POS/PN counters, multi-item import cart & customer return calculations work accurately', async () => {
+  const { allocatePaymentAcrossImportItems, groupSalesByInvoice } = await import(
+    './smartPosFeatures'
+  );
+
+  const sampleProds: ProductItem[] = [
+    {
+      id: 'p1',
+      code: 'VT-01',
+      name: 'BUP PRO',
+      category: 'Thuốc BVTV',
+      unit: 'Chai',
+      importPrice: 150000,
+      sellPrice: 215000,
+      stock: 20,
+      minStock: 5,
+      supplierName: 'NCC A',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      ownerId: 'u1',
+      createdAt: '2026-11-01',
+      updatedAt: '2026-11-01',
+    },
+    {
+      id: 'p2',
+      code: 'VT-05',
+      name: 'GAP DIỆT MẦM',
+      category: 'Thuốc BVTV',
+      unit: 'Cặp',
+      importPrice: 260000,
+      sellPrice: 350000,
+      stock: 15,
+      minStock: 5,
+      supplierName: 'NCC A',
+      warehouseName: 'TÂM AN MỸ NGÃI',
+      ownerId: 'u1',
+      createdAt: '2026-11-01',
+      updatedAt: '2026-11-01',
+    },
+  ];
+
+  // Next SKU skips past VT-05 -> VT-06 (never collides with VT-01 or VT-05 even if VT-02..04 were deleted)
+  assert.equal(generateNextUniqueProductCode(sampleProds, 'Tâm An Mỹ Ngãi'), 'VT-06');
+  assert.equal(
+    findCollidingProductCodeInWarehouse('vt-01', sampleProds, 'Tâm An Mỹ Ngãi')?.id,
+    'p1'
+  );
+  assert.equal(
+    findCollidingProductCodeInWarehouse('vt-01', sampleProds, 'Tâm An Mỹ Ngãi', 'p1'),
+    null
+  );
+
+  // Grouped POS sales counter & grouping
+  const groupedSalesRows: SaleTransaction[] = [
+    {
+      id: 's_g1',
+      invoiceCode: 'HD-2611-013',
+      invoiceGroupId: 'invgrp_13',
+      customerId: 'c1',
+      customerName: 'Khách lẻ',
+      customerPhone: '0912753264',
+      productId: 'p1',
+      productName: 'BUP PRO',
+      unit: 'CHAI',
+      quantity: 2,
+      unitPrice: 215000,
+      totalAmount: 430000,
+      paidAmount: 300000,
+      debtAmount: 130000,
+      dueDate: '2026-12-05',
+      status: 'partial',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-26T08:00:00Z',
+      updatedAt: '2026-11-26T08:00:00Z',
+    },
+    {
+      id: 's_g2',
+      invoiceCode: 'HD-2611-013',
+      invoiceGroupId: 'invgrp_13',
+      customerId: 'c1',
+      customerName: 'Khách lẻ',
+      customerPhone: '0912753264',
+      productId: 'p2',
+      productName: 'GAP DIỆT MẦM',
+      unit: 'CẶP',
+      quantity: 1,
+      unitPrice: 350000,
+      totalAmount: 350000,
+      paidAmount: 0,
+      debtAmount: 350000,
+      dueDate: '2026-12-05',
+      status: 'unpaid',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-26T08:00:00Z',
+      updatedAt: '2026-11-26T08:00:00Z',
+    },
+  ];
+  assert.equal(countDistinctSalesInvoices(groupedSalesRows), 1);
+  const groupedView = groupSalesByInvoice(groupedSalesRows);
+  assert.equal(groupedView.length, 1);
+  assert.equal(groupedView[0].totalAmount, 780000);
+  assert.equal(groupedView[0].paidAmount, 300000);
+  assert.equal(groupedView[0].debtAmount, 480000);
+  assert.equal(groupedView[0].status, 'partial');
+
+  // Multi-item Import Cart allocation
+  const impAlloc = allocatePaymentAcrossImportItems(
+    [
+      { id: 'ic1', productId: 'p1', productName: 'BUP PRO', unit: 'Chai', quantity: 10, unitCost: 150000 },
+      { id: 'ic2', productId: 'p2', productName: 'GAP DIỆT MẦM', unit: 'Cặp', quantity: 5, unitCost: 260000 },
+    ],
+    2000000
+  );
+  assert.equal(impAlloc.totalCost, 2800000);
+  assert.equal(impAlloc.totalPaid, 2000000);
+  assert.equal(impAlloc.totalDebt, 800000);
+  assert.equal(impAlloc.items[0].paidAmount, 1500000);
+  assert.equal(impAlloc.items[0].debtAmount, 0);
+  assert.equal(impAlloc.items[1].paidAmount, 500000);
+  assert.equal(impAlloc.items[1].debtAmount, 800000);
+  assert.equal(
+    countDistinctImportReceipts([
+      {
+        id: 'i1',
+        receiptCode: 'PN-2611-010',
+        importGroupId: 'impgrp_1',
+        supplierName: 'NCC A',
+        supplierPhone: '',
+        productId: 'p1',
+        productName: 'BUP PRO',
+        unit: 'Chai',
+        quantity: 10,
+        unitCost: 150000,
+        totalCost: 1500000,
+        paidAmount: 1500000,
+        debtAmount: 0,
+        dueDate: '2026-12-26',
+        status: 'paid',
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-27T01:00:00Z',
+        updatedAt: '2026-11-27T01:00:00Z',
+      },
+      {
+        id: 'i2',
+        receiptCode: 'PN-2611-010',
+        importGroupId: 'impgrp_1',
+        supplierName: 'NCC A',
+        supplierPhone: '',
+        productId: 'p2',
+        productName: 'GAP DIỆT MẦM',
+        unit: 'Cặp',
+        quantity: 5,
+        unitCost: 260000,
+        totalCost: 1300000,
+        paidAmount: 500000,
+        debtAmount: 800000,
+        dueDate: '2026-12-26',
+        status: 'partial',
+        note: '',
+        staffName: 'Admin',
+        ownerId: 'u1',
+        createdAt: '2026-11-27T01:00:00Z',
+        updatedAt: '2026-11-27T01:00:00Z',
+      },
+    ]),
+    1
+  );
+
+  // Customer partial return: bought 2 x 215,000 = 430,000 (paid 300,000, debt 130,000), returns 1 -> remaining = 215,000 -> debt reduced by 130,000 + cash refund 85,000!
+  const partialRet = computeCustomerSaleReturnCalculation({
+    sale: groupedSalesRows[0],
+    returnQuantity: 1,
+  });
+  assert.equal(partialRet.isFullReturn, false);
+  assert.equal(partialRet.remainingQuantity, 1);
+  assert.equal(partialRet.returnAmount, 215000);
+  assert.equal(partialRet.debtReducedAmount, 130000);
+  assert.equal(partialRet.cashRefundAmount, 85000);
+  assert.equal(partialRet.nextTotalAmount, 215000);
+  assert.equal(partialRet.nextPaidAmount, 215000);
+  assert.equal(partialRet.nextDebtAmount, 0);
+  assert.equal(partialRet.nextStatus, 'paid');
+
+  // Customer full return: returns all 2 -> full refund 300,000, debt reduced 130,000
+  const fullRet = computeCustomerSaleReturnCalculation({
+    sale: groupedSalesRows[0],
+    returnQuantity: 2,
+  });
+  assert.equal(fullRet.isFullReturn, true);
+  assert.equal(fullRet.returnAmount, 430000);
+  assert.equal(fullRet.debtReducedAmount, 130000);
+  assert.equal(fullRet.cashRefundAmount, 300000);
+});
+
 
 
 

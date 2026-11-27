@@ -34,16 +34,21 @@ import {
   UserRole,
 } from '../types';
 import {
+  areWarehouseNamesEquivalent,
   canPerformRoleAction,
   computeProductStockMovementLedger,
   computeSmartReorderSuggestions,
+  doesRecordMatchProduct,
   evaluateProductExpiry,
   evaluateProductStockIntegrity,
   evaluateStockAlert,
+  findCollidingProductCodeInWarehouse,
   formatVND,
+  generateNextUniqueProductCode,
   getCurrentMonthRangeVietnam,
   getRecentDaysRangeVietnam,
   normalizeVietnameseSearch,
+  normalizeWarehouseKey,
 } from '../utils/businessLogic';
 import { CrossLinkChip } from './VoucherCrossLinkUI';
 import {
@@ -79,6 +84,7 @@ interface InventoryViewProps {
     reason: string;
     note?: string;
   }) => StockAdjustmentRecord | null;
+  onDeleteStockAdjustment?: (adjustmentId: string) => void;
   onReconcileProductStock?: (productId: string) => void;
   onImportProductsFromExcel: (rows: Record<string, unknown>[]) => number;
   onQuickRestock: (productId: string) => void;
@@ -103,6 +109,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onSaveProduct,
   onDeleteProduct,
   onExecuteStocktake,
+  onDeleteStockAdjustment,
   onReconcileProductStock,
   onImportProductsFromExcel,
   onQuickRestock,
@@ -171,14 +178,72 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     () =>
       products.filter((p) => {
         const pWarehouse = p.warehouseName || 'Tâm An Mỹ Ngãi';
-        if (lockedWarehouse && pWarehouse !== lockedWarehouse) return false;
-        if (!lockedWarehouse && warehouseFilter !== 'all' && pWarehouse !== warehouseFilter) {
+        if (lockedWarehouse && !areWarehouseNamesEquivalent(pWarehouse, lockedWarehouse)) {
+          return false;
+        }
+        if (
+          !lockedWarehouse &&
+          warehouseFilter !== 'all' &&
+          !areWarehouseNamesEquivalent(pWarehouse, warehouseFilter)
+        ) {
           return false;
         }
         return true;
       }),
     [products, lockedWarehouse, warehouseFilter]
   );
+
+  // Detect duplicate SKU codes within the same warehouse (e.g. two products sharing VT-01)
+  const duplicateCodeProductIds = useMemo(() => {
+    const bucket = new Map<string, string[]>();
+    for (const p of scopedBaseProducts) {
+      const cleanCode = (p.code || '').trim().toUpperCase();
+      if (!cleanCode) continue;
+      const whKey = normalizeWarehouseKey(p.warehouseName || 'Tâm An Mỹ Ngãi');
+      const key = `${whKey}::${cleanCode}`;
+      const arr = bucket.get(key) || [];
+      arr.push(p.id);
+      bucket.set(key, arr);
+    }
+    const dupIds = new Set<string>();
+    bucket.forEach((ids) => {
+      if (ids.length >= 2) ids.forEach((id) => dupIds.add(id));
+    });
+    return dupIds;
+  }, [scopedBaseProducts]);
+
+  const productMovementCounts = useMemo(() => {
+    const map = new Map<string, { qtyIn: number; qtyOut: number }>();
+    for (const p of scopedBaseProducts) {
+      let qtyIn = 0;
+      let qtyOut = 0;
+      for (const imp of imports) {
+        if (doesRecordMatchProduct(p, imp.productId, imp.productName, imp.warehouseName)) {
+          qtyIn += Math.max(0, Number(imp.quantity) || 0);
+        }
+      }
+      for (const s of sales) {
+        if (doesRecordMatchProduct(p, s.productId, s.productName, s.warehouseName)) {
+          qtyOut += Math.max(0, Number(s.quantity) || 0);
+        }
+        if (
+          s.giftProductId &&
+          (Number(s.giftQuantity) || 0) > 0 &&
+          doesRecordMatchProduct(p, s.giftProductId, s.giftProductName, s.warehouseName)
+        ) {
+          qtyOut += Math.max(0, Number(s.giftQuantity) || 0);
+        }
+      }
+      for (const adj of stockAdjustments) {
+        if (adj.productId !== p.id) continue;
+        const diff = Math.round(Number(adj.diffQty) || 0);
+        if (diff > 0) qtyIn += diff;
+        else if (diff < 0) qtyOut += Math.abs(diff);
+      }
+      map.set(p.id, { qtyIn, qtyOut });
+    }
+    return map;
+  }, [scopedBaseProducts, imports, sales, stockAdjustments]);
 
   const inventorySummaryKpis = useMemo(() => {
     let totalUnits = 0;
@@ -188,29 +253,23 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     let lowCount = 0;
     let totalInUnits = 0;
     let totalOutUnits = 0;
+    let belowCostCount = 0;
 
     for (const p of scopedBaseProducts) {
       const stk = Math.max(0, Number(p.stock) || 0);
+      const impP = Math.max(0, Number(p.importPrice) || 0);
+      const sellP = Math.max(0, Number(p.sellPrice) || 0);
       totalUnits += stk;
-      totalCostValue += stk * (Number(p.importPrice) || 0);
-      totalRetailValue += stk * (Number(p.sellPrice) || 0);
+      totalCostValue += stk * impP;
+      totalRetailValue += stk * sellP;
+      if (sellP > 0 && sellP < impP) belowCostCount += 1;
       const alert = evaluateStockAlert(p);
       if (alert === 'out_of_stock') outCount += 1;
       else if (alert === 'low_stock') lowCount += 1;
-    }
-
-    const baseIds = new Set(scopedBaseProducts.map((p) => p.id));
-    for (const imp of imports) {
-      if (baseIds.has(imp.productId)) {
-        totalInUnits += Math.max(0, Number(imp.quantity) || 0);
-      }
-    }
-    for (const s of sales) {
-      if (baseIds.has(s.productId)) {
-        totalOutUnits += Math.max(0, Number(s.quantity) || 0);
-      }
-      if (s.giftProductId && baseIds.has(s.giftProductId)) {
-        totalOutUnits += Math.max(0, Number(s.giftQuantity) || 0);
+      const mov = productMovementCounts.get(p.id);
+      if (mov) {
+        totalInUnits += mov.qtyIn;
+        totalOutUnits += mov.qtyOut;
       }
     }
 
@@ -224,28 +283,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       alertTotal: outCount + lowCount,
       totalInUnits,
       totalOutUnits,
+      belowCostCount,
     };
-  }, [scopedBaseProducts, imports, sales]);
-
-  const productMovementCounts = useMemo(() => {
-    const map = new Map<string, { qtyIn: number; qtyOut: number }>();
-    for (const imp of imports) {
-      const prev = map.get(imp.productId) || { qtyIn: 0, qtyOut: 0 };
-      prev.qtyIn += Math.max(0, Number(imp.quantity) || 0);
-      map.set(imp.productId, prev);
-    }
-    for (const s of sales) {
-      const prev = map.get(s.productId) || { qtyIn: 0, qtyOut: 0 };
-      prev.qtyOut += Math.max(0, Number(s.quantity) || 0);
-      map.set(s.productId, prev);
-      if (s.giftProductId && (Number(s.giftQuantity) || 0) > 0) {
-        const gPrev = map.get(s.giftProductId) || { qtyIn: 0, qtyOut: 0 };
-        gPrev.qtyOut += Math.max(0, Number(s.giftQuantity) || 0);
-        map.set(s.giftProductId, gPrev);
-      }
-    }
-    return map;
-  }, [imports, sales]);
+  }, [scopedBaseProducts, productMovementCounts]);
 
   const detailProduct = useMemo(
     () => (detailProductId ? products.find((p) => p.id === detailProductId) || null : null),
@@ -287,8 +327,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
 
   const filteredProducts = products.filter((p) => {
     const pWarehouse = p.warehouseName || 'Tâm An Mỹ Ngãi';
-    if (lockedWarehouse && pWarehouse !== lockedWarehouse) return false;
-    if (!lockedWarehouse && warehouseFilter !== 'all' && pWarehouse !== warehouseFilter) {
+    if (lockedWarehouse && !areWarehouseNamesEquivalent(pWarehouse, lockedWarehouse)) return false;
+    if (
+      !lockedWarehouse &&
+      warehouseFilter !== 'all' &&
+      !areWarehouseNamesEquivalent(pWarehouse, warehouseFilter)
+    ) {
       return false;
     }
     if (categoryFilter !== 'all' && p.category !== categoryFilter) return false;
@@ -309,6 +353,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       `${p.name} ${p.code} ${p.barcode || ''} ${p.batchNumber || ''} ${p.category} ${p.supplierName} ${pWarehouse}`
     ).includes(q);
   });
+
+  const [inventoryRowLimit, setInventoryRowLimit] = useState<number>(80);
+  useEffect(() => {
+    setInventoryRowLimit(80);
+  }, [searchQuery, warehouseFilter, categoryFilter, stockFilter]);
+
+  const displayedProducts =
+    focusedProductId && filteredProducts.findIndex((p) => p.id === focusedProductId) >= inventoryRowLimit
+      ? filteredProducts
+      : filteredProducts.slice(0, inventoryRowLimit);
 
   const resetProductModalToBlank = () => {
     setCode('');
@@ -334,6 +388,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const openAddModal = () => {
     setEditingProduct(null);
     resetProductModalToBlank();
+    const defaultWh = lockedWarehouse || (warehouseFilter !== 'all' ? warehouseFilter : warehouses[0] || '');
+    setWarehouseName(defaultWh);
+    setCode(generateNextUniqueProductCode(products, defaultWh));
     setIsModalOpen(true);
   };
 
@@ -402,9 +459,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       resolvedWarehouse = warehouses[0] || 'Tâm An Mỹ Ngãi';
     }
 
+    const autoNextCode = generateNextUniqueProductCode(
+      products,
+      resolvedWarehouse,
+      editingProduct?.id
+    );
+    const requestedCode = code.trim();
+    const colliding = requestedCode
+      ? findCollidingProductCodeInWarehouse(
+          requestedCode,
+          products,
+          resolvedWarehouse,
+          editingProduct?.id
+        )
+      : null;
+    const finalSafeCode = !requestedCode
+      ? autoNextCode
+      : colliding && !editingProduct
+      ? autoNextCode
+      : requestedCode;
+
     onSaveProduct(
       {
-        code: code.trim() || `VT-0${products.length + 1}`,
+        code: finalSafeCode,
         name: name.trim(),
         category: resolvedCategory,
         warehouseName: resolvedWarehouse,
@@ -820,7 +897,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               Không tìm thấy vật tư nông nghiệp nào khớp với bộ lọc hiện tại.
             </div>
           ) : (
-            filteredProducts.map((p) => {
+            displayedProducts.map((p) => {
               const alert = evaluateStockAlert(p);
               const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
               return (
@@ -1016,10 +1093,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </div>
 
         {/* Desktop Balanced Table (>= md) */}
-        <div className="hidden md:block overflow-x-auto">
+        <div className="hidden md:block overflow-x-auto max-h-[72vh]">
           <table className="w-full min-w-[980px] text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
+            <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs shadow-2xs">
+              <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
                 <th className="py-3 px-4 min-w-[230px]">Mã & Tên vật tư</th>
                 <th className="py-3 px-4 w-[135px] whitespace-nowrap">Kho lưu trữ</th>
                 <th className="py-3 px-4 min-w-[190px]">Nhóm & Nhà cung cấp</th>
@@ -1038,7 +1115,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   </td>
                 </tr>
               ) : (
-              filteredProducts.map((p) => {
+              displayedProducts.map((p) => {
                 const alert = evaluateStockAlert(p);
                 const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
                 const integrity = evaluateProductStockIntegrity(p, sales, imports, stockAdjustments);
@@ -1068,6 +1145,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded"
                           >
                             Lệch XNT ({p.stock}/{integrity.recommendedReconciledStock})
+                          </span>
+                        )}
+                        {duplicateCodeProductIds.has(p.id) && (
+                          <span
+                            title={`Mã vật tư ${p.code} đang bị trùng với mặt hàng khác trong cùng kho. Bấm Sửa để đổi mã riêng.`}
+                            className="px-1.5 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300 rounded"
+                          >
+                            Trùng mã {p.code}
+                          </span>
+                        )}
+                        {p.sellPrice > 0 && p.sellPrice < p.importPrice && (
+                          <span
+                            title={`Giá bán lẻ (${formatVND(p.sellPrice)}) đang thấp hơn giá vốn bình quân (${formatVND(p.importPrice)})`}
+                            className="px-1.5 py-0.5 text-[10px] font-bold bg-red-100 text-red-700 border border-red-300 rounded"
+                          >
+                            Bán &lt; Giá vốn
                           </span>
                         )}
                       </div>
@@ -1243,8 +1336,79 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               })
               )}
             </tbody>
+            {filteredProducts.length > 0 &&
+              (() => {
+                let sumStock = 0;
+                let sumIn = 0;
+                let sumOut = 0;
+                let sumCostVal = 0;
+                let sumRetailVal = 0;
+                for (const p of filteredProducts) {
+                  const stk = Math.max(0, Number(p.stock) || 0);
+                  sumStock += stk;
+                  sumCostVal += stk * Math.max(0, Number(p.importPrice) || 0);
+                  sumRetailVal += stk * Math.max(0, Number(p.sellPrice) || 0);
+                  const mv = productMovementCounts.get(p.id);
+                  if (mv) {
+                    sumIn += mv.qtyIn;
+                    sumOut += mv.qtyOut;
+                  }
+                }
+                const estProfit = sumRetailVal - sumCostVal;
+                return (
+                  <tfoot className="border-t-2 border-emerald-200 bg-emerald-50/70 text-xs font-semibold text-slate-800">
+                    <tr>
+                      <td colSpan={3} className="py-3 px-4">
+                        <span>
+                          Tổng kết bộ lọc: <strong>{filteredProducts.length}</strong> mặt hàng
+                        </span>
+                        <span className="mx-2 text-slate-400">·</span>
+                        <span className="font-mono text-emerald-800">+{sumIn.toLocaleString('vi-VN')} nhập</span>
+                        <span className="mx-1.5 text-slate-400">/</span>
+                        <span className="font-mono text-amber-800">-{sumOut.toLocaleString('vi-VN')} xuất</span>
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono whitespace-nowrap text-slate-700">
+                        <div>∑ Vốn tồn:</div>
+                        <div className="font-bold text-slate-900">{formatVND(sumCostVal)}</div>
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono whitespace-nowrap text-emerald-800">
+                        <div>∑ Giá trị bán:</div>
+                        <div className="font-bold">{formatVND(sumRetailVal)}</div>
+                      </td>
+                      <td className="py-3 px-4 text-right font-mono whitespace-nowrap">
+                        <div className="text-[11px] text-slate-500">∑ Tồn hiện tại</div>
+                        <div className="text-sm font-bold text-slate-900">
+                          {sumStock.toLocaleString('vi-VN')} ĐVT
+                        </div>
+                      </td>
+                      <td colSpan={2} className="py-3 px-4 text-right font-mono whitespace-nowrap">
+                        <div className="text-[11px] text-slate-500">Lãi gộp tiềm năng kho</div>
+                        <div
+                          className={`font-bold ${
+                            estProfit >= 0 ? 'text-emerald-800' : 'text-red-600'
+                          }`}
+                        >
+                          {estProfit >= 0 ? '+' : ''}
+                          {formatVND(estProfit)}
+                        </div>
+                      </td>
+                    </tr>
+                  </tfoot>
+                );
+              })()}
           </table>
         </div>
+        {filteredProducts.length > displayedProducts.length && (
+          <div className="p-3.5 border-t border-slate-200 bg-slate-50/70 text-center">
+            <button
+              type="button"
+              onClick={() => setInventoryRowLimit((prev) => prev + 80)}
+              className="px-4 py-2 text-xs font-semibold text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-lg shadow-2xs transition-colors"
+            >
+              Hiển thị thêm mặt hàng (Đang xem {displayedProducts.length} / {filteredProducts.length} vật tư)
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
@@ -1301,9 +1465,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     type="text"
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
-                    placeholder={`VT-0${products.length + 1}`}
+                    placeholder={generateNextUniqueProductCode(
+                      products,
+                      lockedWarehouse || warehouseName,
+                      editingProduct?.id
+                    )}
                     className="w-full px-3 py-2 text-sm font-mono bg-slate-50 border border-slate-200 rounded-lg"
                   />
+                  {(() => {
+                    const dup = code.trim()
+                      ? findCollidingProductCodeInWarehouse(
+                          code,
+                          products,
+                          lockedWarehouse || warehouseName || warehouses[0],
+                          editingProduct?.id
+                        )
+                      : null;
+                    if (!dup) return null;
+                    return (
+                      <div className="mt-1 text-[11px] font-semibold text-amber-800">
+                        Mã {code.trim().toUpperCase()} đã dùng cho &quot;{dup.name}&quot; — hệ thống sẽ tự cấp mã mới nếu tạo mới.
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div className="sm:col-span-2">
                   <label
@@ -1519,6 +1703,18 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   />
                 </div>
               </div>
+
+              {Number(sellPrice) > 0 &&
+                Number(importPrice) > 0 &&
+                Number(sellPrice) < Number(importPrice) && (
+                  <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs font-semibold text-red-800 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-red-600" />
+                    <span>
+                      Cảnh báo: Giá bán lẻ ({formatVND(Number(sellPrice))}) đang thấp hơn Giá nhập vốn (
+                      {formatVND(Number(importPrice))}) — sẽ gây lỗ gộp khi xuất bán!
+                    </span>
+                  </div>
+                )}
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -1992,8 +2188,31 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                                     }}
                                   />
                                 ) : (
-                                  <span className="font-mono font-bold text-slate-800">
-                                    {mov.voucherCode}
+                                  <span className="inline-flex items-center gap-1.5">
+                                    <span className="font-mono font-bold text-slate-800">
+                                      {mov.voucherCode}
+                                    </span>
+                                    {(mov.type === 'stocktake_in' || mov.type === 'stocktake_out') &&
+                                      mov.sourceRecordId &&
+                                      onDeleteStockAdjustment &&
+                                      canPerformRoleAction(role, 'delete_record') && (
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (
+                                              window.confirm(
+                                                `Hủy phiếu kiểm kê ${mov.voucherCode} và hoàn trả chênh lệch kho về trước kiểm kê?`
+                                              )
+                                            ) {
+                                              onDeleteStockAdjustment(mov.sourceRecordId!);
+                                            }
+                                          }}
+                                          className="px-1.5 py-0.5 text-[10px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded"
+                                          title="Hủy phiếu điều chỉnh kiểm kê này và hoàn lại tồn kho"
+                                        >
+                                          Hủy KK
+                                        </button>
+                                      )}
                                   </span>
                                 )}
                               </div>
@@ -2287,21 +2506,43 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             {adj.createdAt.slice(0, 10)} · {adj.reason} · {adj.staffName}
                           </div>
                         </div>
-                        <div className="text-right font-mono shrink-0">
-                          <span
-                            className={`font-bold ${
-                              adj.diffQty > 0
-                                ? 'text-emerald-700'
-                                : adj.diffQty < 0
-                                ? 'text-red-600'
-                                : 'text-slate-600'
-                            }`}
-                          >
-                            {adj.diffQty > 0 ? `+${adj.diffQty}` : adj.diffQty} {adj.unit}
-                          </span>
-                          <div className="text-[10px] text-slate-500">
-                            {adj.systemStockBefore} → {adj.actualCountedStock}
+                        <div className="flex items-center gap-2 shrink-0">
+                          <div className="text-right font-mono">
+                            <span
+                              className={`font-bold ${
+                                adj.diffQty > 0
+                                  ? 'text-emerald-700'
+                                  : adj.diffQty < 0
+                                  ? 'text-red-600'
+                                  : 'text-slate-600'
+                              }`}
+                            >
+                              {adj.diffQty > 0 ? `+${adj.diffQty}` : adj.diffQty} {adj.unit}
+                            </span>
+                            <div className="text-[10px] text-slate-500">
+                              {adj.systemStockBefore} → {adj.actualCountedStock}
+                            </div>
                           </div>
+                          {onDeleteStockAdjustment && canPerformRoleAction(role, 'delete_record') && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    `Xác nhận hủy phiếu kiểm kê ${adj.adjustmentCode} (${adj.productName}) và hoàn trả chênh lệch ${
+                                      adj.diffQty > 0 ? -adj.diffQty : `+${Math.abs(adj.diffQty)}`
+                                    } ${adj.unit}?`
+                                  )
+                                ) {
+                                  onDeleteStockAdjustment(adj.id);
+                                }
+                              }}
+                              title={`Hủy phiếu kiểm kê ${adj.adjustmentCode}`}
+                              className="px-2 py-1 text-[10px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md"
+                            >
+                              Hủy KK
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))}
