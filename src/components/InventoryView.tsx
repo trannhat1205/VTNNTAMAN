@@ -60,6 +60,12 @@ import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { DOSAGE_GUIDE_PRESETS } from '../utils/smartPosFeatures';
+import {
+  computeMarginInfo,
+  isSlowMovingProduct,
+  priceFromMarkup,
+  suggestMinStockFromVelocity,
+} from '../utils/smartInsights';
 
 interface InventoryViewProps {
   products: ProductItem[];
@@ -122,7 +128,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
   const [categoryFilter, setCategoryFilter] = useState<ProductCategory | 'all'>('all');
   const [stockFilter, setStockFilter] = useState<
-    'all' | 'low_or_out' | 'out_of_stock' | 'normal' | 'expiring'
+    'all' | 'low_or_out' | 'out_of_stock' | 'normal' | 'expiring' | 'slow'
   >('all');
 
   // Detailed Stock Movement Ledger Modal (Chi tiết Xuất - Nhập - Tồn kho) when clicking any item
@@ -347,12 +353,47 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         (exp === 'expired' || exp === 'expiring_30d' || exp === 'expiring_60d' || exp === 'expiring_90d');
       if (!isExpiring) return false;
     }
+    if (stockFilter === 'slow' && !isSlowMovingProduct(p, sales)) return false;
     const q = normalizeVietnameseSearch(searchQuery);
     if (!q) return true;
     return normalizeVietnameseSearch(
       `${p.name} ${p.code} ${p.barcode || ''} ${p.batchNumber || ''} ${p.category} ${p.supplierName} ${pWarehouse}`
     ).includes(q);
   });
+
+  const handleApplySmartMinStock = () => {
+    const changes = scopedBaseProducts
+      .map((p) => ({ p, suggested: suggestMinStockFromVelocity(p, sales) }))
+      .filter(
+        (x): x is { p: ProductItem; suggested: number } =>
+          x.suggested !== null && x.suggested !== x.p.minStock
+      );
+    if (changes.length === 0) {
+      window.alert('Chưa có đề xuất mới: các vật tư chưa có doanh số 30 ngày hoặc định mức đã khớp.');
+      return;
+    }
+    const preview = changes
+      .slice(0, 8)
+      .map((c) => `• ${c.p.name}: ${c.p.minStock} → ${c.suggested} ${c.p.unit}`)
+      .join('\n');
+    if (
+      !window.confirm(
+        `Áp dụng định mức tối thiểu thông minh cho ${changes.length} vật tư?\n(= doanh số 30 ngày × 7 ngày giao hàng × 1,5 an toàn)\n\n${preview}${
+          changes.length > 8 ? `\n… và ${changes.length - 8} vật tư khác` : ''
+        }`
+      )
+    ) {
+      return;
+    }
+    for (const { p, suggested } of changes) {
+      const { id: _id, ownerId: _owner, createdAt: _created, updatedAt: _updated, ...data } = p;
+      void _id;
+      void _owner;
+      void _created;
+      void _updated;
+      onSaveProduct({ ...data, minStock: suggested }, p.id);
+    }
+  };
 
   const [inventoryRowLimit, setInventoryRowLimit] = useState<number>(80);
   useEffect(() => {
@@ -835,7 +876,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             value={stockFilter}
             onChange={(e) =>
               setStockFilter(
-                e.target.value as 'all' | 'low_or_out' | 'out_of_stock' | 'normal' | 'expiring'
+                e.target.value as 'all' | 'low_or_out' | 'out_of_stock' | 'normal' | 'expiring' | 'slow'
               )
             }
             className="px-3 py-2 text-xs font-medium bg-white border border-slate-200 rounded-lg text-slate-800"
@@ -845,10 +886,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             <option value="low_or_out">Sắp hết / Hết hàng</option>
             <option value="out_of_stock">Chỉ hết hàng (0)</option>
             <option value="expiring">Sắp hết hạn / Quá hạn ({expiringOrExpiredCount})</option>
+            <option value="slow">Hàng chậm bán (60 ngày không bán)</option>
           </select>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          {canPerformRoleAction(role, 'edit_record') && (
+            <button
+              type="button"
+              onClick={handleApplySmartMinStock}
+              title="Tự tính định mức tối thiểu = doanh số bán 30 ngày × 7 ngày giao hàng × 1,5 an toàn"
+              className="px-3.5 py-2 text-xs font-semibold text-violet-800 bg-violet-50 hover:bg-violet-100 border border-violet-200 rounded-lg transition-colors flex items-center justify-center gap-1.5 shrink-0"
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Áp dụng định mức thông minh</span>
+            </button>
+          )}
           {onExecuteStocktake && canPerformRoleAction(role, 'edit_record') && (
             <button
               type="button"
@@ -1743,6 +1796,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                   </div>
                 )}
 
+              {Number(sellPrice) > 0 && Number(importPrice) > 0 && Number(sellPrice) >= Number(importPrice) && (
+                <div className="text-[11px] font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                  Lãi gộp: {formatVND(computeMarginInfo(Number(sellPrice), Number(importPrice)).profitPerUnit)} /{' '}
+                  {unit || 'đơn vị'} ({computeMarginInfo(Number(sellPrice), Number(importPrice)).marginPct}% giá bán ·{' '}
+                  {computeMarginInfo(Number(sellPrice), Number(importPrice)).markupPct}% trên vốn)
+                </div>
+              )}
+              {Number(importPrice) > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 -mt-2">
+                  <span className="text-[11px] text-slate-500">Gợi ý giá bán theo % lãi trên vốn:</span>
+                  {[10, 15, 20, 25].map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setSellPrice(String(priceFromMarkup(Number(importPrice), m)))}
+                      className="px-2 py-0.5 text-[11px] font-bold text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-md"
+                    >
+                      +{m}%
+                    </button>
+                  ))}
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label
@@ -1777,6 +1853,26 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     placeholder="10"
                     className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                   />
+                  {editingProduct &&
+                    (() => {
+                      const suggested = suggestMinStockFromVelocity(editingProduct, sales);
+                      if (suggested === null) {
+                        return (
+                          <p className="mt-1 text-[10px] text-slate-400">
+                            Chưa có doanh số 30 ngày để gợi ý định mức.
+                          </p>
+                        );
+                      }
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => setMinStock(String(suggested))}
+                          className="mt-1 text-[11px] font-semibold text-indigo-700 hover:text-indigo-900 underline underline-offset-2"
+                        >
+                          Gợi ý thông minh: {suggested} {editingProduct.unit} (bán 30 ngày) · Áp dụng
+                        </button>
+                      );
+                    })()}
                 </div>
               </div>
 

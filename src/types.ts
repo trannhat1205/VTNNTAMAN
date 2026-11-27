@@ -46,6 +46,8 @@ export interface ProductItem {
   expiryDate?: string;
   barcode?: string;
   dosageGuide?: string;
+  /** Special selling price per customer group (key = group name). */
+  groupPrices?: Record<string, number>;
   ownerId: string;
   createdAt: string;
   updatedAt: string;
@@ -62,6 +64,8 @@ export interface CustomerProfile {
   note: string;
   totalPurchased: number;
   totalDebt: number;
+  /** Optional soft credit limit (đ). Warns on the sales form; never blocks a sale. */
+  creditLimit?: number;
   warehouseName?: string;
   ownerId: string;
   createdAt: string;

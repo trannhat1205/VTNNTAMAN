@@ -48,6 +48,8 @@ import {
   exportSaleInvoicePDF,
 } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
+import { CreditGradeBadge } from './CreditGradeBadge';
+import { computeCustomerCreditGrade, isOverCreditLimit } from '../utils/smartInsights';
 import { SearchableSelect } from './SearchableSelect';
 
 interface CustomerModuleProps {
@@ -144,6 +146,21 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
   const [formAddress, setFormAddress] = useState('');
   const [formGroup, setFormGroup] = useState<CustomerGroup>('');
   const [formNote, setFormNote] = useState('');
+  const [formCreditLimit, setFormCreditLimit] = useState('');
+
+  const creditGradeByCustomerId = useMemo(() => {
+    const byCustomer = new Map<string, SaleTransaction[]>();
+    for (const s of sales) {
+      if ((Number(s.debtAmount) || 0) <= 0) continue;
+      const arr = byCustomer.get(s.customerId);
+      if (arr) arr.push(s);
+      else byCustomer.set(s.customerId, [s]);
+    }
+    const nowMs = Date.now();
+    const out = new Map<string, ReturnType<typeof computeCustomerCreditGrade>>();
+    byCustomer.forEach((rows, id) => out.set(id, computeCustomerCreditGrade(rows, nowMs)));
+    return out;
+  }, [sales]);
   const [formError, setFormError] = useState('');
 
   // Inline New Customer Group Creation State inside Modal
@@ -194,6 +211,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
     setFormAddress('');
     setFormGroup('');
     setFormNote('');
+    setFormCreditLimit('');
     setFormError('');
     setShowNewGroupInput(false);
     setNewGroupName('');
@@ -214,6 +232,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
     setFormAddress(c.address);
     setFormGroup(c.group);
     setFormNote(c.note);
+    setFormCreditLimit(c.creditLimit && c.creditLimit > 0 ? String(c.creditLimit) : '');
     setFormError('');
     setShowNewGroupInput(false);
     setNewGroupName('');
@@ -265,6 +284,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
         address: formAddress.trim(),
         group: resolvedGroup,
         note: formNote.trim(),
+        creditLimit: Number(formCreditLimit) > 0 ? Math.round(Number(formCreditLimit)) : undefined,
         totalPurchased: editingCustomer ? editingCustomer.totalPurchased : 0,
         totalDebt: editingCustomer ? editingCustomer.totalDebt : 0,
       },
@@ -431,6 +451,17 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                             <span className="font-mono">{customer.code}</span>
                             <span className="mx-1.5" aria-hidden="true">·</span>
                             <span>{customer.group}</span>
+                            {ledger.totalDebt > 0 && creditGradeByCustomerId.get(customer.id) && (
+                              <CreditGradeBadge
+                                grade={creditGradeByCustomerId.get(customer.id)!.grade}
+                                className="ml-1.5"
+                              />
+                            )}
+                            {isOverCreditLimit(ledger.totalDebt, customer.creditLimit) && (
+                              <span className="ml-1.5 px-1.5 rounded bg-rose-600 text-white text-[10px] font-bold">
+                                Vượt hạn mức
+                              </span>
+                            )}
                           </div>
                         </td>
                         <td className="py-3 px-3 min-w-[140px] align-middle">
@@ -489,6 +520,12 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                     </span>
                     <span aria-hidden="true">·</span>
                     <span className="font-medium text-slate-600">{activeEntry.customer.group}</span>
+                    {activeEntry.ledger.totalDebt > 0 &&
+                      creditGradeByCustomerId.get(activeEntry.customer.id) && (
+                        <CreditGradeBadge
+                          grade={creditGradeByCustomerId.get(activeEntry.customer.id)!.grade}
+                        />
+                      )}
                   </div>
                   <h3 className="text-base sm:text-lg font-bold text-slate-900 mt-1">
                     {activeEntry.customer.name}
@@ -554,6 +591,20 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                     Ghi chú: {activeEntry.customer.note}
                   </p>
                 )}
+                {activeEntry.customer.creditLimit && activeEntry.customer.creditLimit > 0 ? (
+                  <p
+                    className={`pt-1 font-semibold ${
+                      isOverCreditLimit(activeEntry.ledger.totalDebt, activeEntry.customer.creditLimit)
+                        ? 'text-rose-700'
+                        : 'text-slate-600'
+                    }`}
+                  >
+                    Hạn mức nợ: {formatVND(activeEntry.customer.creditLimit)}
+                    {isOverCreditLimit(activeEntry.ledger.totalDebt, activeEntry.customer.creditLimit)
+                      ? ` — đang vượt ${formatVND(activeEntry.ledger.totalDebt - activeEntry.customer.creditLimit)}`
+                      : ` — còn dư ${formatVND(activeEntry.customer.creditLimit - activeEntry.ledger.totalDebt)}`}
+                  </p>
+                ) : null}
               </div>
 
               <div className="grid grid-cols-3 divide-x divide-slate-200 border-b border-slate-200">
@@ -1427,6 +1478,28 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                   placeholder="Ghi chú mùa vụ, diện tích canh tác hoặc thói quen thanh toán..."
                   className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                 />
+              </div>
+
+              <div>
+                <label
+                  htmlFor="cust-credit-limit"
+                  className="block text-xs font-semibold text-slate-700 mb-1"
+                >
+                  Hạn mức nợ tối đa (VNĐ) — để trống nếu không giới hạn
+                </label>
+                <input
+                  id="cust-credit-limit"
+                  type="number"
+                  min={0}
+                  step={100000}
+                  value={formCreditLimit}
+                  onChange={(e) => setFormCreditLimit(e.target.value)}
+                  placeholder="VD: 5000000"
+                  className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                />
+                <p className="mt-1 text-[10px] text-slate-400">
+                  Chỉ cảnh báo khi bán thêm, không chặn bán và không tính lãi.
+                </p>
               </div>
 
               </div>

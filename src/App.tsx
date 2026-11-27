@@ -368,6 +368,8 @@ export default function App() {
   const rtdbUsersDirMapRef = useRef<Record<string, RtdbUserDirectoryProfile>>({});
   const rtdbUsersDirSigRef = useRef<string>('');
   const onlineUsersKeyRef = useRef<string>('');
+  const presenceDisabledRef = useRef<boolean>(false);
+  const [presenceStatus, setPresenceStatus] = useState<'pending' | 'ok' | 'blocked'>('pending');
   const [onlineUsers, setOnlineUsers] = useState<
     Array<{ uid: string; displayName: string; warehouse: string }>
   >([]);
@@ -1391,11 +1393,23 @@ export default function App() {
     if (!isSessionLoggedIn || !isGoogleAuthenticated || !auth.currentUser) return;
     const presenceUid = auth.currentUser.uid;
     const presenceWarehouse = lockedWarehouse || currentStaff.assignedWarehouse || '';
+    let timer: number | undefined;
     const beat = () => {
-      void touchRealtimePresence(presenceUid, { online: true, activeWarehouse: presenceWarehouse });
+      if (presenceDisabledRef.current) return;
+      void touchRealtimePresence(presenceUid, { online: true, activeWarehouse: presenceWarehouse }).then(
+        (ok) => {
+          if (ok) {
+            setPresenceStatus('ok');
+            return;
+          }
+          presenceDisabledRef.current = true;
+          setPresenceStatus('blocked');
+          if (timer !== undefined) window.clearInterval(timer);
+        }
+      );
     };
     beat();
-    const timer = window.setInterval(() => {
+    timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') beat();
     }, 60000);
     const onVisible = () => {
@@ -6718,9 +6732,10 @@ export default function App() {
 
   const handleLogoutApp = () => {
     const presenceUid = auth.currentUser?.uid;
-    const presenceDone = presenceUid
-      ? touchRealtimePresence(presenceUid, { online: false })
-      : Promise.resolve(false);
+    const presenceDone =
+      presenceUid && !presenceDisabledRef.current
+        ? touchRealtimePresence(presenceUid, { online: false })
+        : Promise.resolve(false);
     void presenceDone.then(() => logoutUser().catch(() => {}));
     setIsGoogleAuthenticated(false);
     setCloudSyncStatus('local');
@@ -10248,6 +10263,7 @@ export default function App() {
                 onSyncNow={() => void handleManualCloudSync()}
                 onVerifyWithCloud={handleVerifyWithCloud}
                 onlineUsers={onlineUsers}
+                presenceStatus={presenceStatus}
               />
               {canSeeDataHealth && (
                 <DataHealthCenter
@@ -10439,6 +10455,7 @@ export default function App() {
         onSyncNow={() => void handleManualCloudSync()}
         onVerifyWithCloud={handleVerifyWithCloud}
                 onlineUsers={onlineUsers}
+                presenceStatus={presenceStatus}
       />
 
       {/* Global Quick Search Modal (Ctrl+K) */}

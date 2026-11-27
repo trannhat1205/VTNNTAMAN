@@ -33,6 +33,7 @@ interface CloudSyncStatusPanelProps {
   onSyncNow: () => void;
   onVerifyWithCloud: () => Promise<Record<string, number>>;
   onlineUsers?: OnlineUserInfo[];
+  presenceStatus?: 'pending' | 'ok' | 'blocked';
 }
 
 const formatTime = (iso: string | null): string => {
@@ -56,6 +57,7 @@ export const CloudSyncStatusPanel: React.FC<CloudSyncStatusPanelProps> = ({
   onSyncNow,
   onVerifyWithCloud,
   onlineUsers,
+  presenceStatus,
 }) => {
   const [cloudCounts, setCloudCounts] = useState<Record<string, number> | null>(null);
   const [verifiedAt, setVerifiedAt] = useState<string | null>(null);
@@ -188,6 +190,18 @@ export const CloudSyncStatusPanel: React.FC<CloudSyncStatusPanelProps> = ({
           {mismatchTotal === 0
             ? `Máy này đang khớp 100% với Realtime Database (kiểm tra lúc ${formatTime(verifiedAt)}).`
             : `Có ${mismatchTotal} loại dữ liệu lệch với Cloud. Bấm “Đồng bộ ngay” rồi kiểm tra lại.`}
+        </div>
+      )}
+
+      {presenceStatus === 'blocked' && (!onlineUsers || onlineUsers.length === 0) && (
+        <div className="p-2.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-900">
+          Chưa ghi được trạng thái “đang trực tuyến” (quy tắc Realtime Database chưa cho phép). Dữ liệu bán hàng
+          vẫn đồng bộ bình thường.
+        </div>
+      )}
+      {presenceStatus === 'ok' && (!onlineUsers || onlineUsers.length === 0) && (
+        <div className="p-2.5 rounded-lg border border-sky-200 bg-sky-50/70 text-sky-900">
+          Chưa có tài khoản nào đang trực tuyến.
         </div>
       )}
 

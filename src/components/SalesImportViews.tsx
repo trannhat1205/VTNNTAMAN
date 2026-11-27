@@ -94,6 +94,12 @@ import {
   upsertQuickImportProductQuantity,
   validateCartInventory,
 } from '../utils/smartPosFeatures';
+import { CreditGradeBadge } from './CreditGradeBadge';
+import {
+  computeCustomerCreditGrade,
+  computeFrequentlyBoughtTogether,
+  isOverCreditLimit,
+} from '../utils/smartInsights';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
@@ -1574,6 +1580,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       }`}
                     />
                     <span>Tổng công nợ cũ ({customerOldDebt.customerName}):</span>
+                    {customerOldDebt.oldDebtAmount > 0 && (
+                      <CreditGradeBadge
+                        grade={computeCustomerCreditGrade(customerOldDebt.unpaidInvoices).grade}
+                      />
+                    )}
                   </span>
                   <span
                     className={`font-mono font-bold text-sm ${
@@ -1584,6 +1595,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   </span>
                 </div>
               )}
+              {customerOldDebt.hasCustomer &&
+                isOverCreditLimit(customerOldDebt.cumulativeTotalDebt, selectedCustomerObj?.creditLimit) && (
+                  <div className="p-2.5 rounded-lg border border-rose-300 bg-rose-50 text-xs font-semibold text-rose-800 flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-rose-600" />
+                    <span>
+                      Vượt hạn mức nợ: tổng nợ sau đơn này {formatVND(customerOldDebt.cumulativeTotalDebt)} &gt; hạn
+                      mức {formatVND(selectedCustomerObj?.creditLimit || 0)}. Vẫn có thể bán, nhưng nên thu bớt nợ
+                      cũ.
+                    </span>
+                  </div>
+                )}
 
               {showNewCustomerBox && (
                 <div className="p-3.5 bg-emerald-50/60 rounded-lg border border-emerald-200 space-y-3">
@@ -1769,6 +1791,42 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   };
                 })}
               />
+
+              {onCreateMultiItemSale &&
+                (() => {
+                  const anchorId =
+                    selectedProductId && selectedProductId !== '__new_product__'
+                      ? selectedProductId
+                      : posCartItems[posCartItems.length - 1]?.productId || '';
+                  if (!anchorId) return null;
+                  const together = computeFrequentlyBoughtTogether(sales, anchorId, 4).filter((b) => {
+                    const prod = products.find((p) => p.id === b.productId);
+                    return Boolean(prod) && (Number(prod!.stock) || 0) > 0;
+                  });
+                  if (together.length === 0) return null;
+                  const anchorName = products.find((p) => p.id === anchorId)?.name || '';
+                  return (
+                    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                      <span className="text-slate-500">Hay mua kèm {anchorName}:</span>
+                      {together.map((b) => (
+                        <button
+                          key={b.productId}
+                          type="button"
+                          onClick={() =>
+                            handleQuickSetCartProductQuantity(
+                              b.productId,
+                              (quickCartQuantities[b.productId] || 0) + 1
+                            )
+                          }
+                          title={`${b.count} hóa đơn từng mua cùng`}
+                          className="px-2 py-0.5 font-semibold text-emerald-800 bg-white hover:bg-emerald-50 border border-emerald-300 rounded-full"
+                        >
+                          + {b.productName}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
 
               {posCartItems.length > 0 && (
                 <div className="p-2.5 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-2">
