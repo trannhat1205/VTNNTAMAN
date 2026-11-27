@@ -107,6 +107,12 @@ import {
 } from '../utils/smartInsights';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
+import {
+  buildNameAbbreviationBaseCode,
+  generateUniqueCustomerCodeFromName,
+  generateUniqueProductCodeFromName,
+  generateUniqueSupplierCodeFromName,
+} from '../utils/businessLogic';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { VietQrPaymentModal } from './VietQrPaymentModal';
 
@@ -571,7 +577,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
       resolvedGrp = customerGroups[0] || 'Nhà nông';
     }
     const created = onCreateCustomerInline({
-      code: `KH-00${customers.length + 1}`,
+      code: generateUniqueCustomerCodeFromName(newCustName.trim(), customers),
       name: newCustName.trim(),
       phone: newCustPhone.trim(),
       email: newCustEmail.trim(),
@@ -616,7 +622,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         : warehouses[0] || 'Tâm An Mỹ Ngãi');
 
     const created = onCreateProductInline({
-      code: newProdCode.trim() || generateNextUniqueProductCode(products, resolvedProdWh),
+      code: generateUniqueProductCodeFromName(newProdName.trim(), products, resolvedProdWh),
       name: newProdName.trim(),
       category: newProdCategory,
       warehouseName: resolvedProdWh,
@@ -657,7 +663,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     const stockNum = Math.max(1, Number(newGiftStock) || 50);
 
     const createdGift = onCreateProductInline({
-      code: newGiftCode.trim() || 'QUATANG',
+      code: generateUniqueProductCodeFromName(
+        newGiftName.trim(),
+        products,
+        lockedWarehouse ||
+          (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+            ? selectedWarehouse
+            : warehouses[0] || 'Tâm An Mỹ Ngãi')
+      ),
       name: newGiftName.trim(),
       category: 'Vật tư & Dụng cụ',
       warehouseName:
@@ -1686,8 +1699,25 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   <div className="text-xs font-bold text-emerald-900">
                     Tạo khách hàng mới trực tiếp trong đơn bán
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                     <div>
+                      <label
+                        htmlFor="inline-cust-code"
+                        className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 mb-1"
+                      >
+                        <Lock className="w-3 h-3 text-slate-500" /> Mã KH (Tự sinh)
+                      </label>
+                      <input
+                        id="inline-cust-code"
+                        type="text"
+                        readOnly
+                        tabIndex={-1}
+                        value={generateUniqueCustomerCodeFromName(newCustName, customers, undefined, true)}
+                        placeholder="VD: NVHOA"
+                        className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
                       <label
                         htmlFor="inline-cust-name"
                         className="block text-[11px] font-semibold text-slate-700 mb-1"
@@ -2065,7 +2095,33 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   <div className="text-xs font-bold text-emerald-900">
                     Bổ sung vật tư nông nghiệp mới trực tiếp
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                    <div>
+                      <label
+                        htmlFor="inline-prod-code"
+                        className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 mb-1"
+                      >
+                        <Lock className="w-3 h-3 text-slate-500" /> Mã VT (Tự sinh)
+                      </label>
+                      <input
+                        id="inline-prod-code"
+                        type="text"
+                        readOnly
+                        tabIndex={-1}
+                        value={generateUniqueProductCodeFromName(
+                          newProdName,
+                          products,
+                          lockedWarehouse ||
+                            (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+                              ? selectedWarehouse
+                              : warehouses[0] || 'Tâm An Mỹ Ngãi'),
+                          undefined,
+                          true
+                        )}
+                        placeholder="Tự sinh..."
+                        className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
+                      />
+                    </div>
                     <div className="sm:col-span-2">
                       <label
                         htmlFor="inline-prod-name"
@@ -2349,16 +2405,26 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                         <div>
-                          <label htmlFor="inline-gift-code" className="block text-[11px] font-semibold text-slate-700 mb-0.5">
-                            Mã quà tặng
+                          <label htmlFor="inline-gift-code" className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 mb-0.5">
+                            <Lock className="w-3 h-3 text-slate-500" /> Mã quà (Tự sinh)
                           </label>
                           <input
                             id="inline-gift-code"
                             type="text"
-                            value={newGiftCode}
-                            onChange={(e) => setNewGiftCode(e.target.value)}
-                            placeholder="QUATANG"
-                            className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                            readOnly
+                            tabIndex={-1}
+                            value={generateUniqueProductCodeFromName(
+                              newGiftName,
+                              products,
+                              lockedWarehouse ||
+                                (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+                                  ? selectedWarehouse
+                                  : warehouses[0] || 'Tâm An Mỹ Ngãi'),
+                              undefined,
+                              true
+                            )}
+                            placeholder="Tự sinh..."
+                            className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
                           />
                         </div>
                         <div className="sm:col-span-2">
@@ -5137,7 +5203,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
         : warehouses[0] || 'Tâm An Mỹ Ngãi');
 
     const created = onCreateProductInline({
-      code: newProdCode.trim() || generateNextUniqueProductCode(products, resolvedProdWh),
+      code: generateUniqueProductCodeFromName(newProdName.trim(), products, resolvedProdWh),
       name: newProdName.trim(),
       category: newProdCategory,
       warehouseName: resolvedProdWh,
@@ -5794,7 +5860,33 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   <div className="text-xs font-bold text-emerald-900">
                     Thêm mới vật tư nhập kho trực tiếp
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                    <div>
+                      <label
+                        htmlFor="imp-inline-prod-code"
+                        className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 mb-1"
+                      >
+                        <Lock className="w-3 h-3 text-slate-500" /> Mã VT (Tự sinh)
+                      </label>
+                      <input
+                        id="imp-inline-prod-code"
+                        type="text"
+                        readOnly
+                        tabIndex={-1}
+                        value={generateUniqueProductCodeFromName(
+                          newProdName,
+                          products,
+                          lockedWarehouse ||
+                            (selectedWarehouse && selectedWarehouse !== '__new_warehouse__'
+                              ? selectedWarehouse
+                              : warehouses[0] || 'Tâm An Mỹ Ngãi'),
+                          undefined,
+                          true
+                        )}
+                        placeholder="Tự sinh..."
+                        className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
+                      />
+                    </div>
                     <div className="sm:col-span-2">
                       <label
                         htmlFor="imp-inline-prod-name"
@@ -5935,14 +6027,18 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   return {
                     value: sup.name,
                     label: `${sup.name} (${sup.phone || 'Chưa có SĐT'})`,
-                    subLabel: `${sup.address || 'Nhà cung cấp VTNN'} · Công nợ cũ NCC: ${formatVND(
+                    subLabel: `Mã NCC: ${
+                      sup.code || buildNameAbbreviationBaseCode(sup.name, { fallbackPrefix: 'NCC' })
+                    } · ${sup.address || 'Nhà cung cấp VTNN'} · Công nợ cũ NCC: ${formatVND(
                       supOld.oldDebtAmount
                     )}`,
                     badge:
                       supOld.oldDebtAmount > 0
                         ? `Nợ NCC: ${formatVND(supOld.oldDebtAmount)}`
                         : sup.phone || 'NCC',
-                    keywords: `${sup.name} ${sup.phone} ${sup.address}`,
+                    keywords: `${sup.name} ${sup.phone} ${sup.address} ${
+                      sup.code || buildNameAbbreviationBaseCode(sup.name, { fallbackPrefix: 'NCC' })
+                    }`,
                   };
                 })}
               />
@@ -5979,8 +6075,25 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   <div className="text-xs font-bold text-emerald-900">
                     Bổ sung Nhà cung cấp mới trực tiếp
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                     <div>
+                      <label
+                        htmlFor="imp-inline-sup-code"
+                        className="flex items-center gap-1 text-[11px] font-semibold text-slate-700 mb-1"
+                      >
+                        <Lock className="w-3 h-3 text-slate-500" /> Mã NCC (Tự sinh)
+                      </label>
+                      <input
+                        id="imp-inline-sup-code"
+                        type="text"
+                        readOnly
+                        tabIndex={-1}
+                        value={generateUniqueSupplierCodeFromName(newSupName, suppliers, undefined, true)}
+                        placeholder="VD: CTCPBMTAY"
+                        className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
                       <label
                         htmlFor="imp-inline-sup-name"
                         className="block text-[11px] font-semibold text-slate-700 mb-1"

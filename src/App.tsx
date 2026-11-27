@@ -127,6 +127,9 @@ import {
   formatSelectedWarehousesBadge,
   formatVND,
   generateNextUniqueProductCode,
+  generateUniqueCustomerCodeFromName,
+  generateUniqueProductCodeFromName,
+  generateUniqueSupplierCodeFromName,
   generateSequentialVoucherCode,
   generateSmartNotifications,
   generateUniqueRecordId,
@@ -330,6 +333,10 @@ export default function App() {
   );
   const [backups, setBackups] = useState<BackupEntry[]>(initialWorkspace.backups);
   const [suppliers, setSuppliers] = useState<SupplierProfile[]>(initialWorkspace.suppliers);
+  const customersRef = useRef<CustomerProfile[]>(customers);
+  const suppliersRef = useRef<SupplierProfile[]>(suppliers);
+  customersRef.current = customers;
+  suppliersRef.current = suppliers;
   const [warehouses, setWarehouses] = useState<string[]>(initialWorkspace.warehouses);
   const [customerGroups, setCustomerGroups] = useState<string[]>(
     initialWorkspace.customerGroups
@@ -4294,7 +4301,7 @@ export default function App() {
       destProduct = {
         ...source,
         id: generateUniqueRecordId('prod'),
-        code: generateNextUniqueProductCode(productsRef.current, destWh),
+        code: generateUniqueProductCodeFromName(source.name, productsRef.current, destWh),
         warehouseName: destWh,
         stock: qty,
         importPrice: unitCost,
@@ -4588,15 +4595,18 @@ export default function App() {
       (currentStaff.assignedWarehouse !== 'Tất cả kho'
         ? currentStaff.assignedWarehouse
         : warehouses[0] || 'Tâm An Mỹ Ngãi');
+    const autoSupplierCode = generateUniqueSupplierCodeFromName(data.name, suppliersRef.current);
     const created: SupplierProfile = {
       ...data,
+      code: autoSupplierCode,
       warehouseName: resolvedWh,
       ownerId: resolveOwnerUidForWarehouse(resolvedWh),
       id: generateUniqueRecordId('sup'),
       createdAt: new Date().toISOString(),
     };
+    suppliersRef.current = [created, ...suppliersRef.current];
     setSuppliers((prev) => [created, ...prev]);
-    showToast(`Đã thêm Nhà cung cấp mới: ${created.name} (${resolvedWh})`);
+    showToast(`Đã thêm Nhà cung cấp mới: ${created.name} [${autoSupplierCode}] (${resolvedWh})`);
     return created;
   };
 
@@ -4607,20 +4617,23 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh = lockedWarehouse || data.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
-    const rawCode = (data.code || '').trim();
-    const autoSafeCode = generateNextUniqueProductCode(
-      productsRef.current,
-      resolvedWh,
-      editingId
+    const existingForCode = editingId
+      ? productsRef.current.find((p) => p.id === editingId)
+      : undefined;
+    const keepExistingCode = Boolean(
+      existingForCode &&
+        (existingForCode.code || '').trim() &&
+        normalizeVietnameseSearch(existingForCode.name) === normalizeVietnameseSearch(data.name) &&
+        !findCollidingProductCodeInWarehouse(
+          existingForCode.code,
+          productsRef.current,
+          resolvedWh,
+          editingId
+        )
     );
-    const colliding = rawCode
-      ? findCollidingProductCodeInWarehouse(rawCode, productsRef.current, resolvedWh, editingId)
-      : null;
-    const resolvedCode = !rawCode
-      ? autoSafeCode
-      : colliding && !editingId
-      ? autoSafeCode
-      : rawCode;
+    const resolvedCode = keepExistingCode
+      ? (existingForCode as ProductItem).code.trim()
+      : generateUniqueProductCodeFromName(data.name, productsRef.current, resolvedWh, editingId);
 
     if (editingId) {
       const existing = productsRef.current.find((p) => p.id === editingId);
@@ -4923,6 +4936,22 @@ export default function App() {
       (currentStaff.assignedWarehouse !== 'Tất cả kho'
         ? currentStaff.assignedWarehouse
         : warehouses[0] || 'Tâm An Mỹ Ngãi');
+    const customerBeforeEdit = editingId
+      ? customersRef.current.find((c) => c.id === editingId)
+      : undefined;
+    const keepCustomerCode = Boolean(
+      customerBeforeEdit &&
+        (customerBeforeEdit.code || '').trim() &&
+        normalizeVietnameseSearch(customerBeforeEdit.name) === normalizeVietnameseSearch(data.name) &&
+        !customersRef.current.some(
+          (c) =>
+            c.id !== editingId &&
+            (c.code || '').trim().toUpperCase() === customerBeforeEdit.code.trim().toUpperCase()
+        )
+    );
+    const resolvedCustomerCode = keepCustomerCode
+      ? (customerBeforeEdit as CustomerProfile).code.trim()
+      : generateUniqueCustomerCodeFromName(data.name, customersRef.current, editingId);
     if (editingId) {
       const existing = customers.find((c) => c.id === editingId);
       let updatedRef: CustomerProfile | null = null;
@@ -4932,6 +4961,7 @@ export default function App() {
           const updated = {
             ...c,
             ...data,
+            code: resolvedCustomerCode,
             warehouseName: c.warehouseName || resolvedWh,
             updatedAt: nowIso,
           };
@@ -4946,7 +4976,7 @@ export default function App() {
         recordAuditLog({
           actionCategory: 'update',
           targetEntity: 'customer',
-          targetCode: data.code || existing.code,
+          targetCode: resolvedCustomerCode || existing.code,
           warehouseName: existing.warehouseName || resolvedWh,
           summary: `Cập nhật hồ sơ khách hàng ${data.name} (${data.phone})`,
           details: `Nhóm KH: ${data.group} · Địa chỉ: ${data.address}`,
@@ -4957,6 +4987,7 @@ export default function App() {
       return (
         updatedRef || {
           ...data,
+          code: resolvedCustomerCode,
           warehouseName: resolvedWh,
           id: editingId,
           ownerId: activeUid,
@@ -4967,12 +4998,14 @@ export default function App() {
     } else {
       const created: CustomerProfile = {
         ...data,
+        code: resolvedCustomerCode,
         warehouseName: resolvedWh,
         id: generateUniqueRecordId('cust'),
         ownerId: resolveOwnerUidForWarehouse(resolvedWh),
         createdAt: nowIso,
         updatedAt: nowIso,
       };
+      customersRef.current = [created, ...customersRef.current];
       setCustomers((prev) => [created, ...prev]);
       recordAuditLog({
         actionCategory: 'create',
@@ -6215,7 +6248,9 @@ export default function App() {
       }
       added.push({
         id: `prod_xl_${Date.now()}_${idx}`,
-        code: String(r['Mã VT'] || r['Mã Vật Tư'] || `VT-XL${products.length + idx + 1}`).trim(),
+        code:
+          String(r['Mã VT'] || r['Mã Vật Tư'] || '').trim() ||
+          generateUniqueProductCodeFromName(name, [...added, ...productsRef.current], wh),
         name,
         category: cat || 'Phân bón',
         warehouseName: wh,
@@ -6284,7 +6319,9 @@ export default function App() {
       const wh = lockedWarehouse || String(r['Kho'] || defaultWh).trim();
       added.push({
         id: `cust_xl_${Date.now()}_${idx}`,
-        code: String(r['Mã KH'] || `KH-XL${customers.length + idx + 1}`).trim(),
+        code:
+          String(r['Mã KH'] || '').trim() ||
+          generateUniqueCustomerCodeFromName(name, [...added, ...customersRef.current]),
         name,
         phone: phone || '',
         email: String(r['Email'] || '').trim(),
@@ -8866,7 +8903,7 @@ export default function App() {
       let working = [...productsRef.current];
       const renameMap = new Map<string, string>();
       for (const p of toRename) {
-        const nextCode = generateNextUniqueProductCode(working, p.warehouseName, p.id);
+        const nextCode = generateUniqueProductCodeFromName(p.name, working, p.warehouseName, p.id);
         renameMap.set(p.id, nextCode);
         working = working.map((x) => (x.id === p.id ? { ...x, code: nextCode } : x));
       }
@@ -10562,7 +10599,7 @@ export default function App() {
               onAddCustomer={(input) =>
                 handleSaveCustomer({
                   ...input,
-                  code: `KH-00${customers.length + 1}`,
+                  code: '',
                   totalPurchased: 0,
                   totalDebt: 0,
                 })

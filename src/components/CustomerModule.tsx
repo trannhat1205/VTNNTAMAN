@@ -51,6 +51,10 @@ import { ExcelDataBar } from './ExcelDataBar';
 import { CreditGradeBadge } from './CreditGradeBadge';
 import { computeCustomerCreditGrade, isOverCreditLimit } from '../utils/smartInsights';
 import { SearchableSelect } from './SearchableSelect';
+import {
+  generateUniqueCustomerCodeFromName,
+  stripVietnameseToUppercaseAscii,
+} from '../utils/businessLogic';
 
 interface CustomerModuleProps {
   customers: CustomerProfile[];
@@ -203,6 +207,25 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
     });
   }, [sales, activeEntry, itemsFromDate, itemsToDate, onlyUnpaidItems]);
 
+  const lockedCustomerCodePreview = (() => {
+    const cleanName = formName.trim();
+    if (editingCustomer) {
+      const sameName =
+        stripVietnameseToUppercaseAscii(cleanName) ===
+        stripVietnameseToUppercaseAscii(editingCustomer.name.trim());
+      const ownCode = (editingCustomer.code || '').trim();
+      const ownCodeTaken =
+        ownCode &&
+        customers.some(
+          (c) =>
+            c.id !== editingCustomer.id && (c.code || '').trim().toUpperCase() === ownCode.toUpperCase()
+        );
+      if (sameName && ownCode && !ownCodeTaken) return ownCode;
+      return generateUniqueCustomerCodeFromName(cleanName, customers, editingCustomer.id, true);
+    }
+    return generateUniqueCustomerCodeFromName(cleanName, customers, undefined, true);
+  })();
+
   const resetCustomerFormToBlank = () => {
     setFormCode('');
     setFormName('');
@@ -277,7 +300,9 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
     const nextNum = String(customers.length + 1).padStart(3, '0');
     const saved = onSaveCustomer(
       {
-        code: formCode.trim() || `KH-${nextNum}`,
+        code:
+          lockedCustomerCodePreview ||
+          generateUniqueCustomerCodeFromName(formName, customers, editingCustomer?.id),
         name: formName.trim(),
         phone: formPhone.trim(),
         email: formEmail.trim(),
@@ -1313,15 +1338,18 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                     htmlFor="cust-code"
                     className="block text-xs font-semibold text-slate-700 mb-1"
                   >
-                    Mã KH (Tự sinh nếu trống)
+                    <span className="inline-flex items-center gap-1">
+                      <Lock className="w-3 h-3 text-slate-500" /> Mã KH (Tự sinh)
+                    </span>
                   </label>
                   <input
                     id="cust-code"
                     type="text"
-                    value={formCode}
-                    onChange={(e) => setFormCode(e.target.value)}
-                    placeholder={`KH-00${customers.length + 1}`}
-                    className="w-full px-3 py-2 text-sm font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                    readOnly
+                    tabIndex={-1}
+                    value={lockedCustomerCodePreview}
+                    placeholder="Tự sinh (VD: NVHOA)"
+                    className="w-full px-3 py-2 text-sm font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-lg cursor-not-allowed select-all"
                   />
                 </div>
                 <div className="sm:col-span-2">

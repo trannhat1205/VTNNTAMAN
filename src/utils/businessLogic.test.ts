@@ -54,6 +54,10 @@ import {
   formatSelectedWarehousesBadge,
   generateFiscalYearOptions,
   generateNextUniqueProductCode,
+  buildNameAbbreviationBaseCode,
+  generateUniqueCustomerCodeFromName,
+  generateUniqueProductCodeFromName,
+  generateUniqueSupplierCodeFromName,
   generateSmartNotifications,
   generateSmartReportRecommendations,
   getDefaultPermissionsForPosition,
@@ -4133,9 +4137,57 @@ test('Phase 2 & 3: Non-colliding SKU generator, distinct grouped POS/PN counters
   assert.equal(fullRet.cashRefundAmount, 300000);
 });
 
+test('Abbreviation codes: customers, products and suppliers follow the initials + last word rule', () => {
+  const cust = (id: string, code: string) => ({ id, code });
+  assert.equal(buildNameAbbreviationBaseCode('Ông Nguyễn Văn Hòa', { stripLeadingHonorific: true }), 'NVHOA');
+  assert.equal(generateUniqueCustomerCodeFromName('Ông Nguyễn Văn Hòa', []), 'NVHOA');
+  assert.equal(generateUniqueCustomerCodeFromName('Ông Nguyễn Văn Hòa', [cust('1', 'NVHOA')]), 'NVHOA1');
+  assert.equal(
+    generateUniqueCustomerCodeFromName('Nguyễn Vũ Hòa', [cust('1', 'NVHOA'), cust('2', 'NVHOA1')]),
+    'NVHOA2'
+  );
+  // deleted middle number is never reused
+  assert.equal(
+    generateUniqueCustomerCodeFromName('Nguyễn Văn Hòa', [cust('1', 'NVHOA'), cust('3', 'nvhoa2')]),
+    'NVHOA3'
+  );
+  assert.equal(generateUniqueCustomerCodeFromName('Bà Trần Thị Lan', []), 'TTLAN');
+  assert.equal(generateUniqueCustomerCodeFromName('Chú Bảy', []), 'CBAY');
+  assert.equal(generateUniqueCustomerCodeFromName('Hòa', []), 'HOA');
+  assert.equal(generateUniqueCustomerCodeFromName('', [], undefined, true), '');
+  assert.equal(generateUniqueCustomerCodeFromName('', []), 'KH');
+  // editing a customer must not collide with its own code
+  assert.equal(generateUniqueCustomerCodeFromName('Ông Nguyễn Văn Hòa', [cust('1', 'NVHOA')], '1'), 'NVHOA');
 
+  const prod = (id: string, code: string, warehouseName: string) => ({ id, code, warehouseName });
+  const wh = 'Tâm An Mỹ Ngãi';
+  assert.equal(generateUniqueProductCodeFromName('Phân bón hữu cơ vi sinh Tâm An', [], wh), 'PBHCVSTAN');
+  assert.equal(
+    generateUniqueProductCodeFromName('Phân bón hữu cơ vi sinh Tâm An', [prod('1', 'PBHCVSTAN', wh)], wh),
+    'PBHCVSTAN1'
+  );
+  assert.equal(
+    generateUniqueProductCodeFromName(
+      'Phân bón hữu cơ vi sinh Tâm An',
+      [prod('1', 'PBHCVSTAN', 'Tâm An Cao Lãnh')],
+      wh
+    ),
+    'PBHCVSTAN'
+  );
+  assert.equal(generateUniqueProductCodeFromName('NPK 20-20-15', [], wh), 'N2215');
+  assert.equal(generateUniqueProductCodeFromName('NPK 20-20-15', [prod('1', 'N2215', wh)], wh), 'N2215-1');
+  assert.equal(generateUniqueProductCodeFromName('GAP DIỆT MẦM KÍCH RỄ', [], wh), 'GDMKRE');
+  assert.equal(generateUniqueProductCodeFromName('LÂN 2 CHIỀU', [], wh), 'L2CHIEU');
 
-
-
-
-
+  const sup = (id: string, name: string, code?: string) => ({ id, name, code });
+  assert.equal(generateUniqueSupplierCodeFromName('Công ty CP Phân bón Miền Tây', []), 'CTCPBMTAY');
+  // legacy supplier without a stored code still blocks the same abbreviation
+  assert.equal(
+    generateUniqueSupplierCodeFromName('Công ty CP Phân bón Miền Tây', [
+      sup('1', 'Công ty CP Phân bón Miền Tây'),
+    ]),
+    'CTCPBMTAY1'
+  );
+  assert.equal(generateUniqueSupplierCodeFromName('VTNN Lúa Xanh', []), 'VLXANH');
+  assert.equal(generateUniqueSupplierCodeFromName('', [], undefined, true), '');
+});

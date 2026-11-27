@@ -40,6 +40,12 @@ import {
   exportSupplierPaymentPDF,
 } from '../utils/exportReports';
 import { SearchableSelect } from './SearchableSelect';
+import { Lock } from 'lucide-react';
+import {
+  buildNameAbbreviationBaseCode,
+  generateUniqueCustomerCodeFromName,
+  generateUniqueSupplierCodeFromName,
+} from '../utils/businessLogic';
 import { CrossLinkChip, FocusedLinkBanner } from './VoucherCrossLinkUI';
 
 export interface CreateReceiptVoucherInput {
@@ -309,7 +315,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
     setShowQuickCustomer(false);
     setFeedback({
       type: 'success',
-      text: `Đã thêm khách hàng "${created.name}" và chọn vào phiếu thu!`,
+      text: `Đã thêm khách hàng "${created.name}" [${created.code}] và chọn vào phiếu thu!`,
     });
   };
 
@@ -720,13 +726,27 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
               {showQuickCustomer && (
                 <div className="mt-2.5 p-3.5 rounded-lg bg-emerald-50/70 border border-emerald-200 space-y-2.5">
                   <p className="text-xs font-semibold text-emerald-950">Thêm nhanh hồ sơ khách hàng</p>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <div className="relative">
+                      <Lock className="absolute left-2 top-2 w-3 h-3 text-slate-500" />
+                      <input
+                        id="rv-quick-cust-code"
+                        type="text"
+                        readOnly
+                        tabIndex={-1}
+                        title="Mã KH tự sinh theo họ tên (khóa, không sửa tay)"
+                        value={generateUniqueCustomerCodeFromName(newCustName, customers, undefined, true)}
+                        placeholder="Mã KH tự sinh"
+                        className="w-full pl-6 pr-2 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
+                      />
+                    </div>
                     <input
+                      id="rv-quick-cust-name"
                       type="text"
                       value={newCustName}
                       onChange={(e) => setNewCustName(e.target.value)}
                       placeholder="Họ tên khách hàng *"
-                      className="px-2.5 py-1.5 text-xs bg-white border border-stone-300 rounded-md"
+                      className="sm:col-span-2 px-2.5 py-1.5 text-xs bg-white border border-stone-300 rounded-md"
                     />
                     <input
                       type="text"
@@ -1590,9 +1610,12 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
   );
 
   const supplierOptions: SearchableOptionItem[] = useMemo(() => {
-    const namesMap = new Map<string, { name: string; phone: string; address: string }>();
+    const namesMap = new Map<
+      string,
+      { name: string; phone: string; address: string; code?: string }
+    >();
     for (const s of suppliers) {
-      namesMap.set(s.name, { name: s.name, phone: s.phone, address: s.address });
+      namesMap.set(s.name, { name: s.name, phone: s.phone, address: s.address, code: s.code });
     }
     for (const imp of imports) {
       if (!namesMap.has(imp.supplierName)) {
@@ -1609,15 +1632,16 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
         { supplierName: sup.name, supplierPhone: sup.phone },
         0
       );
+      const supCode = sup.code || buildNameAbbreviationBaseCode(sup.name, { fallbackPrefix: 'NCC' });
       return {
         value: sup.name,
         label: `${sup.name} (${sup.phone || 'Chưa có SĐT'})`,
-        subLabel: sup.address || 'Nhà cung cấp vật tư nông nghiệp',
+        subLabel: `Mã NCC: ${supCode} · ${sup.address || 'Nhà cung cấp vật tư nông nghiệp'}`,
         badge:
           preview.totalPreviousDebt > 0
             ? `Nợ NCC (${preview.unpaidReceiptsOrdered.length} phiếu): ${formatVND(preview.totalPreviousDebt)}`
             : 'Không nợ',
-        keywords: `${sup.name} ${sup.phone}`,
+        keywords: `${sup.name} ${sup.phone} ${supCode}`,
       };
     });
   }, [suppliers, imports]);
@@ -1675,7 +1699,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
     setShowQuickSupplier(false);
     setFeedback({
       type: 'success',
-      text: `Đã thêm Nhà cung cấp "${created.name}" và chọn vào phiếu chi!`,
+      text: `Đã thêm Nhà cung cấp "${created.name}" [${created.code || ''}] và chọn vào phiếu chi!`,
     });
   };
 
@@ -2083,13 +2107,27 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
               {showQuickSupplier && (
                 <div className="mt-2.5 p-3.5 rounded-lg bg-emerald-50/70 border border-emerald-200 space-y-2.5">
                   <p className="text-xs font-semibold text-emerald-950">Thêm nhanh Nhà cung cấp mới</p>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <div className="relative">
+                      <Lock className="absolute left-2 top-2 w-3 h-3 text-slate-500" />
+                      <input
+                        id="pv-quick-sup-code"
+                        type="text"
+                        readOnly
+                        tabIndex={-1}
+                        title="Mã NCC tự sinh theo tên (khóa, không sửa tay)"
+                        value={generateUniqueSupplierCodeFromName(newSupName, suppliers, undefined, true)}
+                        placeholder="Mã NCC tự sinh"
+                        className="w-full pl-6 pr-2 py-1.5 text-xs font-mono font-bold bg-slate-100 text-emerald-800 border border-slate-200 rounded-md cursor-not-allowed select-all"
+                      />
+                    </div>
                     <input
+                      id="pv-quick-sup-name"
                       type="text"
                       value={newSupName}
                       onChange={(e) => setNewSupName(e.target.value)}
                       placeholder="Tên Nhà cung cấp *"
-                      className="px-2.5 py-1.5 text-xs bg-white border border-stone-300 rounded-md"
+                      className="sm:col-span-2 px-2.5 py-1.5 text-xs bg-white border border-stone-300 rounded-md"
                     />
                     <input
                       type="text"

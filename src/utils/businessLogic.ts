@@ -5899,3 +5899,134 @@ export function buildSupplierReturnRefundVouchers(params: {
   };
   return { payment, receipt };
 }
+
+/* ------------------------------------------------------------------ */
+/* Auto-generated abbreviation codes (Mã KH / Mã VT / Mã NCC)          */
+/* ------------------------------------------------------------------ */
+
+const HONORIFIC_TOKENS = new Set([
+  'ONG', 'BA', 'ANH', 'CHI', 'CO', 'CHU', 'BAC', 'DI', 'DUONG', 'CAU', 'MO', 'EM', 'THAY',
+]);
+
+export function stripVietnameseToUppercaseAscii(text: string): string {
+  return String(text || '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
+}
+
+/**
+ * First letter of every word except the last + the whole last word, ASCII uppercase.
+ * "Ông Nguyễn Văn Hòa" -> NVHOA (leading honorific dropped for customers).
+ */
+export function buildNameAbbreviationBaseCode(
+  name: string,
+  options?: { stripLeadingHonorific?: boolean; fallbackPrefix?: string }
+): string {
+  const tokens = stripVietnameseToUppercaseAscii(name || '').match(/[A-Z0-9]+/g) || [];
+  if (tokens.length === 0) {
+    return stripVietnameseToUppercaseAscii(options?.fallbackPrefix || '');
+  }
+  if (options?.stripLeadingHonorific) {
+    while (tokens.length >= 3 && HONORIFIC_TOKENS.has(tokens[0] ?? '')) {
+      tokens.shift();
+    }
+  }
+  if (tokens.length === 1) return tokens[0] ?? '';
+  return (
+    tokens
+      .slice(0, -1)
+      .map((t) => t.charAt(0))
+      .join('') + (tokens[tokens.length - 1] ?? '')
+  );
+}
+
+/** Appends 1, 2, 3... (after the highest suffix already used) when the base code exists. */
+export function resolveUniqueAbbreviationCode(baseRaw: string, existingCodes: Iterable<string>): string {
+  const base = (baseRaw || '').trim().toUpperCase();
+  if (!base) return '';
+  const used = new Set<string>();
+  for (const c of existingCodes) {
+    const clean = (c || '').trim().toUpperCase();
+    if (clean) used.add(clean);
+  }
+  if (!used.has(base)) return base;
+  const sep = /[0-9]$/.test(base) ? '-' : '';
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('^' + escaped + '-?(\\d+)$');
+  let maxSuffix = 0;
+  used.forEach((c) => {
+    const m = c.match(re);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n) && n > maxSuffix) maxSuffix = n;
+    }
+  });
+  let n = Math.max(1, maxSuffix + 1);
+  while (used.has(`${base}${sep}${n}`)) n += 1;
+  return `${base}${sep}${n}`;
+}
+
+export function generateUniqueCustomerCodeFromName(
+  name: string,
+  customers: Array<Pick<CustomerProfile, 'id' | 'code'>>,
+  excludeCustomerId?: string,
+  emptyWhenBlank = false
+): string {
+  const base = buildNameAbbreviationBaseCode(name, {
+    stripLeadingHonorific: true,
+    fallbackPrefix: emptyWhenBlank ? '' : 'KH',
+  });
+  if (!base) return '';
+  return resolveUniqueAbbreviationCode(
+    base,
+    (customers || []).filter((c) => !excludeCustomerId || c.id !== excludeCustomerId).map((c) => c.code)
+  );
+}
+
+export function generateUniqueProductCodeFromName(
+  name: string,
+  products: Array<Pick<ProductItem, 'id' | 'code' | 'warehouseName'>>,
+  warehouseName?: string | null,
+  excludeProductId?: string,
+  emptyWhenBlank = false
+): string {
+  const base = buildNameAbbreviationBaseCode(name, {
+    stripLeadingHonorific: false,
+    fallbackPrefix: emptyWhenBlank ? '' : 'VT',
+  });
+  if (!base) return '';
+  return resolveUniqueAbbreviationCode(
+    base,
+    (products || [])
+      .filter((p) => !excludeProductId || p.id !== excludeProductId)
+      .filter((p) => {
+        if (warehouseName && p.warehouseName) {
+          return areWarehouseNamesEquivalent(p.warehouseName, warehouseName);
+        }
+        return true;
+      })
+      .map((p) => p.code)
+  );
+}
+
+export function generateUniqueSupplierCodeFromName(
+  name: string,
+  suppliers: Array<Pick<SupplierProfile, 'id' | 'name'> & { code?: string }>,
+  excludeSupplierId?: string,
+  emptyWhenBlank = false
+): string {
+  const base = buildNameAbbreviationBaseCode(name, {
+    stripLeadingHonorific: false,
+    fallbackPrefix: emptyWhenBlank ? '' : 'NCC',
+  });
+  if (!base) return '';
+  return resolveUniqueAbbreviationCode(
+    base,
+    (suppliers || [])
+      .filter((s) => !excludeSupplierId || s.id !== excludeSupplierId)
+      .map((s) => s.code?.trim() || buildNameAbbreviationBaseCode(s.name, { fallbackPrefix: 'NCC' }))
+  );
+}
