@@ -91,6 +91,12 @@ interface InventoryViewProps {
     note?: string;
   }) => StockAdjustmentRecord | null;
   onDeleteStockAdjustment?: (adjustmentId: string) => void;
+  onTransferStock?: (params: {
+    productId: string;
+    destinationWarehouse: string;
+    quantity: number;
+    note?: string;
+  }) => boolean;
   onReconcileProductStock?: (productId: string) => void;
   onImportProductsFromExcel: (rows: Record<string, unknown>[]) => number;
   onQuickRestock: (productId: string) => void;
@@ -116,6 +122,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onDeleteProduct,
   onExecuteStocktake,
   onDeleteStockAdjustment,
+  onTransferStock,
   onReconcileProductStock,
   onImportProductsFromExcel,
   onQuickRestock,
@@ -159,6 +166,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [expiryDate, setExpiryDate] = useState('');
   const [barcode, setBarcode] = useState('');
   const [dosageGuide, setDosageGuide] = useState('');
+  const [groupPriceInputs, setGroupPriceInputs] = useState<Record<string, string>>({});
 
   // Stocktake Modal (Kiểm kê & Điều chỉnh tồn kho KK-YYMM-XXX)
   const [isStocktakeModalOpen, setIsStocktakeModalOpen] = useState(false);
@@ -167,6 +175,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [stocktakeReason, setStocktakeReason] = useState('Kiểm kê định kỳ');
   const [stocktakeNote, setStocktakeNote] = useState('');
   const [stocktakeFeedback, setStocktakeFeedback] = useState<string | null>(null);
+
+  // Warehouse transfer modal (Chuyển kho CK-YYMM-XXX)
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
+  const [transferProductId, setTransferProductId] = useState('');
+  const [transferDestWarehouse, setTransferDestWarehouse] = useState('');
+  const [transferQty, setTransferQty] = useState('1');
+  const [transferNote, setTransferNote] = useState('');
   const [showSmartReorderPanel, setShowSmartReorderPanel] = useState(true);
   const [barcodeScanTarget, setBarcodeScanTarget] = useState<'search' | 'product_modal' | null>(null);
 
@@ -420,6 +435,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setExpiryDate('');
     setBarcode('');
     setDosageGuide('');
+    setGroupPriceInputs({});
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -451,6 +467,11 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setExpiryDate(p.expiryDate || '');
     setBarcode(p.barcode || '');
     setDosageGuide(p.dosageGuide || '');
+    setGroupPriceInputs(
+      Object.fromEntries(
+        Object.entries(p.groupPrices || {}).map(([g, v]) => [g, String(v)])
+      )
+    );
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -536,6 +557,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         expiryDate: expiryDate.trim() || undefined,
         barcode: barcode.trim() || undefined,
         dosageGuide: dosageGuide.trim() || undefined,
+        groupPrices: (() => {
+          const entries = Object.entries(groupPriceInputs)
+            .map(([g, v]) => [g, Math.round(Number(v) || 0)] as const)
+            .filter(([, v]) => v > 0);
+          return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+        })(),
       },
       editingProduct?.id
     );
@@ -902,6 +929,29 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               <span>Áp dụng định mức thông minh</span>
             </button>
           )}
+          {onTransferStock &&
+            canPerformRoleAction(role, 'edit_record') &&
+            !lockedWarehouse &&
+            warehouses.length >= 2 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const first = scopedBaseProducts.find((p) => (Number(p.stock) || 0) > 0);
+                  setTransferProductId(first?.id || '');
+                  const firstWh = first?.warehouseName || '';
+                  setTransferDestWarehouse(
+                    warehouses.find((w) => !areWarehouseNamesEquivalent(w, firstWh)) || ''
+                  );
+                  setTransferQty('1');
+                  setTransferNote('');
+                  setIsTransferModalOpen(true);
+                }}
+                className="px-3.5 py-2 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-lg transition-colors flex items-center justify-center gap-1.5 shrink-0"
+              >
+                <Warehouse className="w-4 h-4" />
+                <span>Chuyển kho</span>
+              </button>
+            )}
           {onExecuteStocktake && canPerformRoleAction(role, 'edit_record') && (
             <button
               type="button"
@@ -1819,6 +1869,34 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 </div>
               )}
 
+              <details className="rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2">
+                <summary className="cursor-pointer text-xs font-semibold text-slate-700">
+                  Giá theo nhóm khách (không bắt buộc)
+                  {Object.values(groupPriceInputs).some((v) => Number(v) > 0) ? ' · đang có giá riêng' : ''}
+                </summary>
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {Array.from(new Set(customers.map((c) => (c.group || '').trim()).filter(Boolean))).map((g) => (
+                    <label key={g} className="text-[11px] font-semibold text-slate-600">
+                      {g}
+                      <input
+                        type="number"
+                        min={0}
+                        value={groupPriceInputs[g] ?? ''}
+                        onChange={(e) => setGroupPriceInputs((prev) => ({ ...prev, [g]: e.target.value }))}
+                        placeholder={`Giá lẻ: ${sellPrice || 0}`}
+                        className="mt-0.5 w-full px-2.5 py-1.5 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                      />
+                    </label>
+                  ))}
+                  {customers.length === 0 && (
+                    <p className="text-[11px] text-slate-400">Chưa có khách hàng nào để lập nhóm giá.</p>
+                  )}
+                </div>
+                <p className="mt-1.5 text-[10px] text-slate-400">
+                  Khi bán cho khách thuộc nhóm này, đơn giá tự điền theo giá riêng (để trống = dùng giá lẻ).
+                </p>
+              </details>
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label
@@ -2433,6 +2511,156 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       )}
 
       {/* Stocktake Modal (Kiểm kê kho & Điều chỉnh tồn KK-YYMM-XXX) */}
+      {isTransferModalOpen &&
+        onTransferStock &&
+        (() => {
+          const tProd = products.find((p) => p.id === transferProductId) || null;
+          const tStock = Math.max(0, Number(tProd?.stock) || 0);
+          const tSrcWh = tProd?.warehouseName || '';
+          const tQty = Math.round(Number(transferQty) || 0);
+          const destOptions = warehouses.filter((w) => !areWarehouseNamesEquivalent(w, tSrcWh));
+          const canSubmit = Boolean(tProd) && Boolean(transferDestWarehouse) && tQty >= 1 && tQty <= tStock;
+          return (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-3 sm:p-4"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Chuyển hàng giữa các kho"
+            >
+              <div className="bg-white rounded-2xl border border-sky-200 shadow-2xl w-full max-w-md overflow-hidden">
+                <div className="px-5 py-4 bg-sky-50/90 border-b border-sky-200 flex items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                      <Warehouse className="w-4 h-4 text-sky-700 shrink-0" />
+                      <span>Chuyển hàng giữa các kho</span>
+                    </h3>
+                    <p className="text-[11px] text-sky-900 mt-0.5">
+                      Trừ kho nguồn, cộng kho đích theo giá vốn bình quân, tạo 2 phiếu CK liên kết
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsTransferModalOpen(false)}
+                    className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+                    aria-label="Đóng"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!canSubmit || !tProd) return;
+                    const ok = onTransferStock({
+                      productId: tProd.id,
+                      destinationWarehouse: transferDestWarehouse,
+                      quantity: tQty,
+                      note: transferNote,
+                    });
+                    if (ok) setIsTransferModalOpen(false);
+                  }}
+                  className="p-5 space-y-3.5 text-xs"
+                >
+                  <div>
+                    <label htmlFor="transfer-product" className="block font-semibold text-slate-700 mb-1">
+                      Vật tư cần chuyển *
+                    </label>
+                    <select
+                      id="transfer-product"
+                      value={transferProductId}
+                      onChange={(e) => {
+                        const next = products.find((p) => p.id === e.target.value);
+                        setTransferProductId(e.target.value);
+                        setTransferDestWarehouse(
+                          warehouses.find((w) => !areWarehouseNamesEquivalent(w, next?.warehouseName || '')) || ''
+                        );
+                        setTransferQty('1');
+                      }}
+                      className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
+                    >
+                      {scopedBaseProducts
+                        .filter((p) => (Number(p.stock) || 0) > 0)
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} — {p.warehouseName || 'Kho'} (tồn {p.stock} {p.unit})
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label htmlFor="transfer-dest" className="block font-semibold text-slate-700 mb-1">
+                        Kho đích *
+                      </label>
+                      <select
+                        id="transfer-dest"
+                        value={transferDestWarehouse}
+                        onChange={(e) => setTransferDestWarehouse(e.target.value)}
+                        className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
+                      >
+                        {destOptions.map((w) => (
+                          <option key={w} value={w}>
+                            {w}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label htmlFor="transfer-qty" className="block font-semibold text-slate-700 mb-1">
+                        Số lượng * (tối đa {tStock})
+                      </label>
+                      <input
+                        id="transfer-qty"
+                        type="number"
+                        min={1}
+                        max={tStock}
+                        value={transferQty}
+                        onChange={(e) => setTransferQty(e.target.value)}
+                        className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="transfer-note" className="block font-semibold text-slate-700 mb-1">
+                      Ghi chú
+                    </label>
+                    <input
+                      id="transfer-note"
+                      type="text"
+                      value={transferNote}
+                      onChange={(e) => setTransferNote(e.target.value)}
+                      placeholder="VD: Điều hàng cho kho Cao Lãnh"
+                      className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
+                    />
+                  </div>
+                  {tProd && (
+                    <div className="p-2.5 bg-sky-50 border border-sky-200 rounded-lg font-mono text-[11px] text-slate-700">
+                      {tSrcWh}: {tStock} → {Math.max(0, tStock - (tQty || 0))} {tProd.unit} · Giá vốn chuyển:{' '}
+                      {formatVND(tProd.importPrice)}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsTransferModalOpen(false)}
+                      className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                    >
+                      Hủy
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={!canSubmit}
+                      className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg"
+                    >
+                      Xác nhận chuyển kho
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          );
+        })()}
+
       {isStocktakeModalOpen && onExecuteStocktake && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-3 sm:p-4"

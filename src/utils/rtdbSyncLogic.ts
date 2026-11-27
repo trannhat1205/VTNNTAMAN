@@ -111,6 +111,21 @@ export interface OnlineUserSummary {
 
 export const PRESENCE_ONLINE_TTL_MS = 150000;
 
+/** Keeps live presence fields when a directory profile is rewritten with `set` (otherwise every profile sync wipes them). */
+export function preservePresenceFields<T extends object>(
+  cleanProfile: T,
+  existing: Partial<RtdbUserDirectoryProfile> | null | undefined
+): T {
+  if (!existing || typeof existing !== 'object') return cleanProfile;
+  const merged: Record<string, unknown> = { ...(cleanProfile as Record<string, unknown>) };
+  if (typeof existing.presenceOnline === 'boolean') merged.presenceOnline = existing.presenceOnline;
+  if (typeof existing.lastSeenAt === 'number' && Number.isFinite(existing.lastSeenAt)) {
+    merged.lastSeenAt = existing.lastSeenAt;
+  }
+  if (typeof existing.presenceWarehouse === 'string') merged.presenceWarehouse = existing.presenceWarehouse;
+  return merged as T;
+}
+
 /** Users whose heartbeat is fresh (presenceOnline && lastSeenAt within TTL). */
 export function deriveOnlineUsersFromDirectory(
   dirMap: Record<string, RtdbUserDirectoryProfile>,

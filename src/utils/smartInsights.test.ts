@@ -9,6 +9,14 @@ import {
   priceFromMarkup,
   resolveCustomerGroupPrice,
   suggestMinStockFromVelocity,
+  addParkedOrder,
+  loadParkedOrders,
+  saveParkedOrders,
+  MAX_PARKED_ORDERS,
+  PARKED_ORDERS_STORAGE_KEY,
+  type ParkedOrder,
+  computeShiftCloseSummary,
+  isCashPaymentMethod,
 } from './smartInsights';
 import type { SaleTransaction } from '../types';
 
@@ -133,4 +141,64 @@ test('customer group price resolution', () => {
   assert.deepEqual(resolveCustomerGroupPrice(p, 'Trang trại'), { price: 200000, isGroupPrice: false });
   assert.deepEqual(resolveCustomerGroupPrice(p, 'Nhà nông'), { price: 200000, isGroupPrice: false });
   assert.deepEqual(resolveCustomerGroupPrice({ sellPrice: 5 }, undefined), { price: 5, isGroupPrice: false });
+});
+
+test('parked orders persist locally, cap at 20 and ignore corrupt data', () => {
+  const store: Record<string, string> = {};
+  const fake = {
+    getItem: (k: string) => (k in store ? store[k] : null),
+    setItem: (k: string, v: string) => {
+      store[k] = v;
+    },
+  };
+  assert.deepEqual(loadParkedOrders(fake), []);
+  let orders: ParkedOrder[] = [];
+  for (let i = 0; i < MAX_PARKED_ORDERS + 3; i++) {
+    orders = addParkedOrder(orders, {
+      id: `o${i}`,
+      label: `Đơn ${i}`,
+      customerId: 'c',
+      customerName: 'K',
+      warehouse: 'W',
+      items: [{ id: 'x', productId: 'p', productName: 'P', unit: 'chai', quantity: 1, unitPrice: 10 } as ParkedOrder['items'][number]],
+      createdAt: '2026-11-27T00:00:00.000Z',
+    });
+  }
+  assert.equal(orders.length, MAX_PARKED_ORDERS);
+  assert.equal(orders[0].id, `o${MAX_PARKED_ORDERS + 2}`);
+  assert.equal(saveParkedOrders(orders, fake), true);
+  assert.equal(loadParkedOrders(fake).length, MAX_PARKED_ORDERS);
+  store[PARKED_ORDERS_STORAGE_KEY] = '{not json';
+  assert.deepEqual(loadParkedOrders(fake), []);
+  store[PARKED_ORDERS_STORAGE_KEY] = JSON.stringify([{ id: 'a', items: [] }, { nope: 1 }]);
+  assert.deepEqual(loadParkedOrders(fake), []);
+});
+
+test('shift close: cash vs non-cash split and drawer difference', () => {
+  assert.equal(isCashPaymentMethod('Tiền mặt'), true);
+  assert.equal(isCashPaymentMethod(''), true);
+  assert.equal(isCashPaymentMethod('Chuyển khoản ngân hàng'), false);
+  const s = computeShiftCloseSummary({
+    salesInitialPaidInflow: 500000,
+    importsInitialPaidOutflow: 200000,
+    receipts: [
+      { amount: 100000, paymentMethod: 'Tiền mặt' },
+      { amount: 300000, paymentMethod: 'Chuyển khoản ngân hàng' },
+    ],
+    payments: [
+      { amount: 50000, paymentMethod: 'Tiền mặt' },
+      { amount: 80000, paymentMethod: 'Chuyển khoản ngân hàng' },
+    ],
+    openingCash: 1000000,
+    countedCash: 1340000,
+  });
+  assert.equal(s.cashIn, 600000);
+  assert.equal(s.cashOut, 250000);
+  assert.equal(s.nonCashIn, 300000);
+  assert.equal(s.nonCashOut, 80000);
+  assert.equal(s.expectedCash, 1350000);
+  assert.equal(s.difference, -10000);
+  assert.equal(s.byMethodIn['Chuyển khoản ngân hàng'], 300000);
+  const noCount = computeShiftCloseSummary({ salesInitialPaidInflow: 0, importsInitialPaidOutflow: 0, receipts: [], payments: [], openingCash: 0, countedCash: null });
+  assert.equal(noCount.difference, null);
 });

@@ -106,6 +106,7 @@ import {
   sanitizeForRealtimeDb,
   toRtdbRecordKey,
   toRtdbUserDirectoryProfile,
+  preservePresenceFields,
 } from '../utils/rtdbSyncLogic';
 
 const app = initializeApp(firebaseConfig);
@@ -2812,7 +2813,15 @@ export async function upsertRealtimeUserDirectoryProfile(staff: StaffMember): Pr
       ...staff,
       uid: safeUid,
     });
-    await rtdbSet(rtdbRef(rtdb, `users_directory/${safeUid}`), cleanProfile);
+    const dirRef = rtdbRef(rtdb, `users_directory/${safeUid}`);
+    let existingPresence: Partial<RtdbUserDirectoryProfile> | null = null;
+    try {
+      const curSnap = await rtdbGet(dirRef);
+      existingPresence = curSnap.exists() ? (curSnap.val() as Partial<RtdbUserDirectoryProfile>) : null;
+    } catch {
+      existingPresence = null;
+    }
+    await rtdbSet(dirRef, preservePresenceFields(cleanProfile, existingPresence));
     return true;
   } catch (err) {
     console.warn('upsertRealtimeUserDirectoryProfile warning:', err instanceof Error ? err.message : err);

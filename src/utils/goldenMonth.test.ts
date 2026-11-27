@@ -4,6 +4,8 @@ import {
   applyCustomerFifoDebtSettlement,
   applySupplierFifoDebtSettlement,
   buildCustomerReturnRefundVouchers,
+  buildSupplierReturnRefundVouchers,
+  findLinkedPaymentVouchersForImport,
   computeCashflowAndFinancialReport,
   computeCustomerSaleReturnCalculation,
   computeProductStockMovementLedger,
@@ -344,4 +346,36 @@ test('Customer return without cash refund builds no vouchers', () => {
     ownerId: OWNER, warehouseName: WH, staffName: 'x', nowIso: at('2026-11-01'),
   });
   assert.equal(pair, null);
+});
+
+test('Supplier return refund vouchers keep each month exact and never touch profit', () => {
+  const A = product('pS', 'S-01', 'Thuốc S', 6, 100000);
+  // Oct: bought 10 @100k, fully paid (1.000.000)
+  const original = imp('iS', 'PN-2610-050', A, 10, 100000, 1000000, '2026-10-05');
+  // Nov: return 4 → new total 600k, paid capped at 600k, refund 400k
+  const returned = { ...original, quantity: 6, totalCost: 600000, paidAmount: 600000, debtAmount: 0 };
+  const pair = buildSupplierReturnRefundVouchers({
+    imp: original,
+    refundAmount: 400000,
+    returnCode: 'TN-2611-001',
+    paymentId: 'pvS', paymentCode: 'PC-2611-050',
+    receiptId: 'rvS', receiptCode: 'PT-2611-050',
+    ownerId: OWNER, warehouseName: WH, staffName: 'Admin', nowIso: at('2026-11-12'),
+  });
+  assert.ok(pair);
+  const args = { sales: [], imports: [returned], products: [A], receiptVouchers: [pair!.receipt], paymentVouchers: [pair!.payment] };
+  const all = computeCashflowAndFinancialReport(args);
+  const oct = computeCashflowAndFinancialReport({ ...args, fromDate: '2026-10-01', toDate: '2026-10-31' });
+  const nov = computeCashflowAndFinancialReport({ ...args, fromDate: '2026-11-01', toDate: '2026-11-30' });
+  assert.equal(oct.totalCashOutflow, 1000000);
+  assert.equal(nov.totalCashInflow, 400000);
+  assert.equal(all.netCashflow, -600000);
+  assert.equal(all.otherIncome, 0);
+  assert.equal(all.operatingExpenses, 0);
+  assert.equal(all.totalPayableDebt, 0);
+  assert.equal(findLinkedPaymentVouchersForImport(returned, [pair!.payment]).length, 0);
+  assert.equal(buildSupplierReturnRefundVouchers({ ...{
+    imp: original, refundAmount: 0, returnCode: 'x', paymentId: 'a', paymentCode: 'b', receiptId: 'c', receiptCode: 'd',
+    ownerId: OWNER, warehouseName: WH, staffName: 'x', nowIso: at('2026-11-12'),
+  } }), null);
 });

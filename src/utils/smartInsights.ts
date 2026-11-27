@@ -1,4 +1,5 @@
 import type { CustomerProfile, ProductItem, SaleTransaction } from '../types';
+import type { PosCartDraftItem } from './smartPosFeatures';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -190,4 +191,119 @@ export function resolveCustomerGroupPrice(
     return { price: Math.round(special), isGroupPrice: Math.round(special) !== base };
   }
   return { price: base, isGroupPrice: false };
+}
+
+/* ------------------------------------------------------ E2: parked orders */
+
+export const PARKED_ORDERS_STORAGE_KEY = 'vtnn_taman_parked_orders_v1';
+export const MAX_PARKED_ORDERS = 20;
+
+export interface ParkedOrder {
+  id: string;
+  label: string;
+  customerId: string;
+  customerName: string;
+  warehouse: string;
+  items: PosCartDraftItem[];
+  createdAt: string;
+}
+
+export function loadParkedOrders(storage?: Pick<Storage, 'getItem'>): ParkedOrder[] {
+  try {
+    const s = storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined);
+    if (!s) return [];
+    const raw = s.getItem(PARKED_ORDERS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (o): o is ParkedOrder =>
+          o && typeof o.id === 'string' && Array.isArray(o.items) && o.items.length > 0
+      )
+      .slice(0, MAX_PARKED_ORDERS);
+  } catch {
+    return [];
+  }
+}
+
+export function saveParkedOrders(
+  orders: ParkedOrder[],
+  storage?: Pick<Storage, 'setItem'>
+): boolean {
+  try {
+    const s = storage ?? (typeof localStorage !== 'undefined' ? localStorage : undefined);
+    if (!s) return false;
+    s.setItem(PARKED_ORDERS_STORAGE_KEY, JSON.stringify(orders.slice(0, MAX_PARKED_ORDERS)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Adds a new parked order at the top, dropping the oldest beyond the limit. */
+export function addParkedOrder(orders: ParkedOrder[], order: ParkedOrder): ParkedOrder[] {
+  return [order, ...orders.filter((o) => o.id !== order.id)].slice(0, MAX_PARKED_ORDERS);
+}
+
+/* ------------------------------------------------------ E1: shift close */
+
+export interface ShiftCloseInput {
+  salesInitialPaidInflow: number;
+  importsInitialPaidOutflow: number;
+  receipts: Array<{ amount: number; paymentMethod: string }>;
+  payments: Array<{ amount: number; paymentMethod: string }>;
+  openingCash: number;
+  countedCash: number | null;
+}
+
+export interface ShiftCloseSummary {
+  cashIn: number;
+  cashOut: number;
+  nonCashIn: number;
+  nonCashOut: number;
+  expectedCash: number;
+  difference: number | null;
+  byMethodIn: Record<string, number>;
+  byMethodOut: Record<string, number>;
+}
+
+export function isCashPaymentMethod(method: string | undefined | null): boolean {
+  const m = (method || '').toLowerCase();
+  return !m.trim() || /ti[eề]n\s*m[aặ]t|cash/.test(m) || m.normalize('NFD').replace(/[\u0300-\u036f]/g, '').includes('tien mat');
+}
+
+/**
+ * End-of-day cash drawer: counter sales / counter purchases are treated as cash; PT/PC vouchers are split by payment method.
+ * expectedCash = opening + cash sales + cash PT − cash purchases − cash PC.
+ */
+export function computeShiftCloseSummary(input: ShiftCloseInput): ShiftCloseSummary {
+  const byMethodIn: Record<string, number> = {};
+  const byMethodOut: Record<string, number> = {};
+  let cashPt = 0;
+  let nonCashIn = 0;
+  for (const r of input.receipts) {
+    const amt = Math.max(0, Number(r.amount) || 0);
+    const key = (r.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
+    byMethodIn[key] = (byMethodIn[key] || 0) + amt;
+    if (isCashPaymentMethod(r.paymentMethod)) cashPt += amt;
+    else nonCashIn += amt;
+  }
+  let cashPc = 0;
+  let nonCashOut = 0;
+  for (const p of input.payments) {
+    const amt = Math.max(0, Number(p.amount) || 0);
+    const key = (p.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
+    byMethodOut[key] = (byMethodOut[key] || 0) + amt;
+    if (isCashPaymentMethod(p.paymentMethod)) cashPc += amt;
+    else nonCashOut += amt;
+  }
+  const cashIn = Math.max(0, Number(input.salesInitialPaidInflow) || 0) + cashPt;
+  const cashOut = Math.max(0, Number(input.importsInitialPaidOutflow) || 0) + cashPc;
+  const expectedCash = Math.round((Number(input.openingCash) || 0) + cashIn - cashOut);
+  const difference =
+    input.countedCash === null || !Number.isFinite(Number(input.countedCash))
+      ? null
+      : Math.round(Number(input.countedCash) - expectedCash);
+  return { cashIn, cashOut, nonCashIn, nonCashOut, expectedCash, difference, byMethodIn, byMethodOut };
 }

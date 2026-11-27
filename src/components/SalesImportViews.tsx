@@ -99,6 +99,11 @@ import {
   computeCustomerCreditGrade,
   computeFrequentlyBoughtTogether,
   isOverCreditLimit,
+  resolveCustomerGroupPrice,
+  addParkedOrder,
+  loadParkedOrders,
+  saveParkedOrders,
+  type ParkedOrder,
 } from '../utils/smartInsights';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
@@ -278,6 +283,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [tplContentInput, setTplContentInput] = useState<string>('');
   const [autoRememberedBadge, setAutoRememberedBadge] = useState<string | null>(null);
   const [posCartItems, setPosCartItems] = useState<PosCartDraftItem[]>([]);
+  const [parkedOrders, setParkedOrders] = useState<ParkedOrder[]>(() => loadParkedOrders());
   const [lastCreatedOrder, setLastCreatedOrder] = useState<{
     invoiceCode: string;
     warehouseName: string;
@@ -516,7 +522,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setShowNewProductBox(false);
     const prod = products.find((p) => p.id === prodId);
     if (prod) {
-      setUnitPrice(String(prod.sellPrice));
+      const pickedCustomer =
+        selectedCustomerId && selectedCustomerId !== '__new_customer__'
+          ? customers.find((c) => c.id === selectedCustomerId)
+          : undefined;
+      setUnitPrice(String(resolveCustomerGroupPrice(prod, pickedCustomer?.group).price));
       const remembered = prod.dosageGuide || '';
       setDosageGuide(remembered);
       setNoteTargetProductId(prod.id);
@@ -858,7 +868,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     const prod = products.find((p) => p.id === productId);
     if (!prod) return;
     setFormMessage(null);
-    const res = upsertQuickCartProductQuantity(posCartItems, prod, nextQty, products);
+    const quickCustomer =
+      selectedCustomerId && selectedCustomerId !== '__new_customer__'
+        ? customers.find((c) => c.id === selectedCustomerId)
+        : undefined;
+    const quickPrice = resolveCustomerGroupPrice(prod, quickCustomer?.group).price;
+    const res = upsertQuickCartProductQuantity(
+      posCartItems,
+      quickPrice === prod.sellPrice ? prod : { ...prod, sellPrice: quickPrice },
+      nextQty,
+      products
+    );
     if (res.error) {
       setFormMessage({ type: 'error', text: res.error });
       return;
@@ -887,6 +907,60 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
       }
       return next;
     });
+  };
+
+  const handleParkCurrentOrder = () => {
+    if (posCartItems.length === 0) return;
+    const cust =
+      selectedCustomerId && selectedCustomerId !== '__new_customer__'
+        ? customers.find((c) => c.id === selectedCustomerId)
+        : undefined;
+    const order: ParkedOrder = {
+      id: `park_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      label: `${cust?.name || 'Khách lẻ'} · ${posCartItems.length} mặt hàng`,
+      customerId: cust?.id || '',
+      customerName: cust?.name || '',
+      warehouse: selectedWarehouse || '',
+      items: posCartItems,
+      createdAt: new Date().toISOString(),
+    };
+    const next = addParkedOrder(parkedOrders, order);
+    setParkedOrders(next);
+    saveParkedOrders(next);
+    setPosCartItems([]);
+    setSelectedCustomerId('');
+    setFormMessage({ type: 'success', text: `Đã giữ đơn "${order.label}" — mở lại bất cứ lúc nào bên dưới.` });
+  };
+
+  const handleResumeParkedOrder = (orderId: string) => {
+    const order = parkedOrders.find((o) => o.id === orderId);
+    if (!order) return;
+    if (
+      posCartItems.length > 0 &&
+      !window.confirm('Giỏ hiện tại đang có hàng. Mở đơn đã giữ sẽ thay thế giỏ hiện tại. Tiếp tục?')
+    ) {
+      return;
+    }
+    const check = validateCartInventory(products, order.items);
+    setPosCartItems(order.items);
+    if (order.customerId && customers.some((c) => c.id === order.customerId)) {
+      setSelectedCustomerId(order.customerId);
+    }
+    if (order.warehouse && !lockedWarehouse) setSelectedWarehouse(order.warehouse);
+    const next = parkedOrders.filter((o) => o.id !== orderId);
+    setParkedOrders(next);
+    saveParkedOrders(next);
+    setFormMessage(
+      check.valid
+        ? { type: 'success', text: `Đã mở lại đơn "${order.label}".` }
+        : { type: 'error', text: `Đã mở lại đơn nhưng cần kiểm tra tồn kho: ${check.error || ''}` }
+    );
+  };
+
+  const handleDeleteParkedOrder = (orderId: string) => {
+    const next = parkedOrders.filter((o) => o.id !== orderId);
+    setParkedOrders(next);
+    saveParkedOrders(next);
   };
 
   const handleExportGroupedInvoicePdf = (sale: SaleTransaction) => {
@@ -1828,6 +1902,39 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   );
                 })()}
 
+              {parkedOrders.length > 0 && (
+                <div className="p-2.5 rounded-xl border border-violet-200 bg-violet-50/60 space-y-1.5">
+                  <div className="text-[11px] font-bold text-violet-900">
+                    Đơn đang giữ ({parkedOrders.length}) · chỉ lưu trên máy này
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {parkedOrders.map((o) => (
+                      <span
+                        key={o.id}
+                        className="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-white border border-violet-300 text-[11px] text-violet-900"
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleResumeParkedOrder(o.id)}
+                          className="font-semibold hover:underline"
+                          title={new Date(o.createdAt).toLocaleString('vi-VN')}
+                        >
+                          Mở: {o.label}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteParkedOrder(o.id)}
+                          aria-label={`Xóa đơn giữ ${o.label}`}
+                          className="px-1 text-slate-400 hover:text-red-600"
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {posCartItems.length > 0 && (
                 <div className="p-2.5 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-2">
                   <div className="flex items-center justify-between text-xs font-bold text-emerald-900">
@@ -1838,13 +1945,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         {formatVND(cartAllocation.netTotal)})
                       </span>
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setPosCartItems([])}
-                      className="text-[11px] font-semibold text-red-600 hover:underline"
-                    >
-                      Xóa giỏ
-                    </button>
+                    <span className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleParkCurrentOrder}
+                        title="Cất giỏ này để phục vụ khách khác, mở lại sau (chỉ lưu trên máy này)"
+                        className="text-[11px] font-semibold text-violet-700 hover:underline"
+                      >
+                        Giữ đơn
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPosCartItems([])}
+                        className="text-[11px] font-semibold text-red-600 hover:underline"
+                      >
+                        Xóa giỏ
+                      </button>
+                    </span>
                   </div>
                   <div className="divide-y divide-emerald-100 bg-white rounded-lg border border-emerald-100 px-2.5 max-h-56 overflow-y-auto">
                     {posCartItems.map((item, idx) => {
@@ -2080,6 +2197,26 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   placeholder="Nhập đơn giá..."
                   className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                 />
+                {(() => {
+                  const gpProd = products.find((p) => p.id === selectedProductId);
+                  const gpCust = selectedCustomerObj;
+                  if (!gpProd || !gpCust) return null;
+                  const gp = resolveCustomerGroupPrice(gpProd, gpCust.group);
+                  if (!gp.isGroupPrice) return null;
+                  return Number(unitPrice) === gp.price ? (
+                    <span className="mt-1 inline-block px-1.5 rounded bg-violet-100 text-violet-800 border border-violet-200 text-[10px] font-bold">
+                      Giá {gpCust.group}
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setUnitPrice(String(gp.price))}
+                      className="mt-1 text-[10px] font-semibold text-violet-700 underline underline-offset-2"
+                    >
+                      Dùng giá {gpCust.group}: {formatVND(gp.price)}
+                    </button>
+                  );
+                })()}
               </div>
             </div>
 
@@ -4720,6 +4857,7 @@ interface ImportLogViewProps {
     }
   ) => void;
   onDeleteImport: (importId: string) => void;
+  onReturnToSupplier?: (params: { importId: string; returnQuantity: number; reason: string }) => void;
   onOpenDebtRecord?: (recordId: string) => void;
   newProductRedirectTrigger?: { key: number; initialName: string } | null;
   onConsumeNewProductRedirect?: () => void;
@@ -4749,6 +4887,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   onImportWarehouseFromExcel,
   onUpdateImport,
   onDeleteImport,
+  onReturnToSupplier,
   onOpenDebtRecord,
   newProductRedirectTrigger,
   onConsumeNewProductRedirect,
@@ -4764,6 +4903,18 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [importSearchQuery, setImportSearchQuery] = useState('');
   const [importStatusFilter, setImportStatusFilter] = useState<'all' | 'debt' | 'paid' | 'issues'>('all');
   const [editImpCode, setEditImpCode] = useState('');
+
+  // Supplier return (Trả hàng NCC) modal state
+  const [returningImport, setReturningImport] = useState<ImportTransaction | null>(null);
+  const [supplierReturnQty, setSupplierReturnQty] = useState('1');
+  const [supplierReturnReason, setSupplierReturnReason] = useState('Hàng lỗi / dư trả lại NCC');
+
+  const openSupplierReturnModal = (imp: ImportTransaction) => {
+    if (!canPerformRoleAction(role, 'edit_record') || !onReturnToSupplier) return;
+    setReturningImport(imp);
+    setSupplierReturnQty('1');
+    setSupplierReturnReason('Hàng lỗi / dư trả lại NCC');
+  };
 
   const openEditImportModal = (imp: ImportTransaction) => {
     if (!canPerformRoleAction(role, 'edit_record')) return;
@@ -6502,6 +6653,17 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                             <Pencil className="w-3 h-3" />
                             <span>Sửa</span>
                           </button>
+                          {onReturnToSupplier && imp.quantity > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => openSupplierReturnModal(imp)}
+                              aria-label={`Trả hàng NCC phiếu nhập ${imp.receiptCode}`}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>Trả NCC</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => setCancelingImport(imp)}
@@ -6750,6 +6912,17 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                                 <Pencil className="w-3 h-3" />
                                 <span>Sửa</span>
                               </button>
+                              {onReturnToSupplier && imp.quantity > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => openSupplierReturnModal(imp)}
+                                  aria-label={`Trả hàng NCC phiếu nhập ${imp.receiptCode}`}
+                                  className="px-2 py-1 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 border border-amber-200 rounded-md flex items-center gap-1 whitespace-nowrap"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  <span>Trả NCC</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 onClick={() => setCancelingImport(imp)}
@@ -7126,6 +7299,142 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
           </div>
         </div>
       )}
+
+      {returningImport && onReturnToSupplier && (() => {
+        const rQty = Math.min(
+          Math.max(1, Math.round(Number(supplierReturnQty) || 1)),
+          Math.max(1, returningImport.quantity - 1)
+        );
+        const newTotal = Math.round((returningImport.quantity - rQty) * returningImport.unitCost);
+        const nextPaid = Math.min(returningImport.paidAmount, newTotal);
+        const refund = Math.max(0, returningImport.paidAmount - nextPaid);
+        const nextDebt = Math.max(0, newTotal - nextPaid);
+        return (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-3 sm:p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Trả hàng nhà cung cấp phiếu ${returningImport.receiptCode}`}
+          >
+            <div className="bg-white rounded-2xl border border-amber-200 shadow-2xl w-full max-w-md overflow-hidden">
+              <div className="px-5 py-4 bg-amber-50/90 border-b border-amber-200 flex items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                    <RotateCcw className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>Trả hàng cho NCC ({returningImport.receiptCode})</span>
+                  </h3>
+                  <p className="text-[11px] text-amber-900 mt-0.5">
+                    Trừ tồn kho, giảm tổng tiền phiếu nhập, cấn trừ công nợ NCC trước
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setReturningImport(null)}
+                  className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+                  aria-label="Đóng"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  onReturnToSupplier({
+                    importId: returningImport.id,
+                    returnQuantity: rQty,
+                    reason: supplierReturnReason,
+                  });
+                  setReturningImport(null);
+                }}
+                className="p-5 space-y-4 text-xs"
+              >
+                <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-1">
+                  <div className="font-bold text-slate-900">{returningImport.productName}</div>
+                  <div className="text-slate-600 font-mono">
+                    NCC: <strong>{returningImport.supplierName}</strong> · Đã nhập:{' '}
+                    <strong>
+                      {returningImport.quantity} {returningImport.unit}
+                    </strong>{' '}
+                    × {formatVND(returningImport.unitCost)} = {formatVND(returningImport.totalCost)}
+                  </div>
+                  <div className="text-slate-600 font-mono">
+                    Đã trả NCC: <span className="text-emerald-700 font-semibold">{formatVND(returningImport.paidAmount)}</span> ·
+                    Còn nợ: <span className="text-red-600 font-semibold">{formatVND(returningImport.debtAmount)}</span>
+                  </div>
+                </div>
+                <div>
+                  <label htmlFor="supplier-return-qty" className="block font-semibold text-slate-700 mb-1">
+                    SL trả lại NCC ({returningImport.unit}) * — tối đa {returningImport.quantity - 1}
+                  </label>
+                  <input
+                    id="supplier-return-qty"
+                    type="number"
+                    min={1}
+                    max={returningImport.quantity - 1}
+                    value={supplierReturnQty}
+                    onChange={(e) => setSupplierReturnQty(e.target.value)}
+                    className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                  />
+                  <p className="mt-1 text-[10px] text-slate-400">
+                    Muốn trả hết cả phiếu hãy dùng nút “Hủy phiếu mua hàng”.
+                  </p>
+                </div>
+                <div>
+                  <label htmlFor="supplier-return-reason" className="block font-semibold text-slate-700 mb-1">
+                    Lý do trả hàng
+                  </label>
+                  <input
+                    id="supplier-return-reason"
+                    type="text"
+                    value={supplierReturnReason}
+                    onChange={(e) => setSupplierReturnReason(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg space-y-1 font-mono">
+                  <div className="flex justify-between">
+                    <span className="font-sans text-slate-700">Phiếu nhập sau khi trả:</span>
+                    <strong>
+                      {returningImport.quantity - rQty} {returningImport.unit} · {formatVND(newTotal)}
+                    </strong>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="font-sans text-slate-700">Nợ NCC còn lại:</span>
+                    <strong className={nextDebt > 0 ? 'text-red-600' : 'text-emerald-700'}>{formatVND(nextDebt)}</strong>
+                  </div>
+                  {refund > 0 && (
+                    <>
+                      <div className="flex justify-between text-rose-700">
+                        <span className="font-sans font-semibold">NCC cần hoàn lại tiền cho bạn:</span>
+                        <strong>{formatVND(refund)}</strong>
+                      </div>
+                      <p className="text-[10px] leading-snug text-slate-500 font-sans">
+                        Hệ thống tự lập 2 phiếu: Phiếu chi điều chỉnh (đúng ngày nhập) và Phiếu thu NCC hoàn tiền (hôm
+                        nay), không tính vào chi phí/thu nhập khác.
+                      </p>
+                    </>
+                  )}
+                </div>
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setReturningImport(null)}
+                    className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  >
+                    Hủy
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-amber-700 hover:bg-amber-800 rounded-lg"
+                  >
+                    Xác nhận trả hàng NCC
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
 
       {cancelingImport && (
         <CancelImportConfirmModal

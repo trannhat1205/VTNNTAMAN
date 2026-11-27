@@ -100,6 +100,7 @@ import {
   computeAtomicProductStockDelta,
   computeCustomerSaleReturnCalculation,
   buildCustomerReturnRefundVouchers,
+  buildSupplierReturnRefundVouchers,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
   computeSmartDashboardAnalytics,
@@ -237,6 +238,7 @@ import { InstallPwaModal } from './components/InstallPwaModal';
 import { GlobalQuickSearchModal } from './components/GlobalQuickSearchModal';
 import { CloudSyncStatusPanel } from './components/CloudSyncStatusPanel';
 import { DataHealthCenter } from './components/DataHealthCenter';
+import { CashDrawerCloseModal } from './components/CashDrawerCloseModal';
 import {
   computeDataHealthReport,
   DataHealthFixAction,
@@ -761,6 +763,29 @@ export default function App() {
   );
 
   const [isCloudSyncPanelOpen, setIsCloudSyncPanelOpen] = useState<boolean>(false);
+  const [isShiftCloseOpen, setIsShiftCloseOpen] = useState<boolean>(false);
+  const [largeText, setLargeText] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('vtnn_taman_font_scale') === 'large';
+    } catch {
+      return false;
+    }
+  });
+  const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('vtnn_taman_onboarding_dismissed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    document.documentElement.style.fontSize = largeText ? '17.5px' : '';
+    try {
+      localStorage.setItem('vtnn_taman_font_scale', largeText ? 'large' : 'normal');
+    } catch {
+      /* ignore */
+    }
+  }, [largeText]);
 
   const syncLocalCounts: Record<string, number> = {
     products: visibleProducts.length,
@@ -4081,6 +4106,303 @@ export default function App() {
     );
   };
 
+  const handleReturnToSupplier = (params: {
+    importId: string;
+    returnQuantity: number;
+    reason: string;
+  }) => {
+    if (!canPerformRoleAction(role, 'edit_record')) {
+      showToast('Chỉ Quản lý kho mới có quyền lập phiếu trả hàng cho nhà cung cấp.');
+      return;
+    }
+    const existing = imports.find((imp) => imp.id === params.importId);
+    if (!existing) return;
+    const returnQty = Math.round(Number(params.returnQuantity) || 0);
+    if (returnQty < 1 || returnQty >= existing.quantity) {
+      showToast(
+        'Số lượng trả NCC phải từ 1 và nhỏ hơn số lượng đã nhập. Muốn trả hết hãy dùng nút "Hủy phiếu mua hàng".'
+      );
+      return;
+    }
+    const newQty = existing.quantity - returnQty;
+    const newTotal = Math.round(newQty * existing.unitCost);
+    const nextPaid = Math.min(existing.paidAmount, newTotal);
+    const refund = Math.max(0, existing.paidAmount - nextPaid);
+    const nowIso = new Date().toISOString();
+    const resolvedWh = existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const retOwnerUid = existing.ownerId || resolveOwnerUidForWarehouse(resolvedWh);
+
+    const targetProd =
+      productsRef.current.find((p) =>
+        doesRecordMatchProduct(p, existing.productId, existing.productName, existing.warehouseName)
+      ) || null;
+    const safety = evaluateImportMutationSafety({
+      targetImport: existing,
+      product: targetProd,
+      sales,
+      imports,
+      paymentVouchers,
+      stockAdjustments,
+      newQuantity: newQty,
+    });
+    if (!safety.allowed) {
+      showToast(safety.message);
+      return;
+    }
+
+    const returnCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: retOwnerUid,
+      prefix: 'TN',
+      existingCodes: auditLogs.map((l) => l.targetCode),
+    });
+    const cleanReason = (params.reason || '').trim() || 'Trả hàng lỗi / dư cho NCC';
+    const tag = `[${returnCode}: Trả NCC ${returnQty} ${existing.unit} (-${formatVND(
+      Math.round(returnQty * existing.unitCost)
+    )}) - ${cleanReason}]`;
+
+    handleUpdateImport(existing.id, {
+      quantity: newQty,
+      unitCost: existing.unitCost,
+      paidAmount: nextPaid,
+      dueDate: existing.dueDate,
+      note: existing.note ? `${existing.note} | ${tag}` : tag,
+    });
+
+    if (refund > 0) {
+      const pvId = generateUniqueRecordId('pv_tn');
+      const rvId = generateUniqueRecordId('rv_tn');
+      const pvCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: retOwnerUid,
+        prefix: 'PC',
+        existingCodes: paymentVouchers.map((p) => p.voucherCode),
+        onReassigned: (committedCode) => {
+          setPaymentVouchers((prev) =>
+            prev.map((p) =>
+              p.id === pvId ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() } : p
+            )
+          );
+        },
+      });
+      const rvCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: retOwnerUid,
+        prefix: 'PT',
+        existingCodes: receiptVouchers.map((r) => r.voucherCode),
+        onReassigned: (committedCode) => {
+          setReceiptVouchers((prev) =>
+            prev.map((r) =>
+              r.id === rvId ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() } : r
+            )
+          );
+        },
+      });
+      const pair = buildSupplierReturnRefundVouchers({
+        imp: existing,
+        refundAmount: refund,
+        returnCode,
+        paymentId: pvId,
+        paymentCode: pvCode,
+        receiptId: rvId,
+        receiptCode: rvCode,
+        ownerId: retOwnerUid,
+        warehouseName: resolvedWh,
+        staffName: currentStaff.displayName,
+        nowIso,
+      });
+      if (pair) {
+        setPaymentVouchers((prev) => [pair.payment, ...prev]);
+        setReceiptVouchers((prev) => [pair.receipt, ...prev]);
+      }
+    }
+
+    recordAuditLog({
+      actionCategory: 'update',
+      targetEntity: 'import',
+      targetCode: returnCode,
+      warehouseName: resolvedWh,
+      summary: `Phiếu trả hàng NCC ${returnCode} từ PN ${existing.receiptCode} (${existing.supplierName}): -${returnQty} ${existing.unit} ${existing.productName}`,
+      details: `Lý do: ${cleanReason} · Giá trị trả: ${formatVND(
+        Math.round(returnQty * existing.unitCost)
+      )}${refund > 0 ? ` · NCC hoàn tiền: ${formatVND(refund)}` : ''}${
+        existing.debtAmount > 0 ? ` · Nợ NCC còn: ${formatVND(Math.max(0, newTotal - nextPaid))}` : ''
+      }`,
+      snapshotData: JSON.stringify(existing),
+    });
+    showToast(
+      `Đã lập phiếu trả NCC ${returnCode}: xuất kho -${returnQty} ${existing.unit} ${existing.productName}${
+        refund > 0 ? `, NCC hoàn ${formatVND(refund)}` : ''
+      }.`
+    );
+  };
+
+  const handleTransferStock = (params: {
+    productId: string;
+    destinationWarehouse: string;
+    quantity: number;
+    note?: string;
+  }): boolean => {
+    if (!canPerformRoleAction(role, 'edit_record') || lockedWarehouse) {
+      showToast('Chỉ Quản lý nhiều kho mới có quyền chuyển hàng giữa các kho.');
+      return false;
+    }
+    const source = productsRef.current.find((p) => p.id === params.productId);
+    if (!source) {
+      showToast('Không tìm thấy vật tư cần chuyển kho.');
+      return false;
+    }
+    const srcWh = source.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const destWh = (params.destinationWarehouse || '').trim();
+    if (!destWh || areWarehouseNamesEquivalent(srcWh, destWh)) {
+      showToast('Vui lòng chọn kho đích khác với kho nguồn.');
+      return false;
+    }
+    const qty = Math.round(Number(params.quantity) || 0);
+    const srcStock = Math.max(0, Number(source.stock) || 0);
+    if (qty < 1 || qty > srcStock) {
+      showToast(`Số lượng chuyển phải từ 1 đến ${srcStock} ${source.unit} (tồn kho nguồn).`);
+      return false;
+    }
+
+    const nowIso = new Date().toISOString();
+    const srcOwnerUid = source.ownerId || resolveOwnerUidForWarehouse(srcWh);
+    const destOwnerUid = resolveOwnerUidForWarehouse(destWh);
+    const unitCost = Math.max(0, Number(source.importPrice) || 0);
+    const normName = normalizeVietnameseSearch(source.name);
+    const destExisting =
+      productsRef.current.find(
+        (p) =>
+          p.id !== source.id &&
+          areWarehouseNamesEquivalent(p.warehouseName || '', destWh) &&
+          (normalizeVietnameseSearch(p.name) === normName ||
+            (p.code && source.code && p.code.trim().toLowerCase() === source.code.trim().toLowerCase()))
+      ) || null;
+
+    const updatedSource: ProductItem = { ...source, stock: srcStock - qty, updatedAt: nowIso };
+    let destProduct: ProductItem;
+    if (destExisting) {
+      destProduct = {
+        ...destExisting,
+        stock: Math.max(0, Number(destExisting.stock) || 0) + qty,
+        importPrice: computeWeightedAverageImportPrice(
+          Number(destExisting.stock) || 0,
+          Number(destExisting.importPrice) || 0,
+          qty,
+          unitCost
+        ),
+        updatedAt: nowIso,
+      };
+    } else {
+      destProduct = {
+        ...source,
+        id: generateUniqueRecordId('prod'),
+        code: generateNextUniqueProductCode(productsRef.current, destWh),
+        warehouseName: destWh,
+        stock: qty,
+        importPrice: unitCost,
+        ownerId: destOwnerUid,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+    }
+
+    const nextProducts = (destExisting
+      ? productsRef.current.map((p) =>
+          p.id === source.id ? updatedSource : p.id === destProduct.id ? destProduct : p
+        )
+      : [...productsRef.current.map((p) => (p.id === source.id ? updatedSource : p)), destProduct]);
+    productsRef.current = nextProducts;
+    setProducts(nextProducts);
+
+    dispatchAtomicProductMutation(srcOwnerUid, updatedSource, (cur) =>
+      computeAtomicProductStockDelta(cur, -qty, nowIso)
+    );
+    if (destExisting) {
+      dispatchAtomicProductMutation(
+        destExisting.ownerId || destOwnerUid,
+        destProduct,
+        (cur) => ({
+          ...cur,
+          stock: Math.max(0, Number(cur.stock) || 0) + qty,
+          importPrice: computeWeightedAverageImportPrice(
+            Number(cur.stock) || 0,
+            Number(cur.importPrice) || 0,
+            qty,
+            unitCost
+          ),
+          updatedAt: nowIso,
+        })
+      );
+    }
+
+    const transferCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: srcOwnerUid,
+      prefix: 'CK',
+      existingCodes: stockAdjustments.map((s) => s.adjustmentCode),
+    });
+    const cleanNote = (params.note || '').trim();
+    const outId = generateUniqueRecordId('ck_out');
+    const inId = generateUniqueRecordId('ck_in');
+    const outRecord: StockAdjustmentRecord = {
+      id: outId,
+      adjustmentCode: transferCode,
+      productId: source.id,
+      productCode: source.code,
+      productName: source.name,
+      unit: source.unit,
+      warehouseName: srcWh,
+      systemStockBefore: srcStock,
+      actualCountedStock: srcStock - qty,
+      diffQty: -qty,
+      unitCost,
+      diffValue: -qty * unitCost,
+      reason: `Chuyển kho đi → ${destWh}`,
+      note: cleanNote,
+      staffName: currentStaff.displayName,
+      ownerId: srcOwnerUid,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    const destBefore = destExisting ? Math.max(0, Number(destExisting.stock) || 0) : 0;
+    const inRecord: StockAdjustmentRecord = {
+      id: inId,
+      adjustmentCode: transferCode,
+      productId: destProduct.id,
+      productCode: destProduct.code,
+      productName: destProduct.name,
+      unit: destProduct.unit,
+      warehouseName: destWh,
+      systemStockBefore: destBefore,
+      actualCountedStock: destBefore + qty,
+      diffQty: qty,
+      unitCost,
+      diffValue: qty * unitCost,
+      reason: `Chuyển kho đến ← ${srcWh}`,
+      note: cleanNote,
+      staffName: currentStaff.displayName,
+      ownerId: destProduct.ownerId || destOwnerUid,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    setStockAdjustments((prev) => [outRecord, inRecord, ...prev]);
+
+    recordAuditLog({
+      actionCategory: 'update',
+      targetEntity: 'product',
+      targetCode: transferCode,
+      warehouseName: srcWh,
+      summary: `Chuyển kho ${transferCode}: ${qty} ${source.unit} ${source.name} từ ${srcWh} → ${destWh}`,
+      details: `Giá vốn chuyển: ${formatVND(unitCost)}/${source.unit} · Giá trị: ${formatVND(
+        qty * unitCost
+      )}${destExisting ? ' · Gộp vào mã hàng sẵn có ở kho đích (bình quân gia quyền)' : ' · Tạo mã hàng mới ở kho đích'}${
+        cleanNote ? ` · Ghi chú: ${cleanNote}` : ''
+      }`,
+      snapshotData: JSON.stringify({ outRecord, inRecord }),
+    });
+    showToast(
+      `Đã chuyển kho ${transferCode}: ${qty} ${source.unit} ${source.name} từ ${srcWh} sang ${destWh}.`
+    );
+    return true;
+  };
+
   const handleDeleteImport = (importId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = imports.find((imp) => imp.id === importId);
@@ -4486,6 +4808,12 @@ export default function App() {
     }
     const targetAdj = stockAdjustments.find((a) => a.id === adjustmentId);
     if (!targetAdj) return;
+    if (/^CK-/i.test(targetAdj.adjustmentCode || '')) {
+      showToast(
+        `Phiếu chuyển kho ${targetAdj.adjustmentCode} gồm 2 vế (xuất + nhập) nên không hủy lẻ. Hãy lập phiếu chuyển ngược lại để hoàn tác.`
+      );
+      return;
+    }
     const nowIso = new Date().toISOString();
     markRecordsDeleted(adjustmentId, nowIso);
     setStockAdjustments((prev) => prev.filter((a) => a.id !== adjustmentId));
@@ -8966,6 +9294,22 @@ export default function App() {
                 </button>
               )}
 
+              {/* Large-text accessibility toggle */}
+              <button
+                type="button"
+                onClick={() => setLargeText((v) => !v)}
+                title={largeText ? 'Trở về cỡ chữ bình thường' : 'Chữ to dễ đọc'}
+                aria-label="Bật tắt chữ to"
+                aria-pressed={largeText}
+                className={`inline-flex items-center justify-center px-2 py-1 rounded-lg text-xs font-bold border shrink-0 ${
+                  largeText
+                    ? 'bg-emerald-700 text-white border-emerald-700'
+                    : 'bg-slate-100/90 text-slate-700 border-slate-200 hover:bg-emerald-50'
+                }`}
+              >
+                Aa
+              </button>
+
               {/* Global Quick Search Trigger (Ctrl+K) */}
               <button
                 type="button"
@@ -9318,6 +9662,60 @@ export default function App() {
         <main className="flex-1 p-3 sm:p-6 pb-20 md:pb-6 max-w-[1400px] w-full mx-auto space-y-5 sm:space-y-6 overflow-x-hidden">
           {activeTab === 'dashboard' && (
             <div className="space-y-5 sm:space-y-6">
+              {/* First-run checklist (only while the warehouse has no products) */}
+              {visibleProducts.length === 0 && !onboardingDismissed && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 sm:p-5 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm sm:text-base font-bold text-emerald-950">
+                        Bắt đầu nhanh: 4 bước để bán hàng
+                      </h3>
+                      <p className="text-xs text-emerald-900 mt-0.5">
+                        Kho đang trống. Làm lần lượt theo thứ tự dưới đây là có thể lập hóa đơn ngay.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOnboardingDismissed(true);
+                        try {
+                          localStorage.setItem('vtnn_taman_onboarding_dismissed', '1');
+                        } catch {
+                          /* ignore */
+                        }
+                      }}
+                      className="text-[11px] font-semibold text-emerald-800 hover:underline shrink-0"
+                    >
+                      Ẩn hướng dẫn
+                    </button>
+                  </div>
+                  <ol className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                    {[
+                      { n: 1, label: 'Thêm vật tư đầu tiên (tên, giá nhập, giá bán)', tab: 'inventory' },
+                      { n: 2, label: 'Lập phiếu nhập để có tồn kho & công nợ NCC', tab: 'imports' },
+                      { n: 3, label: 'Lập hóa đơn bán đầu tiên cho khách', tab: 'sales' },
+                      { n: 4, label: 'Cấp tài khoản cho nhân viên / kho khác', tab: 'staff_accounts' },
+                    ].map((s) => (
+                      <li key={s.n}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveTab(s.tab as typeof activeTab);
+                            scrollToTopOfPage();
+                          }}
+                          className="w-full text-left flex items-center gap-2 px-3 py-2 rounded-lg bg-white border border-emerald-200 hover:bg-emerald-100/60 text-emerald-950 font-semibold"
+                        >
+                          <span className="w-5 h-5 rounded-full bg-emerald-700 text-white text-[11px] flex items-center justify-center shrink-0">
+                            {s.n}
+                          </span>
+                          <span>{s.label}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+
               {/* Brand Hero Banner + Admin / Single-Warehouse Status Indicator */}
               <div className="bg-white p-4 sm:p-6 rounded-xl border border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3.5 sm:gap-4">
                 <div className="flex items-center gap-3 sm:gap-4 min-w-0">
@@ -9352,6 +9750,16 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {canPerformRoleAction(role, 'edit_record') && (
+                    <button
+                      type="button"
+                      onClick={() => setIsShiftCloseOpen(true)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200"
+                    >
+                      <Wallet className="w-3.5 h-3.5" />
+                      <span>Chốt ca cuối ngày</span>
+                    </button>
+                  )}
                   {(() => {
                     const selfRenameCheck = canStaffRenameWarehouse(currentStaff, currentStaff);
                     return (
@@ -10037,6 +10445,7 @@ export default function App() {
               onImportWarehouseFromExcel={handleImportWarehouseFromExcel}
               onUpdateImport={handleUpdateImport}
               onDeleteImport={handleDeleteImport}
+              onReturnToSupplier={handleReturnToSupplier}
               onOpenDebtRecord={(recId) => {
                 setFocusedDebtRecordId(recId);
                 setActiveTab('debts');
@@ -10062,6 +10471,7 @@ export default function App() {
               onSaveProduct={handleSaveProduct}
               onDeleteProduct={handleDeleteProduct}
               onExecuteStocktake={handleExecuteStocktake}
+              onTransferStock={handleTransferStock}
               onDeleteStockAdjustment={handleDeleteStockAdjustment}
               onReconcileProductStock={handleReconcileProductStock}
               onImportProductsFromExcel={handleImportProductsFromExcel}
@@ -10439,6 +10849,32 @@ export default function App() {
           </nav>
         )}
       </div>
+
+      {/* End-of-day cash drawer close (Chốt ca) */}
+      <CashDrawerCloseModal
+        isOpen={isShiftCloseOpen && isSessionLoggedIn}
+        onClose={() => setIsShiftCloseOpen(false)}
+        sales={visibleSales}
+        imports={visibleImports}
+        products={visibleProducts}
+        receiptVouchers={visibleReceiptVouchers}
+        paymentVouchers={visiblePaymentVouchers}
+        warehouses={allowedWarehouses}
+        lockedWarehouse={lockedWarehouse}
+        auditLogs={auditLogs}
+        onSaveClose={({ dateStr, warehouse, summary, details }) => {
+          recordAuditLog({
+            actionCategory: 'create',
+            targetEntity: 'system',
+            targetCode: `CHOT-CA-${dateStr.replace(/-/g, '')}`,
+            warehouseName: warehouse === 'Tất cả kho' ? undefined : warehouse,
+            summary,
+            details,
+          });
+          showToast(`Đã lưu chốt ca ngày ${dateStr} (${warehouse}).`);
+          setIsShiftCloseOpen(false);
+        }}
+      />
 
       {/* Cloud Sync Status Panel (Realtime Database) */}
       <CloudSyncStatusPanel

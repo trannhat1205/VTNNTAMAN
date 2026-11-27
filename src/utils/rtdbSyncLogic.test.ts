@@ -1004,8 +1004,17 @@ test('Wipe epoch: dataWipedAt discards pre-wipe business records in filter, norm
 import {
   deriveOnlineUsersFromDirectory,
   directoryStructureSignature,
+  preservePresenceFields,
   type RtdbUserDirectoryProfile as PresenceDirProfile,
 } from './rtdbSyncLogic';
+
+test('Presence fields survive a directory profile rewrite', () => {
+  const clean = { uid: 'a', displayName: 'An' };
+  const merged = preservePresenceFields(clean, { presenceOnline: true, lastSeenAt: 123, presenceWarehouse: 'Kho A' });
+  assert.deepEqual(merged, { uid: 'a', displayName: 'An', presenceOnline: true, lastSeenAt: 123, presenceWarehouse: 'Kho A' });
+  assert.deepEqual(preservePresenceFields(clean, null), clean);
+  assert.deepEqual(preservePresenceFields(clean, { displayName: 'x' } as Partial<PresenceDirProfile>), clean);
+});
 
 test('Presence: only fresh online heartbeats are listed and heartbeats do not change the structure signature', () => {
   const base = {

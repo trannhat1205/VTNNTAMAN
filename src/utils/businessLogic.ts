@@ -5840,3 +5840,62 @@ export function buildCustomerReturnRefundVouchers(params: {
   };
   return { receipt, payment };
 }
+/**
+ * Mirrored PC/PT pair for a partial supplier return that gets cash back.
+ * - PC (not operating expense) is dated at the ORIGINAL import date so the purchase month keeps the cash it really paid.
+ * - PT (not other income) is dated NOW, the month the supplier's refund really arrives.
+ */
+export function buildSupplierReturnRefundVouchers(params: {
+  imp: Pick<ImportTransaction, 'receiptCode' | 'supplierName' | 'supplierPhone' | 'createdAt'>;
+  refundAmount: number;
+  returnCode: string;
+  paymentId: string;
+  paymentCode: string;
+  receiptId: string;
+  receiptCode: string;
+  ownerId: string;
+  warehouseName: string;
+  staffName: string;
+  nowIso: string;
+}): { payment: CashPaymentVoucher; receipt: CashReceiptVoucher } | null {
+  const amount = Math.max(0, Math.round(Number(params.refundAmount) || 0));
+  if (amount <= 0) return null;
+  const note = `Tự động từ phiếu trả hàng NCC ${params.returnCode} (PN ${params.imp.receiptCode})`;
+  const payment: CashPaymentVoucher = {
+    id: params.paymentId,
+    voucherCode: params.paymentCode,
+    groupName: 'Điều chỉnh tiền đã trả NCC (hàng trả lại)',
+    warehouseName: params.warehouseName,
+    partnerName: params.imp.supplierName,
+    partnerPhone: params.imp.supplierPhone || '',
+    amount,
+    paymentMethod: 'Tiền mặt',
+    isDebtSettlement: false,
+    settledAllocations: [],
+    countsTowardOperatingExpense: false,
+    note,
+    staffName: params.staffName,
+    ownerId: params.ownerId,
+    createdAt: params.imp.createdAt || params.nowIso,
+    updatedAt: params.nowIso,
+  };
+  const receipt: CashReceiptVoucher = {
+    id: params.receiptId,
+    voucherCode: params.receiptCode,
+    groupName: 'NCC hoàn tiền hàng trả lại',
+    warehouseName: params.warehouseName,
+    partnerName: params.imp.supplierName,
+    partnerPhone: params.imp.supplierPhone || '',
+    amount,
+    paymentMethod: 'Tiền mặt',
+    isDebtSettlement: false,
+    settledAllocations: [],
+    countsTowardOtherIncome: false,
+    note,
+    staffName: params.staffName,
+    ownerId: params.ownerId,
+    createdAt: params.nowIso,
+    updatedAt: params.nowIso,
+  };
+  return { payment, receipt };
+}
