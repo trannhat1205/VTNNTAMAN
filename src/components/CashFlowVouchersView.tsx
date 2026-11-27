@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowDownLeft,
   ArrowUpRight,
@@ -20,6 +20,7 @@ import {
 import {
   CashPaymentVoucher,
   CashReceiptVoucher,
+  CrossLinkNavigateRequest,
   CustomerGroup,
   CustomerProfile,
   ImportTransaction,
@@ -39,6 +40,7 @@ import {
   exportSupplierPaymentPDF,
 } from '../utils/exportReports';
 import { SearchableSelect } from './SearchableSelect';
+import { CrossLinkChip, FocusedLinkBanner } from './VoucherCrossLinkUI';
 
 export interface CreateReceiptVoucherInput {
   warehouseName: string;
@@ -75,6 +77,9 @@ interface ReceiptVoucherLogViewProps {
   selectedWarehouse: string | null;
   role: UserRole;
   canEditDelete?: boolean;
+  focusedVoucherId?: string | null;
+  onClearFocusedVoucher?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   onAddWarehouse: (name: string) => void;
   onAddReceiptGroup: (groupName: string) => void;
   onCreateReceiptVoucher: (input: CreateReceiptVoucherInput) => void;
@@ -113,6 +118,9 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
   selectedWarehouse,
   role,
   canEditDelete,
+  focusedVoucherId,
+  onClearFocusedVoucher,
+  onNavigateCrossLink,
   onAddWarehouse,
   onAddReceiptGroup,
   onCreateReceiptVoucher,
@@ -158,6 +166,19 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
   // Filter & Search
   const [searchQuery, setSearchQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
+
+  const focusedReceiptRecord = focusedVoucherId
+    ? receiptVouchers.find(
+        (rv) => rv.id === focusedVoucherId || rv.voucherCode === focusedVoucherId
+      ) || null
+    : null;
+
+  useEffect(() => {
+    if (focusedVoucherId) {
+      setSearchQuery('');
+      setGroupFilter('all');
+    }
+  }, [focusedVoucherId]);
 
   // Edit & Delete Modals
   const [editingVoucher, setEditingVoucher] = useState<CashReceiptVoucher | null>(null);
@@ -985,16 +1006,48 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
             </div>
           </div>
 
+          {focusedReceiptRecord && onClearFocusedVoucher && (
+            <FocusedLinkBanner
+              code={focusedReceiptRecord.voucherCode}
+              title={`${focusedReceiptRecord.partnerName} (+${formatVND(focusedReceiptRecord.amount)})`}
+              onClear={onClearFocusedVoucher}
+              actions={
+                isManager ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteId(focusedReceiptRecord.id)}
+                    className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-md inline-flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Hủy phiếu thu</span>
+                  </button>
+                ) : undefined
+              }
+            />
+          )}
+
           <div className="divide-y divide-stone-100">
             {filteredVouchers.length === 0 ? (
               <div className="px-5 py-12 text-center text-sm text-stone-400">
                 Chưa có phiếu thu tiền nào khớp với bộ lọc.
               </div>
             ) : (
-              filteredVouchers.map((rv) => (
+              filteredVouchers.map((rv) => {
+                const isFocused = focusedReceiptRecord?.id === rv.id;
+                const matchedCustomer = customers.find(
+                  (c) =>
+                    (rv.partnerId && c.id === rv.partnerId) ||
+                    (Boolean(rv.partnerPhone) && c.phone === rv.partnerPhone) ||
+                    c.name.trim().toLowerCase() === rv.partnerName.trim().toLowerCase()
+                );
+                return (
                 <div
                   key={rv.id}
-                  className="p-4 hover:bg-stone-50/70 transition-colors flex flex-col gap-2.5"
+                  className={`p-4 transition-colors flex flex-col gap-2.5 ${
+                    isFocused
+                      ? 'bg-emerald-50/80 ring-2 ring-inset ring-emerald-500'
+                      : 'hover:bg-stone-50/70'
+                  }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
@@ -1012,14 +1065,29 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                           Ngày: {(rv.createdAt || '').slice(0, 10)}
                         </span>
                       </div>
-                      <p className="text-sm font-bold text-stone-900 mt-1.5">
-                        {rv.partnerName}{' '}
-                        {rv.partnerPhone && (
-                          <span className="text-xs font-mono font-normal text-stone-500">
-                            ({rv.partnerPhone})
-                          </span>
+                      <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                        <p className="text-sm font-bold text-stone-900">
+                          {rv.partnerName}{' '}
+                          {rv.partnerPhone && (
+                            <span className="text-xs font-mono font-normal text-stone-500">
+                              ({rv.partnerPhone})
+                            </span>
+                          )}
+                        </p>
+                        {onNavigateCrossLink && matchedCustomer && (
+                          <CrossLinkChip
+                            tone="sky"
+                            label="Hồ sơ KH"
+                            onClick={() =>
+                              onNavigateCrossLink({
+                                tab: 'customers',
+                                recordId: matchedCustomer.id,
+                                label: `Khách hàng ${matchedCustomer.name}`,
+                              })
+                            }
+                          />
                         )}
-                      </p>
+                      </div>
                     </div>
                     <div className="text-right">
                       <p className="text-base font-bold font-mono tabular-nums text-emerald-700">
@@ -1029,14 +1097,14 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Settled invoices breakdown if FIFO debt settlement */}
+                  {/* Settled invoices breakdown with clickable cross-links */}
                   {rv.isDebtSettlement &&
                     rv.settledAllocations &&
                     rv.settledAllocations.length > 0 && (
                       <div className="p-2.5 rounded-lg bg-amber-50/70 border border-amber-200/80 space-y-1.5">
                         <div className="flex items-center justify-between text-[11px] font-semibold text-amber-950">
                           <span>
-                            Đã tự động trừ quyết toán {rv.settledAllocations.length} hóa đơn theo thứ tự ngày nợ:
+                            Đã tự động trừ quyết toán {rv.settledAllocations.length} hóa đơn (bấm mã HĐ để mở):
                           </span>
                           {rv.totalRemainingDebt !== undefined && (
                             <span>
@@ -1048,18 +1116,57 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                           )}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
-                          {rv.settledAllocations.map((alloc) => (
-                            <span
-                              key={`${rv.id}-${alloc.recordId}`}
-                              className="inline-flex items-center gap-1 text-[11px] font-mono bg-white border border-amber-300 text-stone-800 px-2 py-0.5 rounded"
-                            >
-                              <strong>{alloc.code}</strong> ({alloc.date}): trừ{' '}
-                              <strong className="text-emerald-700">
-                                {formatVND(alloc.allocatedAmount)}
-                              </strong>{' '}
-                              → còn {formatVND(alloc.remainingDebt)}
-                            </span>
-                          ))}
+                          {rv.settledAllocations.map((alloc) => {
+                            const existingSale = sales.find(
+                              (s) => s.id === alloc.recordId || s.invoiceCode === alloc.code
+                            );
+                            return (
+                              <div
+                                key={`${rv.id}-${alloc.recordId}`}
+                                className="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-mono bg-white border border-amber-300 text-stone-800 px-2 py-0.5 rounded"
+                              >
+                                {onNavigateCrossLink && existingSale ? (
+                                  <CrossLinkChip
+                                    tone="emerald"
+                                    label={alloc.code}
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'sales',
+                                        recordId: existingSale.id,
+                                        voucherCode: existingSale.invoiceCode,
+                                        label: `Hóa đơn ${existingSale.invoiceCode}`,
+                                      })
+                                    }
+                                  />
+                                ) : (
+                                  <span className="font-bold text-rose-700">
+                                    {alloc.code} {!existingSale ? '(HĐ đã hủy)' : ''}
+                                  </span>
+                                )}
+                                <span>
+                                  ({alloc.date}): trừ{' '}
+                                  <strong className="text-emerald-700">
+                                    {formatVND(alloc.allocatedAmount)}
+                                  </strong>{' '}
+                                  → còn {formatVND(alloc.remainingDebt)}
+                                </span>
+                                {onNavigateCrossLink && existingSale && existingSale.debtAmount > 0 && (
+                                  <CrossLinkChip
+                                    tone="amber"
+                                    label="Công nợ"
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'debts',
+                                        recordId: existingSale.id,
+                                        subTab: 'customer',
+                                        label: `Công nợ ${existingSale.invoiceCode}`,
+                                      })
+                                    }
+                                  />
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -1109,17 +1216,19 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                           <button
                             type="button"
                             onClick={() => setConfirmDeleteId(rv.id)}
-                            className="p-1 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-md"
-                            title="Xóa phiếu thu"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md"
+                            title="Hủy / Xóa phiếu thu"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hủy phiếu</span>
                           </button>
                         </>
                       )}
                     </div>
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
@@ -1306,6 +1415,9 @@ interface PaymentVoucherLogViewProps {
   selectedWarehouse: string | null;
   role: UserRole;
   canEditDelete?: boolean;
+  focusedVoucherId?: string | null;
+  onClearFocusedVoucher?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   onAddWarehouse: (name: string) => void;
   onAddPaymentGroup: (groupName: string) => void;
   onCreatePaymentVoucher: (input: CreatePaymentVoucherInput) => void;
@@ -1340,6 +1452,9 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
   selectedWarehouse,
   role,
   canEditDelete,
+  focusedVoucherId,
+  onClearFocusedVoucher,
+  onNavigateCrossLink,
   onAddWarehouse,
   onAddPaymentGroup,
   onCreatePaymentVoucher,
@@ -1382,6 +1497,19 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
   // Filter & Search
   const [searchQuery, setSearchQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState<string>('all');
+
+  const focusedPaymentRecord = focusedVoucherId
+    ? paymentVouchers.find(
+        (pv) => pv.id === focusedVoucherId || pv.voucherCode === focusedVoucherId
+      ) || null
+    : null;
+
+  useEffect(() => {
+    if (focusedVoucherId) {
+      setSearchQuery('');
+      setGroupFilter('all');
+    }
+  }, [focusedVoucherId]);
 
   // Edit & Delete Modals
   const [editingVoucher, setEditingVoucher] = useState<CashPaymentVoucher | null>(null);
@@ -2196,16 +2324,42 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
             </div>
           </div>
 
+          {focusedPaymentRecord && onClearFocusedVoucher && (
+            <FocusedLinkBanner
+              code={focusedPaymentRecord.voucherCode}
+              title={`${focusedPaymentRecord.partnerName} (-${formatVND(focusedPaymentRecord.amount)})`}
+              onClear={onClearFocusedVoucher}
+              actions={
+                isManager ? (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeleteId(focusedPaymentRecord.id)}
+                    className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-md inline-flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    <span>Hủy phiếu chi</span>
+                  </button>
+                ) : undefined
+              }
+            />
+          )}
+
           <div className="divide-y divide-stone-100">
             {filteredVouchers.length === 0 ? (
               <div className="px-5 py-12 text-center text-sm text-stone-400">
                 Chưa có phiếu chi tiền nào khớp với bộ lọc.
               </div>
             ) : (
-              filteredVouchers.map((pv) => (
+              filteredVouchers.map((pv) => {
+                const isFocused = focusedPaymentRecord?.id === pv.id;
+                return (
                 <div
                   key={pv.id}
-                  className="p-4 hover:bg-stone-50/70 transition-colors flex flex-col gap-2.5"
+                  className={`p-4 transition-colors flex flex-col gap-2.5 ${
+                    isFocused
+                      ? 'bg-amber-50/80 ring-2 ring-inset ring-amber-500'
+                      : 'hover:bg-stone-50/70'
+                  }`}
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
                     <div>
@@ -2240,14 +2394,14 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Settled import receipts breakdown if FIFO debt settlement */}
+                  {/* Settled import receipts breakdown with clickable cross-links */}
                   {pv.isDebtSettlement &&
                     pv.settledAllocations &&
                     pv.settledAllocations.length > 0 && (
                       <div className="p-2.5 rounded-lg bg-amber-50/70 border border-amber-200/80 space-y-1.5">
                         <div className="flex items-center justify-between text-[11px] font-semibold text-amber-950">
                           <span>
-                            Đã tự động trừ quyết toán {pv.settledAllocations.length} phiếu nhập theo thứ tự ngày nợ:
+                            Đã tự động trừ quyết toán {pv.settledAllocations.length} phiếu nhập (bấm mã PN để mở):
                           </span>
                           {pv.totalRemainingDebt !== undefined && (
                             <span>
@@ -2259,18 +2413,57 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                           )}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
-                          {pv.settledAllocations.map((alloc) => (
-                            <span
-                              key={`${pv.id}-${alloc.recordId}`}
-                              className="inline-flex items-center gap-1 text-[11px] font-mono bg-white border border-amber-300 text-stone-800 px-2 py-0.5 rounded"
-                            >
-                              <strong>{alloc.code}</strong> ({alloc.date}): trừ{' '}
-                              <strong className="text-emerald-700">
-                                {formatVND(alloc.allocatedAmount)}
-                              </strong>{' '}
-                              → còn {formatVND(alloc.remainingDebt)}
-                            </span>
-                          ))}
+                          {pv.settledAllocations.map((alloc) => {
+                            const existingImp = imports.find(
+                              (i) => i.id === alloc.recordId || i.receiptCode === alloc.code
+                            );
+                            return (
+                              <div
+                                key={`${pv.id}-${alloc.recordId}`}
+                                className="inline-flex flex-wrap items-center gap-1.5 text-[11px] font-mono bg-white border border-amber-300 text-stone-800 px-2 py-0.5 rounded"
+                              >
+                                {onNavigateCrossLink && existingImp ? (
+                                  <CrossLinkChip
+                                    tone="emerald"
+                                    label={alloc.code}
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'imports',
+                                        recordId: existingImp.id,
+                                        voucherCode: existingImp.receiptCode,
+                                        label: `Phiếu nhập ${existingImp.receiptCode}`,
+                                      })
+                                    }
+                                  />
+                                ) : (
+                                  <span className="font-bold text-rose-700">
+                                    {alloc.code} {!existingImp ? '(PN đã hủy)' : ''}
+                                  </span>
+                                )}
+                                <span>
+                                  ({alloc.date}): trừ{' '}
+                                  <strong className="text-emerald-700">
+                                    {formatVND(alloc.allocatedAmount)}
+                                  </strong>{' '}
+                                  → còn {formatVND(alloc.remainingDebt)}
+                                </span>
+                                {onNavigateCrossLink && existingImp && existingImp.debtAmount > 0 && (
+                                  <CrossLinkChip
+                                    tone="amber"
+                                    label="Công nợ NCC"
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'debts',
+                                        recordId: existingImp.id,
+                                        subTab: 'supplier',
+                                        label: `Công nợ ${existingImp.receiptCode}`,
+                                      })
+                                    }
+                                  />
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}
@@ -2320,17 +2513,19 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                           <button
                             type="button"
                             onClick={() => setConfirmDeleteId(pv.id)}
-                            className="p-1 text-stone-400 hover:text-red-600 hover:bg-red-50 rounded-md"
-                            title="Xóa phiếu chi"
+                            className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md"
+                            title="Hủy / Xóa phiếu chi"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hủy phiếu</span>
                           </button>
                         </>
                       )}
                     </div>
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

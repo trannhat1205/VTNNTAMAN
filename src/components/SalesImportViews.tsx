@@ -26,6 +26,9 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CashPaymentVoucher,
+  CashReceiptVoucher,
+  CrossLinkNavigateRequest,
   CustomerGroup,
   CustomerProfile,
   ImportTransaction,
@@ -35,6 +38,7 @@ import {
   ProductNoteTemplate,
   SalePromotionType,
   SaleTransaction,
+  StockAdjustmentRecord,
   SupplierProfile,
   UserRole,
   VietQrBankConfig,
@@ -47,11 +51,20 @@ import {
   computeDueDateAfterDays,
   computeSupplierOldDebtSummary,
   DEBT_TERM_DAY_OPTIONS,
+  diagnoseImportVoucher,
+  diagnoseSaleVoucher,
   evaluateDebtUrgency,
   evaluateProductExpiry,
   formatVND,
   matchDebtTermDays,
+  normalizeVietnameseSearch,
 } from '../utils/businessLogic';
+import {
+  CancelImportConfirmModal,
+  CancelSaleConfirmModal,
+  CrossLinkChip,
+  FocusedLinkBanner,
+} from './VoucherCrossLinkUI';
 import {
   exportImportReceiptPDF,
   exportModuleDataExcel,
@@ -76,6 +89,8 @@ interface SalesLogViewProps {
   products: ProductItem[];
   customers: CustomerProfile[];
   sales: SaleTransaction[];
+  imports?: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
   role: UserRole;
   resetKey: number;
   warehouses: string[];
@@ -87,6 +102,9 @@ interface SalesLogViewProps {
   onAddProductCategory: (catName: string) => void;
   preselectedCustomerId: string | null;
   onClearPreselectedCustomer: () => void;
+  focusedSaleId?: string | null;
+  onClearFocusedSale?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   onCreateSale: (payload: {
     customerId: string;
     customerName: string;
@@ -166,6 +184,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   products,
   customers,
   sales,
+  imports = [],
+  receiptVouchers = [],
   role,
   resetKey,
   warehouses,
@@ -175,6 +195,9 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   onAddCustomerGroup,
   preselectedCustomerId,
   onClearPreselectedCustomer,
+  focusedSaleId,
+  onClearFocusedSale,
+  onNavigateCrossLink,
   onCreateSale,
   onCreateMultiItemSale,
   bankQrConfig,
@@ -276,6 +299,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | PaymentStatus>('all');
   const [warehouseTableFilter, setWarehouseTableFilter] = useState<string>('all');
+  const [cancelingSale, setCancelingSale] = useState<SaleTransaction | null>(null);
+
+  const focusedSaleRecord = focusedSaleId
+    ? sales.find((s) => s.id === focusedSaleId || s.invoiceCode === focusedSaleId) || null
+    : null;
+
+  useEffect(() => {
+    if (focusedSaleId) {
+      setSearchQuery('');
+      setStatusFilter('all');
+      setWarehouseTableFilter('all');
+    }
+  }, [focusedSaleId]);
 
   // Manager-only Edit Saved Sale Invoice State
   const [editingSale, setEditingSale] = useState<SaleTransaction | null>(null);
@@ -2972,6 +3008,39 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             </div>
           </div>
 
+          {/* Focused Cross-Link Banner */}
+          {focusedSaleRecord && onClearFocusedSale && (
+            <FocusedLinkBanner
+              code={focusedSaleRecord.invoiceCode}
+              title={`${focusedSaleRecord.customerName} · ${focusedSaleRecord.productName} (${formatVND(
+                focusedSaleRecord.totalAmount
+              )})`}
+              onClear={onClearFocusedSale}
+              actions={
+                canPerformRoleAction(role, 'edit_record') ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => openEditSaleModal(focusedSaleRecord)}
+                      className="px-2.5 py-1 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-md inline-flex items-center gap-1"
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span>Sửa HĐ</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCancelingSale(focusedSaleRecord)}
+                      className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-md inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Hủy HĐ</span>
+                    </button>
+                  </>
+                ) : undefined
+              }
+            />
+          )}
+
           {/* Mobile Card View (< md): Full-width balanced layout, zero column squishing */}
           <div className="md:hidden divide-y divide-slate-200">
             {filteredSales.length === 0 ? (
@@ -2979,8 +3048,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 Không có hóa đơn bán hàng nào khớp với bộ lọc hiện tại.
               </div>
             ) : (
-              filteredSales.map((s) => (
-                <div key={s.id} className="p-4 space-y-3 hover:bg-slate-50">
+              filteredSales.map((s) => {
+                const diag = diagnoseSaleVoucher({
+                  sale: s,
+                  products,
+                  customers,
+                  imports,
+                  receiptVouchers,
+                });
+                const isFocused = focusedSaleRecord?.id === s.id;
+                return (
+                <div
+                  key={s.id}
+                  className={`p-4 space-y-3 transition-colors ${
+                    isFocused
+                      ? 'bg-emerald-50/80 ring-2 ring-inset ring-emerald-500'
+                      : 'hover:bg-slate-50'
+                  }`}
+                >
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="font-mono text-xs font-bold text-slate-900">
@@ -3063,6 +3148,91 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     </div>
                   </div>
 
+                  {onNavigateCrossLink && (
+                    <div className="pt-1 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
+                      {diag.statusLevel !== 'ok' && (
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                            diag.statusLevel === 'blocked'
+                              ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-amber-50 text-amber-800 border-amber-200'
+                          }`}
+                        >
+                          {diag.statusLabel}
+                        </span>
+                      )}
+                      {diag.linkedCustomer && (
+                        <CrossLinkChip
+                          tone="slate"
+                          label={`KH: ${diag.linkedCustomer.name}`}
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'customers',
+                              recordId: diag.linkedCustomer!.id,
+                              label: `Khách hàng ${diag.linkedCustomer!.name}`,
+                            })
+                          }
+                        />
+                      )}
+                      {diag.linkedProduct && (
+                        <CrossLinkChip
+                          tone="indigo"
+                          label={`Kho: ${diag.linkedProduct.stock} ${diag.linkedProduct.unit}`}
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'inventory',
+                              recordId: diag.linkedProduct!.id,
+                              label: `Thẻ kho ${diag.linkedProduct!.name}`,
+                            })
+                          }
+                        />
+                      )}
+                      {s.debtAmount > 0 && (
+                        <CrossLinkChip
+                          tone="amber"
+                          label="Công nợ KH"
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'debts',
+                              recordId: s.id,
+                              subTab: 'customer',
+                              label: `Công nợ ${s.invoiceCode}`,
+                            })
+                          }
+                        />
+                      )}
+                      {diag.linkedReceiptVouchers.map((rv) => (
+                        <CrossLinkChip
+                          key={rv.id}
+                          tone="rose"
+                          label={rv.voucherCode}
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'receipt_vouchers',
+                              recordId: rv.id,
+                              voucherCode: rv.voucherCode,
+                              label: `Phiếu thu ${rv.voucherCode}`,
+                            })
+                          }
+                        />
+                      ))}
+                      {diag.relatedImports[0] && (
+                        <CrossLinkChip
+                          tone="emerald"
+                          label={diag.relatedImports[0].receiptCode}
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'imports',
+                              recordId: diag.relatedImports[0].id,
+                              voucherCode: diag.relatedImports[0].receiptCode,
+                              label: `Phiếu nhập ${diag.relatedImports[0].receiptCode}`,
+                            })
+                          }
+                        />
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button
@@ -3075,14 +3245,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <button
                         type="button"
                         onClick={() => handleExportGroupedThermalPdf(s, 80)}
-                        className="px-2 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap"
+                        className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap"
                       >
                         K80
                       </button>
                       <button
                         type="button"
                         onClick={() => handleOpenSaleVietQr(findInvoiceGroupSales(sales, s))}
-                        className="px-2 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
+                        className="px-2.5 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
                       >
                         <QrCode className="w-3 h-3" />
                         <span>QR</span>
@@ -3090,7 +3260,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <button
                         type="button"
                         onClick={() => handleSendInvoiceZalo(findInvoiceGroupSales(sales, s))}
-                        className="px-2 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
+                        className="px-2.5 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 hover:bg-sky-100 border border-sky-200 rounded-md inline-flex items-center gap-1 whitespace-nowrap"
                       >
                         <MessageCircle className="w-3 h-3" />
                         <span>Zalo</span>
@@ -3110,19 +3280,12 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => {
-                            if (
-                              window.confirm(
-                                `Xác nhận xóa hóa đơn ${s.invoiceCode} (${s.customerName}) và hoàn lại tồn kho?`
-                              )
-                            ) {
-                              onDeleteSale(s.id);
-                            }
-                          }}
-                          aria-label={`Xóa hóa đơn ${s.invoiceCode}`}
-                          className="p-1.5 text-slate-400 hover:text-red-600 rounded-md border border-slate-200"
+                          onClick={() => setCancelingSale(s)}
+                          aria-label={`Hủy hóa đơn ${s.invoiceCode}`}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3 h-3" />
+                          <span>Hủy HĐ</span>
                         </button>
                       </div>
                     ) : (
@@ -3136,7 +3299,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     )}
                   </div>
                 </div>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -3156,8 +3320,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-sm">
-                {filteredSales.map((s) => (
-                  <tr key={s.id} className="hover:bg-slate-50">
+                {filteredSales.map((s) => {
+                  const diag = diagnoseSaleVoucher({
+                    sale: s,
+                    products,
+                    customers,
+                    imports,
+                    receiptVouchers,
+                  });
+                  const isFocused = focusedSaleRecord?.id === s.id;
+                  return (
+                  <tr
+                    key={s.id}
+                    className={`transition-colors ${
+                      isFocused
+                        ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-500'
+                        : 'hover:bg-slate-50'
+                    }`}
+                  >
                     <td className="py-3 px-4 whitespace-nowrap align-middle">
                       <div className="font-mono text-xs font-semibold text-slate-900">
                         {s.invoiceCode}
@@ -3168,13 +3348,60 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <div className="text-[11px] font-mono text-slate-500">
                         {s.createdAt.slice(0, 10)}
                       </div>
+                      {diag.statusLevel !== 'ok' && (
+                        <div className="mt-1">
+                          <span
+                            className={`inline-block px-1.5 py-0.5 text-[10px] font-bold rounded border ${
+                              diag.statusLevel === 'blocked'
+                                ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                : 'bg-amber-50 text-amber-800 border-amber-200'
+                            }`}
+                          >
+                            {diag.statusLabel}
+                          </span>
+                        </div>
+                      )}
                     </td>
                     <td className="py-3 px-4 min-w-[180px] align-middle">
-                      <div className="font-semibold text-slate-900 leading-snug">{s.customerName}</div>
+                      {onNavigateCrossLink && diag.linkedCustomer ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'customers',
+                              recordId: diag.linkedCustomer!.id,
+                              label: `Khách hàng ${diag.linkedCustomer!.name}`,
+                            })
+                          }
+                          className="font-semibold text-slate-900 hover:text-emerald-800 hover:underline leading-snug text-left"
+                          title="Bấm để mở hồ sơ & công nợ khách hàng"
+                        >
+                          {s.customerName}
+                        </button>
+                      ) : (
+                        <div className="font-semibold text-slate-900 leading-snug">{s.customerName}</div>
+                      )}
                       <div className="text-xs font-mono text-slate-500 mt-0.5">{s.customerPhone}</div>
                     </td>
                     <td className="py-3 px-4 min-w-[220px] align-middle">
-                      <div className="text-xs font-medium text-slate-900 leading-snug">{s.productName}</div>
+                      {onNavigateCrossLink && diag.linkedProduct ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onNavigateCrossLink({
+                              tab: 'inventory',
+                              recordId: diag.linkedProduct!.id,
+                              label: `Thẻ kho ${diag.linkedProduct!.name}`,
+                            })
+                          }
+                          className="text-xs font-semibold text-slate-900 hover:text-indigo-800 hover:underline leading-snug text-left"
+                          title="Bấm để mở Thẻ kho Xuất - Nhập - Tồn"
+                        >
+                          {s.productName}
+                        </button>
+                      ) : (
+                        <div className="text-xs font-medium text-slate-900 leading-snug">{s.productName}</div>
+                      )}
                       <div className="text-xs font-mono text-slate-500 mt-0.5">
                         {s.quantity} {s.unit} × {formatVND(s.unitPrice)}
                       </div>
@@ -3204,6 +3431,66 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           </span>
                         </div>
                       )}
+                      {onNavigateCrossLink && (
+                        <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                          {diag.linkedProduct && (
+                            <CrossLinkChip
+                              tone="indigo"
+                              label={`Kho: ${diag.linkedProduct.stock} ${diag.linkedProduct.unit}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'inventory',
+                                  recordId: diag.linkedProduct!.id,
+                                  label: `Thẻ kho ${diag.linkedProduct!.name}`,
+                                })
+                              }
+                            />
+                          )}
+                          {s.debtAmount > 0 && (
+                            <CrossLinkChip
+                              tone="amber"
+                              label="Công nợ"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'debts',
+                                  recordId: s.id,
+                                  subTab: 'customer',
+                                  label: `Công nợ ${s.invoiceCode}`,
+                                })
+                              }
+                            />
+                          )}
+                          {diag.linkedReceiptVouchers.map((rv) => (
+                            <CrossLinkChip
+                              key={rv.id}
+                              tone="rose"
+                              label={rv.voucherCode}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'receipt_vouchers',
+                                  recordId: rv.id,
+                                  voucherCode: rv.voucherCode,
+                                  label: `Phiếu thu ${rv.voucherCode}`,
+                                })
+                              }
+                            />
+                          ))}
+                          {diag.relatedImports[0] && (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label={diag.relatedImports[0].receiptCode}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'imports',
+                                  recordId: diag.relatedImports[0].id,
+                                  voucherCode: diag.relatedImports[0].receiptCode,
+                                  label: `Phiếu nhập ${diag.relatedImports[0].receiptCode}`,
+                                })
+                              }
+                            />
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
                       {formatVND(s.totalAmount)}
@@ -3213,9 +3500,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         Thu: {formatVND(s.paidAmount)}
                       </div>
                       {s.debtAmount > 0 ? (
-                        <div className="font-mono tabular-nums text-xs font-semibold text-red-600 mt-0.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onNavigateCrossLink
+                              ? onNavigateCrossLink({
+                                  tab: 'debts',
+                                  recordId: s.id,
+                                  subTab: 'customer',
+                                  label: `Công nợ ${s.invoiceCode}`,
+                                })
+                              : onOpenDebtRecord?.(s.id)
+                          }
+                          className="font-mono tabular-nums text-xs font-semibold text-red-600 hover:underline mt-0.5"
+                          title="Bấm để mở trang Công nợ thu tiền"
+                        >
                           Nợ: {formatVND(s.debtAmount)} (Hạn {s.dueDate})
-                        </div>
+                        </button>
                       ) : (
                         <div className="text-xs text-slate-500 mt-0.5">Đã tất toán</div>
                       )}
@@ -3269,19 +3570,12 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                if (
-                                  window.confirm(
-                                    `Xác nhận xóa hóa đơn ${s.invoiceCode} (${s.customerName}) và hoàn lại tồn kho?`
-                                  )
-                                ) {
-                                  onDeleteSale(s.id);
-                                }
-                              }}
-                              aria-label={`Xóa hóa đơn ${s.invoiceCode}`}
-                              className="p-1.5 text-slate-400 hover:text-red-600 rounded-md"
+                              onClick={() => setCancelingSale(s)}
+                              aria-label={`Hủy hóa đơn ${s.invoiceCode}`}
+                              className="px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3 h-3" />
+                              <span>Hủy</span>
                             </button>
                           </>
                         ) : (
@@ -3296,7 +3590,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -3623,24 +3918,51 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
               </div>
 
-              <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2.5 shrink-0">
+              <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex flex-wrap items-center justify-between gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setEditingSale(null)}
-                  className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  onClick={() => {
+                    const target = editingSale;
+                    setEditingSale(null);
+                    setCancelingSale(target);
+                  }}
+                  className="px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg inline-flex items-center gap-1"
                 >
-                  Hủy
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Hủy hóa đơn</span>
                 </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
-                >
-                  Lưu thay đổi hóa đơn
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingSale(null)}
+                    className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  >
+                    Đóng
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                  >
+                    Lưu thay đổi hóa đơn
+                  </button>
+                </div>
               </div>
             </form>
           </div>
         </div>
+      )}
+
+      {cancelingSale && (
+        <CancelSaleConfirmModal
+          targetSale={cancelingSale}
+          products={products}
+          customers={customers}
+          imports={imports}
+          receiptVouchers={receiptVouchers}
+          onClose={() => setCancelingSale(null)}
+          onConfirmDelete={onDeleteSale}
+          onNavigateCrossLink={onNavigateCrossLink}
+        />
       )}
 
       <BarcodeScannerModal
@@ -3689,7 +4011,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 interface ImportLogViewProps {
   products: ProductItem[];
   customers: CustomerProfile[];
+  sales?: SaleTransaction[];
   imports: ImportTransaction[];
+  paymentVouchers?: CashPaymentVoucher[];
+  stockAdjustments?: StockAdjustmentRecord[];
   suppliers: SupplierProfile[];
   role: UserRole;
   warehouses: string[];
@@ -3697,6 +4022,9 @@ interface ImportLogViewProps {
   lockedWarehouse: string | null;
   preselectedProductId: string | null;
   onClearPreselectedProduct: () => void;
+  focusedImportId?: string | null;
+  onClearFocusedImport?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   onCreateImport: (payload: {
     supplierName: string;
     supplierPhone: string;
@@ -3740,7 +4068,10 @@ interface ImportLogViewProps {
 export const ImportLogView: React.FC<ImportLogViewProps> = ({
   products,
   customers,
+  sales = [],
   imports,
+  paymentVouchers = [],
+  stockAdjustments = [],
   suppliers,
   role,
   warehouses,
@@ -3748,6 +4079,9 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   lockedWarehouse,
   preselectedProductId,
   onClearPreselectedProduct,
+  focusedImportId,
+  onClearFocusedImport,
+  onNavigateCrossLink,
   onCreateImport,
   onCreateProductInline,
   onCreateSupplierInline,
@@ -3763,9 +4097,39 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [showNewWarehouseBox, setShowNewWarehouseBox] = useState<boolean>(false);
   const [newWarehouseName, setNewWarehouseName] = useState<string>('');
 
-  // Manager-only Edit Saved Import Receipt State
+  // Manager-only Edit / Cancel Saved Import Receipt State
   const [editingImport, setEditingImport] = useState<ImportTransaction | null>(null);
+  const [cancelingImport, setCancelingImport] = useState<ImportTransaction | null>(null);
+  const [importSearchQuery, setImportSearchQuery] = useState('');
+  const [importStatusFilter, setImportStatusFilter] = useState<'all' | 'debt' | 'paid' | 'issues'>('all');
   const [editImpCode, setEditImpCode] = useState('');
+
+  const openEditImportModal = (imp: ImportTransaction) => {
+    if (!canPerformRoleAction(role, 'edit_record')) return;
+    setEditingImport(imp);
+    setEditImpCode(imp.receiptCode);
+    setEditImpWarehouse(imp.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi');
+    setEditImpSupplierName(imp.supplierName);
+    setEditImpSupplierPhone(imp.supplierPhone);
+    setEditImpProductName(imp.productName);
+    setEditImpUnit(imp.unit);
+    setEditImpQty(String(imp.quantity));
+    setEditImpCost(String(imp.unitCost));
+    setEditImpPaid(String(imp.paidAmount));
+    setEditImpDueDate(imp.dueDate);
+    setEditImpNote(imp.note);
+  };
+
+  const focusedImportRecord = focusedImportId
+    ? imports.find((i) => i.id === focusedImportId || i.receiptCode === focusedImportId) || null
+    : null;
+
+  useEffect(() => {
+    if (focusedImportId) {
+      setImportSearchQuery('');
+      setImportStatusFilter('all');
+    }
+  }, [focusedImportId]);
   const [editImpWarehouse, setEditImpWarehouse] = useState('');
   const [editImpSupplierName, setEditImpSupplierName] = useState('');
   const [editImpSupplierPhone, setEditImpSupplierPhone] = useState('');
@@ -4816,24 +5180,129 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
         </div>
 
         {/* Right: Import History Table */}
+        {(() => {
+          const importEntries = imports.map((imp) => ({
+            imp,
+            diag: diagnoseImportVoucher({
+              imp,
+              products,
+              sales,
+              imports,
+              paymentVouchers,
+              stockAdjustments,
+            }),
+          }));
+          const qNorm = normalizeVietnameseSearch(importSearchQuery);
+          const filteredImportEntries = importEntries.filter(({ imp, diag }) => {
+            if (importStatusFilter === 'debt' && imp.debtAmount <= 0) return false;
+            if (importStatusFilter === 'paid' && imp.debtAmount > 0) return false;
+            if (importStatusFilter === 'issues' && diag.statusLevel === 'ok') return false;
+            if (!qNorm) return true;
+            const hay = normalizeVietnameseSearch(
+              `${imp.receiptCode} ${imp.supplierName} ${imp.supplierPhone} ${imp.productName} ${imp.warehouseName || ''} ${diag.statusLabel}`
+            );
+            return hay.includes(qNorm);
+          });
+          const issuesCount = importEntries.filter((e) => e.diag.statusLevel !== 'ok').length;
+
+          return (
         <div className="xl:col-span-7 bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <div className="p-5 border-b border-slate-200">
-            <h3 className="text-base font-bold text-slate-900">
-              Nhật Ký Nhập Hàng
-            </h3>
+          <div className="p-5 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                Nhật Ký Nhập Hàng ({filteredImportEntries.length} phiếu)
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Hỗ trợ Sửa / Hủy phiếu mua hàng và liên kết đối soát nhanh Tồn kho, Công nợ &amp; Phiếu chi
+              </p>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={importSearchQuery}
+                  onChange={(e) => setImportSearchQuery(e.target.value)}
+                  placeholder="Tìm mã PN, NCC, vật tư..."
+                  aria-label="Tìm kiếm phiếu nhập hàng"
+                  className="w-full sm:w-48 pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                />
+              </div>
+              <div className="grid grid-cols-2 sm:flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                {(
+                  [
+                    { id: 'all', label: 'Tất cả' },
+                    { id: 'debt', label: 'Còn nợ NCC' },
+                    { id: 'paid', label: 'Đã trả đủ' },
+                    { id: 'issues', label: `Cảnh báo (${issuesCount})` },
+                  ] as const
+                ).map((st) => (
+                  <button
+                    key={st.id}
+                    type="button"
+                    onClick={() => setImportStatusFilter(st.id)}
+                    className={`px-2 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                      importStatusFilter === st.id
+                        ? 'bg-white text-slate-900 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    {st.label}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
+
+          {focusedImportRecord && onClearFocusedImport && (
+            <FocusedLinkBanner
+              code={focusedImportRecord.receiptCode}
+              title={`${focusedImportRecord.supplierName} · ${focusedImportRecord.productName} (+${focusedImportRecord.quantity} ${focusedImportRecord.unit})`}
+              onClear={onClearFocusedImport}
+              actions={
+                canPerformRoleAction(role, 'edit_record') ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => openEditImportModal(focusedImportRecord)}
+                      className="px-2.5 py-1 text-xs font-semibold text-slate-800 bg-white border border-slate-300 hover:bg-slate-100 rounded-md inline-flex items-center gap-1"
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span>Sửa phiếu</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCancelingImport(focusedImportRecord)}
+                      className="px-2.5 py-1 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-md inline-flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>Hủy phiếu</span>
+                    </button>
+                  </>
+                ) : undefined
+              }
+            />
+          )}
 
           {/* Mobile Card View (< md): Full-width balanced layout, zero column squishing */}
           <div className="md:hidden divide-y divide-slate-200">
-            {imports.length === 0 ? (
+            {filteredImportEntries.length === 0 ? (
               <div className="py-10 px-4 text-center text-xs text-slate-500">
-                Chưa có phiếu nhập kho nào trong danh sách.
+                Chưa có phiếu nhập kho nào khớp với bộ lọc hiện tại.
               </div>
             ) : (
-              imports.map((imp) => {
+              filteredImportEntries.map(({ imp, diag }) => {
                 const { urgency } = evaluateDebtUrgency(imp.dueDate, imp.debtAmount);
+                const isFocused = focusedImportRecord?.id === imp.id;
                 return (
-                  <div key={imp.id} className="p-4 space-y-3 hover:bg-slate-50">
+                  <div
+                    key={imp.id}
+                    className={`p-4 space-y-3 transition-colors ${
+                      isFocused
+                        ? 'bg-emerald-50/80 ring-2 ring-inset ring-emerald-500'
+                        : 'hover:bg-slate-50'
+                    }`}
+                  >
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <div className="font-mono text-xs font-bold text-slate-900">
@@ -4892,6 +5361,87 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                       </div>
                     </div>
 
+                    {/* Cross-Document Links & Diagnostic Strip (Mobile) */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {diag.statusLevel !== 'ok' && (
+                        <span
+                          className={`px-2 py-0.5 text-[11px] font-bold rounded border ${
+                            diag.statusLevel === 'blocked'
+                              ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-amber-50 text-amber-800 border-amber-200'
+                          }`}
+                        >
+                          {diag.statusLabel}
+                        </span>
+                      )}
+                      {onNavigateCrossLink && (
+                        <>
+                          {diag.linkedProduct && (
+                            <CrossLinkChip
+                              tone="indigo"
+                              label={`Thẻ kho: ${diag.linkedProduct.code} (Tồn ${diag.linkedProduct.stock})`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'inventory',
+                                  recordId: diag.linkedProduct!.id,
+                                  label: `Thẻ kho ${diag.linkedProduct!.name}`,
+                                })
+                              }
+                            />
+                          )}
+                          {imp.debtAmount > 0 && (
+                            <CrossLinkChip
+                              tone="amber"
+                              label="Công nợ NCC"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'debts',
+                                  recordId: imp.id,
+                                  subTab: 'supplier',
+                                  label: `Công nợ ${imp.receiptCode}`,
+                                })
+                              }
+                            />
+                          )}
+                          {diag.linkedPaymentVouchers.map((pv) => (
+                            <CrossLinkChip
+                              key={pv.id}
+                              tone="rose"
+                              label={`Phiếu chi ${pv.voucherCode}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'payment_vouchers',
+                                  recordId: pv.id,
+                                  voucherCode: pv.voucherCode,
+                                  label: `Phiếu chi ${pv.voucherCode}`,
+                                })
+                              }
+                            />
+                          ))}
+                          {diag.relatedSales.slice(0, 2).map((s) => (
+                            <CrossLinkChip
+                              key={s.id}
+                              tone="sky"
+                              label={`HĐ bán ${s.invoiceCode}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'sales',
+                                  recordId: s.id,
+                                  voucherCode: s.invoiceCode,
+                                  label: `Hóa đơn ${s.invoiceCode}`,
+                                })
+                              }
+                            />
+                          ))}
+                          {diag.relatedSales.length === 0 && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-600 rounded">
+                              0 HĐ bán liên kết
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                       <div className="flex items-center gap-2">
                         <button
@@ -4918,22 +5468,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         <div className="flex items-center gap-1.5">
                           <button
                             type="button"
-                            onClick={() => {
-                              setEditingImport(imp);
-                              setEditImpCode(imp.receiptCode);
-                              setEditImpWarehouse(
-                                imp.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi'
-                              );
-                              setEditImpSupplierName(imp.supplierName);
-                              setEditImpSupplierPhone(imp.supplierPhone);
-                              setEditImpProductName(imp.productName);
-                              setEditImpUnit(imp.unit);
-                              setEditImpQty(String(imp.quantity));
-                              setEditImpCost(String(imp.unitCost));
-                              setEditImpPaid(String(imp.paidAmount));
-                              setEditImpDueDate(imp.dueDate);
-                              setEditImpNote(imp.note);
-                            }}
+                            onClick={() => openEditImportModal(imp)}
                             aria-label={`Sửa phiếu nhập ${imp.receiptCode}`}
                             className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                           >
@@ -4942,19 +5477,12 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  `Xác nhận xóa phiếu nhập ${imp.receiptCode} (${imp.supplierName})?`
-                                )
-                              ) {
-                                onDeleteImport(imp.id);
-                              }
-                            }}
-                            aria-label={`Xóa phiếu nhập ${imp.receiptCode}`}
-                            className="p-1.5 text-slate-400 hover:text-red-600 rounded-md border border-slate-200"
+                            onClick={() => setCancelingImport(imp)}
+                            aria-label={`Hủy phiếu mua hàng ${imp.receiptCode}`}
+                            className="px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-md border border-rose-200 flex items-center gap-1 whitespace-nowrap"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hủy phiếu</span>
                           </button>
                         </div>
                       ) : (
@@ -4975,24 +5503,39 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
           {/* Desktop Balanced Table (>= md) */}
           <div className="hidden md:block overflow-x-auto">
-            <table className="w-full min-w-[940px] text-left border-collapse">
+            <table className="w-full min-w-[980px] text-left border-collapse">
               <thead>
                 <tr className="border-b border-slate-200 bg-slate-50/70 text-xs font-semibold text-slate-600">
-                  <th className="py-3 px-4 w-[145px] whitespace-nowrap">Mã phiếu & Kho nhập</th>
-                  <th className="py-3 px-4 min-w-[185px]">Nhà cung cấp</th>
-                  <th className="py-3 px-4 min-w-[220px]">Vật tư nhập</th>
-                  <th className="py-3 px-4 w-[125px] text-right whitespace-nowrap">Tổng tiền nhập</th>
-                  <th className="py-3 px-4 w-[150px] text-right whitespace-nowrap">Công nợ NCC & Hạn trả</th>
-                  <th className="py-3 px-4 w-[165px] text-right whitespace-nowrap">
-                    Phiếu PDF / Sửa & Xóa (Quản lý)
+                  <th className="py-3 px-4 w-[155px] whitespace-nowrap">Mã phiếu &amp; Kho nhập</th>
+                  <th className="py-3 px-4 min-w-[175px]">Nhà cung cấp</th>
+                  <th className="py-3 px-4 min-w-[240px]">Vật tư nhập &amp; Liên kết chứng từ</th>
+                  <th className="py-3 px-4 w-[115px] text-right whitespace-nowrap">Tổng tiền nhập</th>
+                  <th className="py-3 px-4 w-[145px] text-right whitespace-nowrap">Công nợ NCC &amp; Hạn trả</th>
+                  <th className="py-3 px-4 w-[210px] text-right whitespace-nowrap">
+                    PDF / Sửa &amp; Hủy Phiếu
                   </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-sm">
-                {imports.map((imp) => {
+                {filteredImportEntries.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="py-10 px-4 text-center text-xs text-slate-500">
+                      Không có phiếu nhập kho nào khớp với bộ lọc hiện tại.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredImportEntries.map(({ imp, diag }) => {
                   const { urgency } = evaluateDebtUrgency(imp.dueDate, imp.debtAmount);
+                  const isFocused = focusedImportRecord?.id === imp.id;
                   return (
-                    <tr key={imp.id} className="hover:bg-slate-50">
+                    <tr
+                      key={imp.id}
+                      className={`transition-colors ${
+                        isFocused
+                          ? 'bg-emerald-50/80 ring-1 ring-inset ring-emerald-500'
+                          : 'hover:bg-slate-50'
+                      }`}
+                    >
                       <td className="py-3 px-4 whitespace-nowrap align-middle">
                         <div className="font-mono text-xs font-semibold text-slate-900">
                           {imp.receiptCode}
@@ -5003,16 +5546,112 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         <div className="text-[11px] font-mono text-slate-500">
                           {imp.createdAt.slice(0, 10)}
                         </div>
+                        {diag.statusLevel !== 'ok' && (
+                          <div className="mt-1">
+                            <span
+                              className={`inline-block px-1.5 py-0.5 text-[10px] font-bold rounded border ${
+                                diag.statusLevel === 'blocked'
+                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                              }`}
+                            >
+                              {diag.statusLabel}
+                            </span>
+                          </div>
+                        )}
                       </td>
-                      <td className="py-3 px-4 min-w-[185px] align-middle">
+                      <td className="py-3 px-4 min-w-[175px] align-middle">
                         <div className="font-semibold text-slate-900 leading-snug">{imp.supplierName}</div>
                         <div className="text-xs font-mono text-slate-500 mt-0.5">{imp.supplierPhone}</div>
                       </td>
-                      <td className="py-3 px-4 min-w-[220px] align-middle">
-                        <div className="text-xs font-medium text-slate-900 leading-snug">{imp.productName}</div>
+                      <td className="py-3 px-4 min-w-[240px] align-middle">
+                        {onNavigateCrossLink && diag.linkedProduct ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onNavigateCrossLink({
+                                tab: 'inventory',
+                                recordId: diag.linkedProduct!.id,
+                                label: `Thẻ kho ${diag.linkedProduct!.name}`,
+                              })
+                            }
+                            className="text-xs font-semibold text-slate-900 hover:text-indigo-800 hover:underline leading-snug text-left"
+                            title="Bấm để mở Thẻ kho Xuất - Nhập - Tồn"
+                          >
+                            {imp.productName}
+                          </button>
+                        ) : (
+                          <div className="text-xs font-medium text-slate-900 leading-snug">{imp.productName}</div>
+                        )}
                         <div className="text-xs font-mono text-emerald-700 font-semibold mt-0.5">
                           +{imp.quantity} {imp.unit} (Giá nhập: {formatVND(imp.unitCost)})
                         </div>
+                        {onNavigateCrossLink && (
+                          <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                            {diag.linkedProduct && (
+                              <CrossLinkChip
+                                tone="indigo"
+                                label={`Thẻ kho (Tồn ${diag.linkedProduct.stock})`}
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'inventory',
+                                    recordId: diag.linkedProduct!.id,
+                                    label: `Thẻ kho ${diag.linkedProduct!.name}`,
+                                  })
+                                }
+                              />
+                            )}
+                            {imp.debtAmount > 0 && (
+                              <CrossLinkChip
+                                tone="amber"
+                                label="Công nợ NCC"
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'debts',
+                                    recordId: imp.id,
+                                    subTab: 'supplier',
+                                    label: `Công nợ ${imp.receiptCode}`,
+                                  })
+                                }
+                              />
+                            )}
+                            {diag.linkedPaymentVouchers.map((pv) => (
+                              <CrossLinkChip
+                                key={pv.id}
+                                tone="rose"
+                                label={pv.voucherCode}
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'payment_vouchers',
+                                    recordId: pv.id,
+                                    voucherCode: pv.voucherCode,
+                                    label: `Phiếu chi ${pv.voucherCode}`,
+                                  })
+                                }
+                              />
+                            ))}
+                            {diag.relatedSales.slice(0, 2).map((s) => (
+                              <CrossLinkChip
+                                key={s.id}
+                                tone="sky"
+                                label={s.invoiceCode}
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'sales',
+                                    recordId: s.id,
+                                    voucherCode: s.invoiceCode,
+                                    label: `Hóa đơn ${s.invoiceCode}`,
+                                  })
+                                }
+                              />
+                            ))}
+                            {diag.relatedSales.length > 2 && (
+                              <span className="px-1.5 py-0.5 text-[10px] font-semibold bg-sky-50 text-sky-800 rounded">
+                                +{diag.relatedSales.length - 2} HĐ
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
                         {formatVND(imp.totalCost)}
@@ -5020,9 +5659,23 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                       <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                         {imp.debtAmount > 0 ? (
                           <div>
-                            <div className="font-mono tabular-nums text-xs font-bold text-red-600">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onNavigateCrossLink
+                                  ? onNavigateCrossLink({
+                                      tab: 'debts',
+                                      recordId: imp.id,
+                                      subTab: 'supplier',
+                                      label: `Công nợ ${imp.receiptCode}`,
+                                    })
+                                  : onOpenDebtRecord?.(imp.id)
+                              }
+                              className="font-mono tabular-nums text-xs font-bold text-red-600 hover:underline"
+                              title="Bấm để mở Công nợ NCC của phiếu này"
+                            >
                               Nợ: {formatVND(imp.debtAmount)}
-                            </div>
+                            </button>
                             <div
                               className={`text-xs font-mono mt-0.5 ${
                                 urgency === 'overdue'
@@ -5044,30 +5697,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           <button
                             type="button"
                             onClick={() => exportImportReceiptPDF(imp)}
-                            className="px-2.5 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
+                            className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                           >
-                            Xuất PDF
+                            PDF
                           </button>
                           {canPerformRoleAction(role, 'edit_record') ? (
                             <>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setEditingImport(imp);
-                                  setEditImpCode(imp.receiptCode);
-                                  setEditImpWarehouse(
-                                    imp.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi'
-                                  );
-                                  setEditImpSupplierName(imp.supplierName);
-                                  setEditImpSupplierPhone(imp.supplierPhone);
-                                  setEditImpProductName(imp.productName);
-                                  setEditImpUnit(imp.unit);
-                                  setEditImpQty(String(imp.quantity));
-                                  setEditImpCost(String(imp.unitCost));
-                                  setEditImpPaid(String(imp.paidAmount));
-                                  setEditImpDueDate(imp.dueDate);
-                                  setEditImpNote(imp.note);
-                                }}
+                                onClick={() => openEditImportModal(imp)}
                                 aria-label={`Sửa phiếu nhập ${imp.receiptCode}`}
                                 className="px-2 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                               >
@@ -5076,19 +5714,12 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                               </button>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  if (
-                                    window.confirm(
-                                      `Xác nhận xóa phiếu nhập ${imp.receiptCode} (${imp.supplierName})?`
-                                    )
-                                  ) {
-                                    onDeleteImport(imp.id);
-                                  }
-                                }}
-                                aria-label={`Xóa phiếu nhập ${imp.receiptCode}`}
-                                className="p-1.5 text-slate-400 hover:text-red-600 rounded-md"
+                                onClick={() => setCancelingImport(imp)}
+                                aria-label={`Hủy phiếu mua hàng ${imp.receiptCode}`}
+                                className="px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
+                                <Trash2 className="w-3 h-3" />
+                                <span>Hủy phiếu</span>
                               </button>
                             </>
                           ) : (
@@ -5104,11 +5735,14 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                       </td>
                     </tr>
                   );
-                })}
+                })
+                )}
               </tbody>
             </table>
           </div>
         </div>
+          );
+        })()}
       </div>
 
       {/* Excel Sample Template Download & Upload Bar (Moved to bottom of page) */}
@@ -5386,24 +6020,52 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
               </div>
 
-              <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2.5 shrink-0">
+              <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex flex-wrap items-center justify-between gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setEditingImport(null)}
-                  className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  onClick={() => {
+                    const target = editingImport;
+                    setEditingImport(null);
+                    setCancelingImport(target);
+                  }}
+                  className="px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg inline-flex items-center gap-1"
                 >
-                  Hủy
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Hủy phiếu mua hàng</span>
                 </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
-                >
-                  Lưu thay đổi phiếu nhập
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingImport(null)}
+                    className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  >
+                    Đóng
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                  >
+                    Lưu thay đổi phiếu nhập
+                  </button>
+                </div>
               </div>
             </form>
           </div>
         </div>
+      )}
+
+      {cancelingImport && (
+        <CancelImportConfirmModal
+          targetImport={cancelingImport}
+          products={products}
+          sales={sales}
+          imports={imports}
+          paymentVouchers={paymentVouchers}
+          stockAdjustments={stockAdjustments}
+          onClose={() => setCancelingImport(null)}
+          onConfirmDelete={onDeleteImport}
+          onNavigateCrossLink={onNavigateCrossLink}
+        />
       )}
 
       <BarcodeScannerModal

@@ -30,8 +30,13 @@ import {
   computeWeightedAverageImportPrice,
   createAuditLogEntry,
   DEBT_TERM_DAY_OPTIONS,
+  diagnoseImportVoucher,
+  diagnoseSaleVoucher,
+  doesRecordMatchProduct,
   evaluateDebtUrgency,
+  evaluateImportMutationSafety,
   evaluateProductExpiry,
+  evaluateProductStockIntegrity,
   evaluateStaffAccessScope,
   evaluateStockAlert,
   executeFiscalYearCloseAndCleanup,
@@ -3445,6 +3450,381 @@ test('Stage 4: computeCustomerLedger blank-phone isolation and computeSmartDashb
   assert.equal(analytics.grossMarginPct, 20);
   assert.equal(analytics.topProducts[0].qtySold, 5);
   assert.equal(analytics.topCustomers[0].customerName, 'Khách lẻ B');
+});
+
+test('evaluateImportMutationSafety allows deleting/reducing import when stock drifted to 0 with 0 active sales, and blocks only on real PC or active HD dependencies', () => {
+  const driftedProduct: ProductItem = {
+    id: 'prod_vo_gao',
+    code: 'VG-TK',
+    name: 'VÔ GẠO THẦN KỲ',
+    category: 'Phân bón lá',
+    unit: 'chai',
+    importPrice: 115000,
+    sellPrice: 150000,
+    stock: 0, // Stock drifted to 0 even though all sales were deleted!
+    minStock: 2,
+    supplierName: 'VTNN LÚA XANH',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    ownerId: 'u1',
+    createdAt: '2026-11-20T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+
+  const targetImport: ImportTransaction = {
+    id: 'imp_pn002',
+    receiptCode: 'PN-2611-002',
+    supplierName: 'VTNN LÚA XANH',
+    supplierPhone: '0909123456',
+    productId: 'prod_vo_gao',
+    productName: 'VÔ GẠO THẦN KỲ',
+    unit: 'chai',
+    quantity: 3,
+    unitCost: 115000,
+    totalCost: 345000,
+    paidAmount: 0,
+    debtAmount: 345000,
+    dueDate: '2026-12-25',
+    status: 'unpaid',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    note: '',
+    staffName: 'Trần Đình Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-25T08:00:00Z',
+    updatedAt: '2026-11-25T08:00:00Z',
+  };
+
+  // Case 1: Exact production bug scenario (stock=0, import=+3, sales=[], PC=[]) -> MUST ALLOW delete AND reduce!
+  const deleteWithDrift = evaluateImportMutationSafety({
+    targetImport,
+    product: driftedProduct,
+    sales: [],
+    imports: [targetImport],
+    paymentVouchers: [],
+    newQuantity: 0,
+  });
+  assert.equal(deleteWithDrift.allowed, true);
+  assert.equal(deleteWithDrift.reasonType, 'ok_with_stock_drift');
+  assert.equal(deleteWithDrift.hasStockDrift, true);
+  assert.equal(deleteWithDrift.actualSoldQty, 0);
+  assert.equal(deleteWithDrift.clampedNextStock, 0);
+
+  const reduceWithDrift = evaluateImportMutationSafety({
+    targetImport,
+    product: driftedProduct,
+    sales: [],
+    imports: [targetImport],
+    paymentVouchers: [],
+    newQuantity: 1,
+  });
+  assert.equal(reduceWithDrift.allowed, true);
+  assert.equal(reduceWithDrift.reasonType, 'ok_with_stock_drift');
+  assert.equal(reduceWithDrift.hasStockDrift, true);
+  assert.equal(reduceWithDrift.clampedNextStock, 0);
+
+  // Case 2: Active sale HD-2611-010 (qty=2) depends on PN-2611-002 (qty=3), stock=1 -> MUST BLOCK delete, ALLOW reduce to 2
+  const activeSale: SaleTransaction = {
+    id: 'sale_010',
+    invoiceCode: 'HD-2611-010',
+    customerId: 'cust_1',
+    customerName: 'Anh Ba',
+    customerPhone: '0911222333',
+    productId: 'prod_vo_gao',
+    productName: 'VÔ GẠO THẦN KỲ',
+    unit: 'chai',
+    quantity: 2,
+    unitPrice: 150000,
+    unitCost: 115000,
+    totalAmount: 300000,
+    paidAmount: 300000,
+    debtAmount: 0,
+    dueDate: '2026-11-26',
+    status: 'paid',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    note: '',
+    staffName: 'Trần Đình Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-26T01:00:00Z',
+    updatedAt: '2026-11-26T01:00:00Z',
+  };
+  const productWithOneLeft: ProductItem = { ...driftedProduct, stock: 1 };
+
+  const blockedDeleteBySale = evaluateImportMutationSafety({
+    targetImport,
+    product: productWithOneLeft,
+    sales: [activeSale],
+    imports: [targetImport],
+    paymentVouchers: [],
+    newQuantity: 0,
+  });
+  assert.equal(blockedDeleteBySale.allowed, false);
+  assert.equal(blockedDeleteBySale.reasonType, 'active_sales_depend_on_import');
+  assert.equal(blockedDeleteBySale.blockingSales.length, 1);
+  assert.equal(blockedDeleteBySale.blockingSales[0].invoiceCode, 'HD-2611-010');
+  assert.equal(blockedDeleteBySale.actualSoldQty, 2);
+
+  const allowedReduceToSoldQty = evaluateImportMutationSafety({
+    targetImport,
+    product: productWithOneLeft,
+    sales: [activeSale],
+    imports: [targetImport],
+    paymentVouchers: [],
+    newQuantity: 2,
+  });
+  assert.equal(allowedReduceToSoldQty.allowed, true);
+  assert.equal(allowedReduceToSoldQty.clampedNextStock, 0);
+
+  // Case 3: Another import PN-2611-003 (qty=5) covers all sold qty (2), even if stock drifted to 0 -> ALLOW delete PN-2611-002
+  const otherImport: ImportTransaction = {
+    ...targetImport,
+    id: 'imp_pn003',
+    receiptCode: 'PN-2611-003',
+    quantity: 5,
+    totalCost: 575000,
+    debtAmount: 575000,
+  };
+  const allowedDeleteCoveredByOtherImport = evaluateImportMutationSafety({
+    targetImport,
+    product: driftedProduct,
+    sales: [activeSale],
+    imports: [targetImport, otherImport],
+    paymentVouchers: [],
+    newQuantity: 0,
+  });
+  assert.equal(allowedDeleteCoveredByOtherImport.allowed, true);
+  assert.equal(allowedDeleteCoveredByOtherImport.reasonType, 'ok_with_stock_drift');
+  assert.equal(allowedDeleteCoveredByOtherImport.remainingImportsQtyAfterMutation, 5);
+
+  // Case 4: Linked supplier payment voucher PC-2611-001 ALWAYS blocks edit & delete
+  const linkedPayment: CashPaymentVoucher = {
+    id: 'pc_001',
+    voucherCode: 'PC-2611-001',
+    groupName: 'Trả nợ Nhà cung cấp',
+    partnerName: 'VTNN LÚA XANH',
+    partnerPhone: '0909123456',
+    amount: 100000,
+    paymentMethod: 'Tiền mặt',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    isDebtSettlement: true,
+    note: 'Trả một phần PN-2611-002',
+    settledAllocations: [
+      {
+        recordId: 'imp_pn002',
+        code: 'PN-2611-002',
+        date: '2026-11-25',
+        dueDate: '2026-12-25',
+        productName: 'VÔ GẠO THẦN KỲ',
+        previousDebt: 345000,
+        allocatedAmount: 100000,
+        remainingDebt: 245000,
+      },
+    ],
+    staffName: 'Trần Đình Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-26T02:00:00Z',
+    updatedAt: '2026-11-26T02:00:00Z',
+  };
+  const blockedByPc = evaluateImportMutationSafety({
+    targetImport,
+    product: { ...driftedProduct, stock: 10 },
+    sales: [],
+    imports: [targetImport],
+    paymentVouchers: [linkedPayment],
+    newQuantity: 0,
+  });
+  assert.equal(blockedByPc.allowed, false);
+  assert.equal(blockedByPc.reasonType, 'linked_payment_voucher');
+  assert.equal(blockedByPc.blockingPaymentVouchers.length, 1);
+  assert.equal(blockedByPc.blockingPaymentVouchers[0].voucherCode, 'PC-2611-001');
+});
+
+test('evaluateProductStockIntegrity, doesRecordMatchProduct, diagnoseImportVoucher, and diagnoseSaleVoucher detect drift and resolve cross-links accurately', () => {
+  const prod: ProductItem = {
+    id: 'prod_vg',
+    code: 'VG-01',
+    name: 'VÔ GẠO THẦN KỲ',
+    category: 'Phân bón lá',
+    unit: 'chai',
+    importPrice: 115000,
+    sellPrice: 150000,
+    stock: 0,
+    minStock: 2,
+    supplierName: 'VTNN LÚA XANH',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    ownerId: 'u1',
+    createdAt: '2026-11-20T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+
+  // Excel legacy ID match (same warehouse + normalized name)
+  assert.equal(doesRecordMatchProduct(prod, 'prod_xl_999', 'Vo Gao Than Ky', 'Tâm An Mỹ Ngãi'), true);
+  assert.equal(doesRecordMatchProduct(prod, 'prod_xl_999', 'Vo Gao Than Ky', 'Tâm An Cao Lãnh'), false);
+
+  const imp: ImportTransaction = {
+    id: 'imp_1',
+    receiptCode: 'PN-2611-002',
+    supplierName: 'VTNN LÚA XANH',
+    supplierPhone: '0909123456',
+    productId: 'prod_vg',
+    productName: 'VÔ GẠO THẦN KỲ',
+    unit: 'chai',
+    quantity: 3,
+    unitCost: 115000,
+    totalCost: 345000,
+    paidAmount: 0,
+    debtAmount: 345000,
+    dueDate: '2026-12-25',
+    status: 'unpaid',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-25T08:00:00Z',
+    updatedAt: '2026-11-25T08:00:00Z',
+  };
+
+  // Negative drift when stock=0, imported=+3, exported=0
+  const drifted = evaluateProductStockIntegrity(prod, [], [imp], []);
+  assert.equal(drifted.hasNegativeDrift, true);
+  assert.equal(drifted.impliedOpeningStock, -3);
+  assert.equal(drifted.recommendedReconciledStock, 3);
+  assert.equal(drifted.linkedImportCount, 1);
+
+  // Positive legitimate opening stock (stock=13, imported=+3, exported=0 -> opening=+10) is NOT drift
+  const legitimateOpening = evaluateProductStockIntegrity({ ...prod, stock: 13 }, [], [imp], []);
+  assert.equal(legitimateOpening.hasNegativeDrift, false);
+  assert.equal(legitimateOpening.impliedOpeningStock, 10);
+
+  // Stocktake adjustment included in netVoucherBalance
+  const stockAdj: StockAdjustmentRecord = {
+    id: 'adj_1',
+    adjustmentCode: 'KK-001',
+    productId: 'prod_vg',
+    productCode: 'VG-01',
+    productName: 'VÔ GẠO THẦN KỲ',
+    unit: 'chai',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    systemStockBefore: 3,
+    actualCountedStock: 2,
+    diffQty: -1,
+    unitCost: 115000,
+    diffValue: -115000,
+    reason: 'Hư vỡ 1 chai',
+    note: 'Kiểm kho định kỳ',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-26T00:00:00Z',
+  };
+  const withAdj = evaluateProductStockIntegrity({ ...prod, stock: 2 }, [], [imp], [stockAdj]);
+  assert.equal(withAdj.hasNegativeDrift, false);
+  assert.equal(withAdj.netVoucherBalance, 2);
+  assert.equal(withAdj.recommendedReconciledStock, 2);
+
+  // diagnoseImportVoucher on drifted PN-2611-002 -> warning + cancellable
+  const impDiag = diagnoseImportVoucher({
+    imp,
+    products: [prod],
+    sales: [],
+    imports: [imp],
+    paymentVouchers: [],
+    stockAdjustments: [],
+  });
+  assert.equal(impDiag.statusLevel, 'warning');
+  assert.equal(impDiag.statusLabel.includes('Lệch tồn (0/3)'), true);
+  assert.equal(impDiag.statusLabel.includes('Vẫn hủy được'), true);
+  assert.equal(impDiag.deleteSafety.allowed, true);
+
+  // diagnoseSaleVoucher with linked customer, product, import, and blocking PT
+  const cust: CustomerProfile = {
+    id: 'cust_anh_nhat',
+    code: 'KH-03',
+    name: 'ANH NHẤT',
+    phone: '0789245369',
+    email: '',
+    address: '',
+    group: 'Đại lý cấp 2',
+    note: '',
+    totalPurchased: 300000,
+    totalDebt: 100000,
+    ownerId: 'u1',
+    createdAt: '2026-11-20T00:00:00Z',
+    updatedAt: '2026-11-26T00:00:00Z',
+  };
+  const sale: SaleTransaction = {
+    id: 'sale_1',
+    invoiceCode: 'HD-2611-009',
+    customerId: 'cust_anh_nhat',
+    customerName: 'ANH NHẤT',
+    customerPhone: '0789245369',
+    productId: 'prod_vg',
+    productName: 'VÔ GẠO THẦN KỲ',
+    unit: 'chai',
+    quantity: 2,
+    unitPrice: 150000,
+    unitCost: 115000,
+    totalAmount: 300000,
+    paidAmount: 200000,
+    debtAmount: 100000,
+    dueDate: '2026-12-10',
+    status: 'partial',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-26T02:00:00Z',
+    updatedAt: '2026-11-26T02:00:00Z',
+  };
+  const receipt: CashReceiptVoucher = {
+    id: 'pt_001',
+    voucherCode: 'PT-2611-001',
+    groupName: 'Thu nợ khách hàng',
+    partnerId: 'cust_anh_nhat',
+    partnerName: 'ANH NHẤT',
+    partnerPhone: '0789245369',
+    amount: 200000,
+    paymentMethod: 'Tiền mặt',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    isDebtSettlement: true,
+    note: 'Thu nợ HD-2611-009',
+    settledAllocations: [
+      {
+        recordId: 'sale_1',
+        code: 'HD-2611-009',
+        date: '2026-11-26',
+        dueDate: '2026-12-10',
+        productName: 'VÔ GẠO THẦN KỲ',
+        previousDebt: 300000,
+        allocatedAmount: 200000,
+        remainingDebt: 100000,
+      },
+    ],
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-26T03:00:00Z',
+    updatedAt: '2026-11-26T03:00:00Z',
+  };
+
+  const saleDiagBlocked = diagnoseSaleVoucher({
+    sale,
+    products: [{ ...prod, stock: 1 }],
+    customers: [cust],
+    imports: [imp],
+    receiptVouchers: [receipt],
+  });
+  assert.equal(saleDiagBlocked.statusLevel, 'blocked');
+  assert.equal(saleDiagBlocked.statusLabel.includes('PT-2611-001'), true);
+  assert.equal(saleDiagBlocked.linkedCustomer?.id, 'cust_anh_nhat');
+  assert.equal(saleDiagBlocked.linkedProduct?.id, 'prod_vg');
+  assert.equal(saleDiagBlocked.relatedImports[0]?.receiptCode, 'PN-2611-002');
+
+  const saleDiagOk = diagnoseSaleVoucher({
+    sale,
+    products: [{ ...prod, stock: 1 }],
+    customers: [cust],
+    imports: [imp],
+    receiptVouchers: [],
+  });
+  assert.equal(saleDiagOk.statusLevel, 'ok');
+  assert.equal(saleDiagOk.linkedReceiptVouchers.length, 0);
 });
 
 

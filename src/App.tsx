@@ -39,6 +39,7 @@ import {
   BackupSnapshotPayload,
   CashPaymentVoucher,
   CashReceiptVoucher,
+  CrossLinkNavigateRequest,
   CustomerProfile,
   DeletedRecordTombstone,
   ImportTransaction,
@@ -97,7 +98,10 @@ import {
   computeWeightedAverageImportPrice,
   createAuditLogEntry,
   dedupeWarehouseNames,
+  doesRecordMatchProduct,
   evaluateDebtUrgency,
+  evaluateImportMutationSafety,
+  evaluateProductStockIntegrity,
   evaluateStaffAccessScope,
   evaluateStockAlert,
   executeFiscalYearCloseAndCleanup,
@@ -403,6 +407,7 @@ export default function App() {
   const [toastUndoAction, setToastUndoAction] = useState<{
     label: string;
     onUndo: () => void;
+    isNavigation?: boolean;
   } | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const [isPwaInstallModalOpen, setIsPwaInstallModalOpen] = useState(false);
@@ -714,10 +719,75 @@ export default function App() {
   const [preselectedProductId, setPreselectedProductId] = useState<string | null>(null);
   const [focusedDebtRecordId, setFocusedDebtRecordId] = useState<string | null>(null);
   const [focusedProductId, setFocusedProductId] = useState<string | null>(null);
+  const [focusedSaleId, setFocusedSaleId] = useState<string | null>(null);
+  const [focusedImportId, setFocusedImportId] = useState<string | null>(null);
+  const [focusedCustomerId, setFocusedCustomerId] = useState<string | null>(null);
+  const [focusedReceiptVoucherId, setFocusedReceiptVoucherId] = useState<string | null>(null);
+  const [focusedPaymentVoucherId, setFocusedPaymentVoucherId] = useState<string | null>(null);
   const [importNewProductTrigger, setImportNewProductTrigger] = useState<{
     key: number;
     initialName: string;
   } | null>(null);
+
+  const handleNavigateCrossLink = (req: CrossLinkNavigateRequest) => {
+    if (!accessScope.allowedTabs.includes(req.tab)) {
+      showToast(
+        `Tài khoản hiện tại chưa được phân quyền mở phân hệ "${req.tab}". Vui lòng liên hệ Quản lý chính.`
+      );
+      return;
+    }
+
+    // If multi-warehouse filter currently hides the target record's warehouse, widen to All allowed warehouses
+    if (canFilterMultiWarehouses && selectedFilterWarehouses.length > 0 && req.recordId) {
+      const targetWh =
+        req.tab === 'sales'
+          ? sales.find((s) => s.id === req.recordId || s.invoiceCode === req.recordId)?.warehouseName
+          : req.tab === 'imports'
+          ? imports.find((i) => i.id === req.recordId || i.receiptCode === req.recordId)?.warehouseName
+          : req.tab === 'inventory'
+          ? products.find((p) => p.id === req.recordId || p.code === req.recordId)?.warehouseName
+          : req.tab === 'customers'
+          ? customers.find((c) => c.id === req.recordId || c.code === req.recordId)?.warehouseName
+          : req.tab === 'receipt_vouchers'
+          ? receiptVouchers.find((r) => r.id === req.recordId || r.voucherCode === req.recordId)?.warehouseName
+          : req.tab === 'payment_vouchers'
+          ? paymentVouchers.find((p) => p.id === req.recordId || p.voucherCode === req.recordId)?.warehouseName
+          : req.tab === 'debts'
+          ? imports.find((i) => i.id === req.recordId || i.receiptCode === req.recordId)?.warehouseName ||
+            sales.find((s) => s.id === req.recordId || s.invoiceCode === req.recordId)?.warehouseName
+          : undefined;
+
+      if (
+        targetWh &&
+        !selectedFilterWarehouses.some((w) => areWarehouseNamesEquivalent(w, targetWh))
+      ) {
+        setSelectedFilterWarehouses([]);
+      }
+    }
+
+    if (req.tab === 'sales') {
+      setFocusedSaleId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'imports') {
+      setFocusedImportId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'inventory') {
+      setFocusedProductId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'customers') {
+      setFocusedCustomerId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'debts') {
+      setFocusedDebtRecordId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'receipt_vouchers') {
+      setFocusedReceiptVoucherId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'payment_vouchers') {
+      setFocusedPaymentVoucherId(req.recordId || req.voucherCode || null);
+    }
+
+    setActiveTab(req.tab);
+    setMobileMenuOpen(false);
+    scrollToTopOfPage();
+    if (req.label) {
+      showToast(`Đang mở chứng từ liên kết: ${req.label}`);
+    }
+  };
   const [quickRenameWarehouseOpen, setQuickRenameWarehouseOpen] = useState<boolean>(false);
   const [quickRenameSuffix, setQuickRenameSuffix] = useState<string>('');
   const pendingRegistrationRef = useRef<{
@@ -965,13 +1035,24 @@ export default function App() {
     };
   }, []);
 
-  const showToast = (msg: string, undo?: { label?: string; onUndo: () => void }) => {
+  const showToast = (
+    msg: string,
+    undo?: { label?: string; onUndo: () => void; isNavigation?: boolean }
+  ) => {
     if (toastTimerRef.current !== null && typeof window !== 'undefined') {
       window.clearTimeout(toastTimerRef.current);
       toastTimerRef.current = null;
     }
     setToastBanner(msg);
-    setToastUndoAction(undo ? { label: undo.label || 'Hoàn tác', onUndo: undo.onUndo } : null);
+    setToastUndoAction(
+      undo
+        ? {
+            label: undo.label || 'Hoàn tác',
+            onUndo: undo.onUndo,
+            isNavigation: undo.isNavigation,
+          }
+        : null
+    );
     if (typeof window !== 'undefined') {
       toastTimerRef.current = window.setTimeout(
         () => {
@@ -2594,8 +2675,20 @@ export default function App() {
     const linkedReceipts = findLinkedReceiptVouchersForSale(existing, receiptVouchers);
     if (linkedReceipts.length > 0) {
       const codes = linkedReceipts.map((r) => r.voucherCode).join(', ');
+      const firstReceipt = linkedReceipts[0];
       showToast(
-        `Đơn bán ${existing.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi sửa hoặc xóa đơn!`
+        `Đơn bán ${existing.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi sửa hoặc xóa đơn!`,
+        {
+          label: `Mở ${firstReceipt.voucherCode} →`,
+          isNavigation: true,
+          onUndo: () =>
+            handleNavigateCrossLink({
+              tab: 'receipt_vouchers',
+              recordId: firstReceipt.id,
+              voucherCode: firstReceipt.voucherCode,
+              label: `Phiếu thu ${firstReceipt.voucherCode}`,
+            }),
+        }
       );
       return;
     }
@@ -2609,7 +2702,17 @@ export default function App() {
       const targetProd = productsRef.current.find((p) => p.id === prodId);
       if (targetProd && targetProd.stock + delta < 0) {
         showToast(
-          `Không đủ tồn kho để sửa hóa đơn: "${targetProd.name}" hiện còn ${targetProd.stock} ${targetProd.unit}.`
+          `Không đủ tồn kho để sửa hóa đơn: "${targetProd.name}" hiện còn ${targetProd.stock} ${targetProd.unit}.`,
+          {
+            label: `Mở Thẻ kho →`,
+            isNavigation: true,
+            onUndo: () =>
+              handleNavigateCrossLink({
+                tab: 'inventory',
+                recordId: targetProd.id,
+                label: `Thẻ kho ${targetProd.name}`,
+              }),
+          }
         );
         return;
       }
@@ -2673,8 +2776,20 @@ export default function App() {
       const linkedReceipts = findLinkedReceiptVouchersForSale(target, receiptVouchers);
       if (linkedReceipts.length > 0) {
         const codes = linkedReceipts.map((r) => r.voucherCode).join(', ');
+        const firstReceipt = linkedReceipts[0];
         showToast(
-          `Đơn bán ${target.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi sửa hoặc xóa đơn!`
+          `Đơn bán ${target.invoiceCode} đã có phiếu thu nợ (${codes}). Vui lòng hủy/xóa phiếu thu trước khi sửa hoặc xóa đơn!`,
+          {
+            label: `Mở ${firstReceipt.voucherCode} →`,
+            isNavigation: true,
+            onUndo: () =>
+              handleNavigateCrossLink({
+                tab: 'receipt_vouchers',
+                recordId: firstReceipt.id,
+                voucherCode: firstReceipt.voucherCode,
+                label: `Phiếu thu ${firstReceipt.voucherCode}`,
+              }),
+          }
         );
         return;
       }
@@ -2683,12 +2798,18 @@ export default function App() {
     markRecordsDeleted(saleId, nowIso);
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     if (target) {
-      // Restore sold & gift inventory stock
+      // Restore sold & gift inventory stock (supports both exact ID and Excel-imported product match)
       setProducts((prev) => {
         const nextList = prev.map((p) => {
           let restoreQty = 0;
-          if (p.id === target.productId) restoreQty += target.quantity;
-          if (target.giftProductId && p.id === target.giftProductId) {
+          if (doesRecordMatchProduct(p, target.productId, target.productName, target.warehouseName)) {
+            restoreQty += target.quantity;
+          }
+          if (
+            target.giftProductId &&
+            (target.giftQuantity || 0) > 0 &&
+            doesRecordMatchProduct(p, target.giftProductId, target.giftProductName, target.warehouseName)
+          ) {
             restoreQty += target.giftQuantity || 0;
           }
           if (restoreQty <= 0) return p;
@@ -2881,35 +3002,70 @@ export default function App() {
     const nowIso = new Date().toISOString();
     if (!existing) return;
 
-    const linkedPayments = findLinkedPaymentVouchersForImport(existing, paymentVouchers);
-    if (linkedPayments.length > 0) {
-      const codes = linkedPayments.map((p) => p.voucherCode).join(', ');
-      showToast(
-        `Phiếu nhập ${existing.receiptCode} đã có phiếu chi trả nợ (${codes}). Vui lòng hủy/xóa phiếu chi trước khi sửa hoặc xóa phiếu nhập!`
-      );
+    const updated = updateImportRecord(existing, changes, nowIso);
+    const targetProd =
+      productsRef.current.find((p) =>
+        doesRecordMatchProduct(p, existing.productId, existing.productName, existing.warehouseName)
+      ) || null;
+    const safety = evaluateImportMutationSafety({
+      targetImport: existing,
+      product: targetProd,
+      sales,
+      imports,
+      paymentVouchers,
+      stockAdjustments,
+      newQuantity: updated.quantity,
+    });
+    if (!safety.allowed) {
+      if (safety.reasonType === 'linked_payment_voucher' && safety.blockingPaymentVouchers[0]) {
+        const blocker = safety.blockingPaymentVouchers[0];
+        showToast(safety.message, {
+          label: `Mở ${blocker.voucherCode} →`,
+          isNavigation: true,
+          onUndo: () =>
+            handleNavigateCrossLink({
+              tab: 'payment_vouchers',
+              recordId: blocker.id,
+              voucherCode: blocker.voucherCode,
+              label: `Phiếu chi ${blocker.voucherCode}`,
+            }),
+        });
+      } else if (safety.reasonType === 'active_sales_depend_on_import' && safety.blockingSales[0]) {
+        const blockerSale = safety.blockingSales[0];
+        showToast(safety.message, {
+          label: `Mở ${blockerSale.invoiceCode} →`,
+          isNavigation: true,
+          onUndo: () =>
+            handleNavigateCrossLink({
+              tab: 'sales',
+              recordId: blockerSale.id,
+              voucherCode: blockerSale.invoiceCode,
+              label: `Hóa đơn ${blockerSale.invoiceCode}`,
+            }),
+        });
+      } else {
+        showToast(safety.message);
+      }
       return;
     }
 
-    const updated = updateImportRecord(existing, changes, nowIso);
     const qtyDelta = updated.quantity - existing.quantity;
-    if (qtyDelta < 0) {
-      const targetProd = productsRef.current.find((p) => p.id === existing.productId);
-      if (targetProd && targetProd.stock + qtyDelta < 0) {
-        const soldFromBatch = Math.abs(qtyDelta) - targetProd.stock;
-        showToast(
-          `Đã bán ${soldFromBatch} ${targetProd.unit} "${targetProd.name}", tồn còn ${targetProd.stock}, không thể giảm phiếu nhập này.`
-        );
-        return;
-      }
-    }
-
     const nextImports = imports.map((imp) => (imp.id === importId ? updated : imp));
     setImports(nextImports);
 
     if (qtyDelta !== 0 || updated.unitCost !== existing.unitCost) {
       setProducts((prev) => {
         const nextList = prev.map((p) => {
-          if (p.id !== existing.productId) return p;
+          if (
+            !doesRecordMatchProduct(
+              p,
+              existing.productId,
+              existing.productName,
+              existing.warehouseName
+            )
+          ) {
+            return p;
+          }
           const nextAvgPrice = recalculateImportPriceOnImportMutation({
             product: p,
             oldQty: existing.quantity,
@@ -2920,7 +3076,7 @@ export default function App() {
           });
           const nextProd = {
             ...p,
-            stock: p.stock + qtyDelta,
+            stock: Math.max(0, p.stock + qtyDelta),
             importPrice: nextAvgPrice,
             updatedAt: nowIso,
           };
@@ -2946,32 +3102,71 @@ export default function App() {
         existing.totalCost
       )} · Nợ NCC ${formatVND(existing.debtAmount)} -> Sau khi sửa: SL ${
         updated.quantity
-      } · Tổng ${formatVND(updated.totalCost)} · Nợ NCC ${formatVND(updated.debtAmount)}`,
+      } · Tổng ${formatVND(updated.totalCost)} · Nợ NCC ${formatVND(updated.debtAmount)}${
+        safety.hasStockDrift ? ` · Ghi chú đối soát: ${safety.message}` : ''
+      }`,
       snapshotData: JSON.stringify(existing),
     });
-    showToast('Quản lý đã cập nhật chỉnh sửa phiếu nhập kho thành công.');
+    showToast(
+      safety.hasStockDrift
+        ? `Đã cập nhật phiếu nhập ${updated.receiptCode} thành công (đã đối soát tồn kho an toàn về ${safety.clampedNextStock} ${updated.unit}).`
+        : `Quản lý đã cập nhật chỉnh sửa phiếu nhập kho ${updated.receiptCode} thành công.`
+    );
   };
 
   const handleDeleteImport = (importId: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = imports.find((imp) => imp.id === importId);
     const nowIso = new Date().toISOString();
+    let driftNotice = '';
     if (target) {
-      const linkedPayments = findLinkedPaymentVouchersForImport(target, paymentVouchers);
-      if (linkedPayments.length > 0) {
-        const codes = linkedPayments.map((p) => p.voucherCode).join(', ');
-        showToast(
-          `Phiếu nhập ${target.receiptCode} đã có phiếu chi trả nợ (${codes}). Vui lòng hủy/xóa phiếu chi trước khi sửa hoặc xóa phiếu nhập!`
-        );
+      const targetProd =
+        productsRef.current.find((p) =>
+          doesRecordMatchProduct(p, target.productId, target.productName, target.warehouseName)
+        ) || null;
+      const safety = evaluateImportMutationSafety({
+        targetImport: target,
+        product: targetProd,
+        sales,
+        imports,
+        paymentVouchers,
+        stockAdjustments,
+        newQuantity: 0,
+      });
+      if (!safety.allowed) {
+        if (safety.reasonType === 'linked_payment_voucher' && safety.blockingPaymentVouchers[0]) {
+          const blocker = safety.blockingPaymentVouchers[0];
+          showToast(safety.message, {
+            label: `Mở ${blocker.voucherCode} →`,
+            isNavigation: true,
+            onUndo: () =>
+              handleNavigateCrossLink({
+                tab: 'payment_vouchers',
+                recordId: blocker.id,
+                voucherCode: blocker.voucherCode,
+                label: `Phiếu chi ${blocker.voucherCode}`,
+              }),
+          });
+        } else if (safety.reasonType === 'active_sales_depend_on_import' && safety.blockingSales[0]) {
+          const blockerSale = safety.blockingSales[0];
+          showToast(safety.message, {
+            label: `Mở ${blockerSale.invoiceCode} →`,
+            isNavigation: true,
+            onUndo: () =>
+              handleNavigateCrossLink({
+                tab: 'sales',
+                recordId: blockerSale.id,
+                voucherCode: blockerSale.invoiceCode,
+                label: `Hóa đơn ${blockerSale.invoiceCode}`,
+              }),
+          });
+        } else {
+          showToast(safety.message);
+        }
         return;
       }
-      const targetProd = productsRef.current.find((p) => p.id === target.productId);
-      if (targetProd && targetProd.stock < target.quantity) {
-        const alreadySold = target.quantity - targetProd.stock;
-        showToast(
-          `Đã bán ${alreadySold} ${targetProd.unit} "${targetProd.name}", tồn còn ${targetProd.stock}, không thể xóa phiếu nhập này.`
-        );
-        return;
+      if (safety.hasStockDrift) {
+        driftNotice = safety.message;
       }
     }
     markRecordsDeleted(importId, nowIso);
@@ -2980,7 +3175,11 @@ export default function App() {
     if (target) {
       setProducts((prev) => {
         const nextList = prev.map((p) => {
-          if (p.id !== target.productId) return p;
+          if (
+            !doesRecordMatchProduct(p, target.productId, target.productName, target.warehouseName)
+          ) {
+            return p;
+          }
           const nextAvgPrice = recalculateImportPriceOnImportMutation({
             product: p,
             oldQty: target.quantity,
@@ -2991,7 +3190,7 @@ export default function App() {
           });
           const adjusted = {
             ...p,
-            stock: p.stock - target.quantity,
+            stock: Math.max(0, p.stock - target.quantity),
             importPrice: nextAvgPrice,
             updatedAt: nowIso,
           };
@@ -3009,18 +3208,64 @@ export default function App() {
         targetEntity: 'import',
         targetCode: target.receiptCode,
         warehouseName: target.warehouseName,
-        summary: `Xóa phiếu nhập kho ${target.receiptCode} của NCC ${target.supplierName} (${formatVND(
+        summary: `Hủy/xóa phiếu nhập kho ${target.receiptCode} của NCC ${target.supplierName} (${formatVND(
           target.totalCost
         )})`,
-        details: `Phiếu nhập bị xóa: ${target.receiptCode} · Vật tư: ${target.quantity} ${
+        details: `Phiếu nhập bị hủy: ${target.receiptCode} · Vật tư: ${target.quantity} ${
           target.unit
         } ${target.productName} · Còn nợ NCC: ${formatVND(
           target.debtAmount
-        )}. Đã điều chỉnh lại tồn kho & lưu bản chụp dữ liệu gốc để khôi phục.`,
+        )}. Đã điều chỉnh tồn kho, xóa công nợ NCC liên kết & lưu bản chụp gốc để khôi phục.${
+          driftNotice ? ` (${driftNotice})` : ''
+        }`,
         snapshotData: JSON.stringify(target),
       });
     }
-    showToast('Đã xóa phiếu nhập kho khỏi hệ thống & cập nhật lại tồn kho.');
+    showToast(
+      driftNotice
+        ? `Đã hủy phiếu nhập ${target?.receiptCode || ''} & xóa công nợ NCC thành công (không còn hóa đơn bán liên kết; đã đồng bộ tồn kho an toàn)!`
+        : `Đã hủy phiếu nhập ${target?.receiptCode || ''} khỏi hệ thống, cập nhật tồn kho & công nợ NCC!`
+    );
+  };
+
+  const handleReconcileProductStock = (productId: string) => {
+    if (!canPerformRoleAction(role, 'edit_record')) {
+      showToast('Chỉ Quản lý nhiều kho mới có quyền đối soát điều chỉnh tồn kho.');
+      return;
+    }
+    const target = productsRef.current.find((p) => p.id === productId);
+    if (!target) return;
+    const integrity = evaluateProductStockIntegrity(target, sales, imports, stockAdjustments);
+    const nextStock = integrity.recommendedReconciledStock;
+    if (nextStock === target.stock) {
+      showToast(`Tồn kho "${target.name}" (${target.stock} ${target.unit}) đã khớp sổ chứng từ.`);
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    const updatedProduct: ProductItem = {
+      ...target,
+      stock: nextStock,
+      updatedAt: nowIso,
+    };
+    const nextList = productsRef.current.map((p) => (p.id === target.id ? updatedProduct : p));
+    productsRef.current = nextList;
+    setProducts(nextList);
+    forceStorageSyncRef.current = true;
+    if (isGoogleAuthenticated) {
+      void syncProductToFirestore(updatedProduct, false);
+    }
+    recordAuditLog({
+      actionCategory: 'update',
+      targetEntity: 'product',
+      targetCode: target.code,
+      warehouseName: target.warehouseName,
+      summary: `Đối soát tự động tồn kho ${target.name} (${target.stock} → ${nextStock} ${target.unit})`,
+      details: `Tổng nhập: +${integrity.totalImportedQty} · Tổng xuất bán/KM: -${integrity.totalExportedQty} · Kiểm kê: ${integrity.totalStocktakeDiffQty} -> Khớp tồn sổ chứng từ: ${nextStock} ${target.unit}`,
+      snapshotData: JSON.stringify(target),
+    });
+    showToast(
+      `Đã đối soát tồn kho "${target.name}": ${target.stock} → ${nextStock} ${target.unit} theo sổ chứng từ XNT!`
+    );
   };
 
   const handleCreateSupplierInline = (
@@ -7525,11 +7770,19 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   const fn = toastUndoAction.onUndo;
+                  const isNav = Boolean(toastUndoAction.isNavigation);
                   setToastUndoAction(null);
+                  setToastBanner(null);
                   fn();
-                  showToast('Đã hoàn tác thao tác vừa rồi!');
+                  if (!isNav) {
+                    showToast('Đã hoàn tác thao tác vừa rồi!');
+                  }
                 }}
-                className="px-2.5 py-1 text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 rounded-md shrink-0 transition-colors"
+                className={`px-2.5 py-1 text-xs font-bold rounded-md shrink-0 transition-colors whitespace-nowrap ${
+                  toastUndoAction.isNavigation
+                    ? 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+                    : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                }`}
               >
                 {toastUndoAction.label}
               </button>
@@ -8174,6 +8427,8 @@ export default function App() {
               products={visibleProducts}
               customers={visibleCustomers}
               sales={visibleSales}
+              imports={visibleImports}
+              receiptVouchers={visibleReceiptVouchers}
               role={role}
               resetKey={saleFormResetKey}
               warehouses={allowedWarehouses}
@@ -8185,6 +8440,9 @@ export default function App() {
               onAddProductCategory={handleAddProductCategory}
               preselectedCustomerId={preselectedCustomerId}
               onClearPreselectedCustomer={() => setPreselectedCustomerId(null)}
+              focusedSaleId={focusedSaleId}
+              onClearFocusedSale={() => setFocusedSaleId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
               onCreateSale={handleCreateSale}
               onCreateMultiItemSale={handleCreateMultiItemSale}
               bankQrConfig={bankQrConfig}
@@ -8219,7 +8477,10 @@ export default function App() {
             <ImportLogView
               products={visibleProducts}
               customers={visibleCustomers}
+              sales={visibleSales}
               imports={visibleImports}
+              paymentVouchers={visiblePaymentVouchers}
+              stockAdjustments={visibleStockAdjustments}
               suppliers={visibleSuppliers}
               role={role}
               warehouses={allowedWarehouses}
@@ -8227,6 +8488,9 @@ export default function App() {
               lockedWarehouse={lockedWarehouse}
               preselectedProductId={preselectedProductId}
               onClearPreselectedProduct={() => setPreselectedProductId(null)}
+              focusedImportId={focusedImportId}
+              onClearFocusedImport={() => setFocusedImportId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
               onCreateImport={handleCreateImport}
               onCreateProductInline={(data) => handleSaveProduct(data)}
               onCreateSupplierInline={handleCreateSupplierInline}
@@ -8258,6 +8522,7 @@ export default function App() {
               onSaveProduct={handleSaveProduct}
               onDeleteProduct={handleDeleteProduct}
               onExecuteStocktake={handleExecuteStocktake}
+              onReconcileProductStock={handleReconcileProductStock}
               onImportProductsFromExcel={handleImportProductsFromExcel}
               onQuickRestock={(prodId) => {
                 setPreselectedProductId(prodId);
@@ -8270,6 +8535,7 @@ export default function App() {
               }}
               focusedProductId={focusedProductId}
               onClearFocusedProduct={() => setFocusedProductId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
             />
           )}
 
@@ -8279,6 +8545,7 @@ export default function App() {
               sales={visibleSales}
               products={visibleProducts}
               imports={visibleImports}
+              receiptVouchers={visibleReceiptVouchers}
               role={role}
               customerGroups={customerGroups}
               onAddCustomerGroup={handleAddCustomerGroup}
@@ -8292,6 +8559,9 @@ export default function App() {
                 setActiveTab('sales');
                 scrollToTopOfPage();
               }}
+              focusedCustomerId={focusedCustomerId}
+              onClearFocusedCustomer={() => setFocusedCustomerId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
               leadDays={notificationPrefs.leadDays}
             />
           )}
@@ -8302,12 +8572,16 @@ export default function App() {
               imports={visibleImports}
               products={visibleProducts}
               customers={visibleCustomers}
+              receiptVouchers={visibleReceiptVouchers}
+              paymentVouchers={visiblePaymentVouchers}
+              stockAdjustments={visibleStockAdjustments}
               role={role}
               canAccessCustomerDebts={accessScope.canAccessCustomerDebts}
               canAccessSupplierDebts={accessScope.canAccessSupplierDebts}
               leadDays={notificationPrefs.leadDays}
               focusedRecordId={focusedDebtRecordId}
               onClearFocusedRecord={() => setFocusedDebtRecordId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
               onCollectCustomerDebt={handleCollectCustomerDebt}
               onPaySupplierDebt={handlePaySupplierDebt}
               receiptGroups={receiptGroups}
@@ -8348,6 +8622,9 @@ export default function App() {
               onAddWarehouse={handleAddWarehouse}
               role={role}
               canEditDelete={accessScope.canEditDeleteVouchers}
+              focusedVoucherId={focusedReceiptVoucherId}
+              onClearFocusedVoucher={() => setFocusedReceiptVoucherId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
               onCreateReceiptVoucher={handleCreateReceiptVoucher}
               onUpdateReceiptVoucher={handleUpdateReceiptVoucher}
               onDeleteReceiptVoucher={handleDeleteReceiptVoucher}
@@ -8367,6 +8644,9 @@ export default function App() {
               onAddWarehouse={handleAddWarehouse}
               role={role}
               canEditDelete={accessScope.canEditDeleteVouchers}
+              focusedVoucherId={focusedPaymentVoucherId}
+              onClearFocusedVoucher={() => setFocusedPaymentVoucherId(null)}
+              onNavigateCrossLink={handleNavigateCrossLink}
               onCreatePaymentVoucher={handleCreatePaymentVoucher}
               onUpdatePaymentVoucher={handleUpdatePaymentVoucher}
               onDeletePaymentVoucher={handleDeletePaymentVoucher}
@@ -8379,6 +8659,8 @@ export default function App() {
               imports={visibleImports}
               customers={visibleCustomers}
               products={visibleProducts}
+              receiptVouchers={visibleReceiptVouchers}
+              paymentVouchers={visiblePaymentVouchers}
               role={role}
               savedVouchers={visibleSavedVouchers}
               onSaveVoucher={handleSaveVoucher}
@@ -8386,6 +8668,7 @@ export default function App() {
               currentStaffName={currentStaff.displayName}
               lockedWarehouse={lockedWarehouse}
               bankQrConfig={bankQrConfig}
+              onNavigateCrossLink={handleNavigateCrossLink}
               onNotifyToast={showToast}
             />
           )}
@@ -8458,14 +8741,7 @@ export default function App() {
               onExecuteFiscalYearCloseAndCleanup={handleExecuteFiscalYearCloseAndCleanup}
               onExecuteFullApplicationDataWipe={handleExecuteFullApplicationDataWipe}
               onNavigateToModule={(tab, recordId) => {
-                if (tab === 'debts' && recordId) {
-                  setFocusedDebtRecordId(recordId);
-                } else if (tab === 'inventory' && recordId) {
-                  setFocusedProductId(recordId);
-                } else if (tab === 'customers' && recordId) {
-                  setPreselectedCustomerId(recordId);
-                }
-                setActiveTab(tab);
+                handleNavigateCrossLink({ tab, recordId });
               }}
               onNotifyToast={showToast}
             />

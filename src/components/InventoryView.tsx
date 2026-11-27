@@ -24,6 +24,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CrossLinkNavigateRequest,
   CustomerProfile,
   ImportTransaction,
   ProductCategory,
@@ -37,12 +38,14 @@ import {
   computeProductStockMovementLedger,
   computeSmartReorderSuggestions,
   evaluateProductExpiry,
+  evaluateProductStockIntegrity,
   evaluateStockAlert,
   formatVND,
   getCurrentMonthRangeVietnam,
   getRecentDaysRangeVietnam,
   normalizeVietnameseSearch,
 } from '../utils/businessLogic';
+import { CrossLinkChip } from './VoucherCrossLinkUI';
 import {
   exportModuleDataExcel,
   exportProductStockCardExcel,
@@ -76,11 +79,13 @@ interface InventoryViewProps {
     reason: string;
     note?: string;
   }) => StockAdjustmentRecord | null;
+  onReconcileProductStock?: (productId: string) => void;
   onImportProductsFromExcel: (rows: Record<string, unknown>[]) => number;
   onQuickRestock: (productId: string) => void;
   onRequestAddNewProductInImports?: () => void;
   focusedProductId?: string | null;
   onClearFocusedProduct?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
 }
 
 export const InventoryView: React.FC<InventoryViewProps> = ({
@@ -98,11 +103,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onSaveProduct,
   onDeleteProduct,
   onExecuteStocktake,
+  onReconcileProductStock,
   onImportProductsFromExcel,
   onQuickRestock,
   onRequestAddNewProductInImports,
   focusedProductId,
   onClearFocusedProduct,
+  onNavigateCrossLink,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
@@ -1034,6 +1041,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               filteredProducts.map((p) => {
                 const alert = evaluateStockAlert(p);
                 const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
+                const integrity = evaluateProductStockIntegrity(p, sales, imports, stockAdjustments);
                 return (
                   <tr
                     key={p.id}
@@ -1044,12 +1052,24 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                       setDetailProductId(p.id);
                     }}
                     title="Bấm để xem Chi tiết Xuất - Nhập - Tồn kho của mặt hàng này"
-                    className="hover:bg-emerald-50/50 cursor-pointer transition-colors"
+                    className={`cursor-pointer transition-colors ${
+                      integrity.hasNegativeDrift
+                        ? 'bg-amber-50/40 hover:bg-amber-50/80'
+                        : 'hover:bg-emerald-50/50'
+                    }`}
                   >
                     <td className="py-3.5 px-4 min-w-[230px] align-middle">
-                      <div className="font-semibold text-slate-900 leading-snug flex items-center gap-1.5">
+                      <div className="font-semibold text-slate-900 leading-snug flex flex-wrap items-center gap-1.5">
                         <span>{p.name}</span>
                         <Eye className="w-3.5 h-3.5 text-emerald-700 shrink-0 opacity-75" />
+                        {integrity.hasNegativeDrift && (
+                          <span
+                            title={`Tồn hiện tại ${p.stock} < tồn theo chứng từ XNT ${integrity.recommendedReconciledStock}. Bấm để đối soát thẻ kho.`}
+                            className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded"
+                          >
+                            Lệch XNT ({p.stock}/{integrity.recommendedReconciledStock})
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
                         <span className="font-mono">{p.code}</span>
@@ -1721,6 +1741,53 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             </div>
 
             <div className="p-4 sm:p-6 space-y-4 overflow-y-auto flex-1 overscroll-contain">
+              {/* Stock Integrity Diagnostic Banner (Detects drifted stock e.g. stock=0 despite imports & 0 sales) */}
+              {(() => {
+                const integrity = evaluateProductStockIntegrity(
+                  detailProduct,
+                  sales,
+                  imports,
+                  stockAdjustments
+                );
+                if (!integrity.hasNegativeDrift) return null;
+                return (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="space-y-1 text-amber-950">
+                      <div className="font-bold flex items-center gap-1.5">
+                        <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                        <span>
+                          Phát hiện lệch tồn kho so với chứng từ XNT (Lệch{' '}
+                          {integrity.impliedOpeningStock} {detailProduct.unit})
+                        </span>
+                      </div>
+                      <p className="text-amber-900">
+                        Tổng nhập: <strong>+{integrity.totalImportedQty}</strong> · Tổng xuất bán/KM:{' '}
+                        <strong>-{integrity.totalExportedQty}</strong> · Kiểm kê:{' '}
+                        <strong>{integrity.totalStocktakeDiffQty}</strong> → Tồn theo chứng từ phải là{' '}
+                        <strong className="font-mono">
+                          {integrity.recommendedReconciledStock} {detailProduct.unit}
+                        </strong>
+                        , nhưng tồn hiện tại đang là{' '}
+                        <strong className="font-mono text-red-700">
+                          {detailProduct.stock} {detailProduct.unit}
+                        </strong>
+                        . Bấm vào các phiếu bên dưới để kiểm tra hoặc đối soát tự động.
+                      </p>
+                    </div>
+                    {canPerformRoleAction(role, 'edit_record') && onReconcileProductStock && (
+                      <button
+                        type="button"
+                        onClick={() => onReconcileProductStock(detailProduct.id)}
+                        className="px-3 py-2 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 rounded-lg whitespace-nowrap shrink-0"
+                      >
+                        Đối soát tồn ({detailProduct.stock} → {integrity.recommendedReconciledStock}{' '}
+                        {detailProduct.unit})
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* 4 Stock Balance Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
@@ -1903,9 +1970,32 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                                     Xuất bán
                                   </span>
                                 )}
-                                <span className="font-mono font-bold text-slate-800">
-                                  {mov.voucherCode}
-                                </span>
+                                {onNavigateCrossLink &&
+                                (mov.type === 'import' ||
+                                  mov.type === 'sale' ||
+                                  mov.type === 'gift_export') ? (
+                                  <CrossLinkChip
+                                    tone={mov.type === 'import' ? 'emerald' : 'amber'}
+                                    label={mov.voucherCode}
+                                    title={`Bấm để mở chứng từ gốc ${mov.voucherCode}`}
+                                    onClick={() => {
+                                      setDetailProductId(null);
+                                      onClearFocusedProduct?.();
+                                      onNavigateCrossLink({
+                                        tab: mov.type === 'import' ? 'imports' : 'sales',
+                                        recordId: mov.sourceRecordId || mov.voucherCode,
+                                        voucherCode: mov.voucherCode,
+                                        label: `${
+                                          mov.type === 'import' ? 'Phiếu nhập' : 'Hóa đơn'
+                                        } ${mov.voucherCode}`,
+                                      });
+                                    }}
+                                  />
+                                ) : (
+                                  <span className="font-mono font-bold text-slate-800">
+                                    {mov.voucherCode}
+                                  </span>
+                                )}
                               </div>
                             </td>
                             <td className="py-2.5 px-3">

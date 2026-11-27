@@ -418,6 +418,25 @@ export interface StockAdjustmentRecord {
   updatedAt?: string;
 }
 
+export type CrossLinkTargetTab =
+  | 'sales'
+  | 'imports'
+  | 'inventory'
+  | 'customers'
+  | 'debts'
+  | 'receipt_vouchers'
+  | 'payment_vouchers'
+  | 'vouchers'
+  | 'reports';
+
+export interface CrossLinkNavigateRequest {
+  tab: CrossLinkTargetTab;
+  recordId?: string;
+  voucherCode?: string;
+  subTab?: 'supplier' | 'customer';
+  label?: string;
+}
+
 export interface BackupSnapshotPayload {
   version: string;
   exportedAt: string;

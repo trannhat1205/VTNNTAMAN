@@ -16,6 +16,9 @@ import {
   Wallet,
 } from 'lucide-react';
 import {
+  CashPaymentVoucher,
+  CashReceiptVoucher,
+  CrossLinkNavigateRequest,
   CustomerProfile,
   ImportTransaction,
   ProductItem,
@@ -24,6 +27,7 @@ import {
   UserRole,
   VietQrBankConfig,
 } from '../types';
+import { CrossLinkChip } from './VoucherCrossLinkUI';
 import { findInvoiceGroupSales } from '../utils/smartPosFeatures';
 import {
   canPerformRoleAction,
@@ -57,6 +61,8 @@ interface VoucherPrintCenterProps {
   imports: ImportTransaction[];
   customers: CustomerProfile[];
   products: ProductItem[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
   role: UserRole;
   savedVouchers: SavedVoucherRecord[];
   onSaveVoucher: (
@@ -67,6 +73,7 @@ interface VoucherPrintCenterProps {
   currentStaffName: string;
   lockedWarehouse?: string | null;
   bankQrConfig?: VietQrBankConfig | null;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   onNotifyToast: (msg: string) => void;
 }
 
@@ -75,6 +82,8 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   imports,
   customers,
   products,
+  receiptVouchers = [],
+  paymentVouchers = [],
   role,
   savedVouchers,
   onSaveVoucher,
@@ -82,6 +91,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   currentStaffName,
   lockedWarehouse,
   bankQrConfig,
+  onNavigateCrossLink,
   onNotifyToast,
 }) => {
   const [activeVoucher, setActiveVoucher] = useState<VoucherType>('sale_invoice');
@@ -759,7 +769,22 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                     <tr key={item.saleId} className="hover:bg-slate-50">
                       <td className="py-2.5 px-2.5 font-mono whitespace-nowrap align-middle">{item.date}</td>
                       <td className="py-2.5 px-2.5 font-mono font-bold text-emerald-800 whitespace-nowrap align-middle">
-                        {item.invoiceCode}
+                        {onNavigateCrossLink ? (
+                          <CrossLinkChip
+                            tone="emerald"
+                            label={item.invoiceCode}
+                            onClick={() =>
+                              onNavigateCrossLink({
+                                tab: 'sales',
+                                recordId: item.saleId,
+                                voucherCode: item.invoiceCode,
+                                label: `Hóa đơn ${item.invoiceCode}`,
+                              })
+                            }
+                          />
+                        ) : (
+                          item.invoiceCode
+                        )}
                       </td>
                       <td className="py-2.5 px-2.5 min-w-[150px] font-semibold text-slate-900 align-middle leading-snug">
                         {item.customerName}
@@ -1554,6 +1579,22 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                     : vc.voucherType === 'supplier_payment'
                     ? 'Phiếu thanh toán NCC'
                     : 'Phiếu nhập kho';
+                const matchedSale =
+                  vc.voucherType === 'sale_invoice'
+                    ? sales.find((s) => s.invoiceCode === vc.voucherCode || s.invoiceCode === vc.refCode)
+                    : undefined;
+                const matchedImport =
+                  vc.voucherType === 'import_receipt'
+                    ? imports.find((i) => i.receiptCode === vc.voucherCode || i.receiptCode === vc.refCode)
+                    : undefined;
+                const matchedReceipt =
+                  vc.voucherType === 'customer_receipt'
+                    ? receiptVouchers.find((r) => r.voucherCode === vc.voucherCode)
+                    : undefined;
+                const matchedPayment =
+                  vc.voucherType === 'supplier_payment'
+                    ? paymentVouchers.find((p) => p.voucherCode === vc.voucherCode)
+                    : undefined;
                 return (
                   <tr key={vc.id} className="hover:bg-slate-50">
                     <td className="py-3 px-4 whitespace-nowrap align-middle">
@@ -1561,6 +1602,63 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                         {vc.voucherCode}
                       </div>
                       <div className="text-xs text-emerald-800 font-medium mt-0.5">{typeLabel}</div>
+                      {onNavigateCrossLink && (
+                        <div className="mt-1">
+                          {matchedSale ? (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label="Mở HĐ gốc"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'sales',
+                                  recordId: matchedSale.id,
+                                  voucherCode: matchedSale.invoiceCode,
+                                  label: `Hóa đơn ${matchedSale.invoiceCode}`,
+                                })
+                              }
+                            />
+                          ) : matchedImport ? (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label="Mở PN gốc"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'imports',
+                                  recordId: matchedImport.id,
+                                  voucherCode: matchedImport.receiptCode,
+                                  label: `Phiếu nhập ${matchedImport.receiptCode}`,
+                                })
+                              }
+                            />
+                          ) : matchedReceipt ? (
+                            <CrossLinkChip
+                              tone="sky"
+                              label="Mở PT gốc"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'receipt_vouchers',
+                                  recordId: matchedReceipt.id,
+                                  voucherCode: matchedReceipt.voucherCode,
+                                  label: `Phiếu thu ${matchedReceipt.voucherCode}`,
+                                })
+                              }
+                            />
+                          ) : matchedPayment ? (
+                            <CrossLinkChip
+                              tone="amber"
+                              label="Mở PC gốc"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'payment_vouchers',
+                                  recordId: matchedPayment.id,
+                                  voucherCode: matchedPayment.voucherCode,
+                                  label: `Phiếu chi ${matchedPayment.voucherCode}`,
+                                })
+                              }
+                            />
+                          ) : null}
+                        </div>
+                      )}
                     </td>
                     <td className="py-3 px-4 whitespace-nowrap align-middle">
                       <div className="text-xs font-semibold text-slate-800">

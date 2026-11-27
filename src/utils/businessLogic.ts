@@ -4258,6 +4258,7 @@ export function findLinkedPaymentVouchersForImport(
 
 export interface StockMovementRecord {
   id: string;
+  sourceRecordId?: string;
   dateIso: string;
   type: 'import' | 'sale' | 'gift_export' | 'stocktake_in' | 'stocktake_out';
   voucherCode: string;
@@ -4325,6 +4326,7 @@ export function computeProductStockMovementLedger(
     allTimeImportQty += qty;
     rawEvents.push({
       id: `imp_${imp.id}`,
+      sourceRecordId: imp.id,
       dateIso: imp.createdAt || '',
       type: 'import',
       voucherCode: imp.receiptCode,
@@ -4347,6 +4349,7 @@ export function computeProductStockMovementLedger(
         allTimeExportQty += qty;
         rawEvents.push({
           id: `sale_${s.id}`,
+          sourceRecordId: s.id,
           dateIso: s.createdAt || '',
           type: 'sale',
           voucherCode: s.invoiceCode,
@@ -4375,6 +4378,7 @@ export function computeProductStockMovementLedger(
           s.giftUnitCost !== undefined ? Number(s.giftUnitCost) || 0 : Number(product.importPrice) || 0;
         rawEvents.push({
           id: `gift_${s.id}`,
+          sourceRecordId: s.id,
           dateIso: s.createdAt || '',
           type: 'gift_export',
           voucherCode: s.invoiceCode,
@@ -4401,6 +4405,7 @@ export function computeProductStockMovementLedger(
       allTimeImportQty += diff;
       rawEvents.push({
         id: `adj_${adj.id}`,
+        sourceRecordId: adj.id,
         dateIso: adj.createdAt || '',
         type: 'stocktake_in',
         voucherCode: adj.adjustmentCode,
@@ -4419,6 +4424,7 @@ export function computeProductStockMovementLedger(
       allTimeExportQty += absDiff;
       rawEvents.push({
         id: `adj_${adj.id}`,
+        sourceRecordId: adj.id,
         dateIso: adj.createdAt || '',
         type: 'stocktake_out',
         voucherCode: adj.adjustmentCode,
@@ -4958,6 +4964,421 @@ export function computeSmartDashboardAnalytics(params: {
     totalOrders,
     topProducts,
     topCustomers,
+  };
+}
+
+// ============================================================================
+// IMPORT/SALE MUTATION SAFETY, XNT STOCK INTEGRITY & CROSS-VOUCHER DIAGNOSTICS
+// ============================================================================
+
+export function doesRecordMatchProduct(
+  product: Pick<ProductItem, 'id' | 'name' | 'warehouseName'>,
+  recProductId?: string,
+  recProductName?: string,
+  recWarehouseName?: string
+): boolean {
+  if (recProductId && recProductId === product.id) return true;
+  if (recProductId && recProductId.startsWith('prod_xl_') && recProductName) {
+    const prodWhKey = normalizeWarehouseKey(product.warehouseName);
+    const recWhKey = normalizeWarehouseKey(recWarehouseName);
+    if (prodWhKey && recWhKey && prodWhKey !== recWhKey) return false;
+    return normalizeVietnameseSearch(recProductName) === normalizeVietnameseSearch(product.name);
+  }
+  return false;
+}
+
+export interface ProductStockIntegrityResult {
+  productId: string;
+  currentStock: number;
+  totalImportedQty: number;
+  totalSoldQty: number;
+  totalGiftedQty: number;
+  totalExportedQty: number;
+  totalStocktakeDiffQty: number;
+  netVoucherBalance: number;
+  /** Implied opening stock before all recorded vouchers; < 0 means definite stock drift */
+  impliedOpeningStock: number;
+  hasNegativeDrift: boolean;
+  /** Expected stock if product started at 0 and followed every recorded import/sale/stocktake */
+  recommendedReconciledStock: number;
+  linkedImportCount: number;
+  linkedSaleCount: number;
+}
+
+export function evaluateProductStockIntegrity(
+  product: ProductItem,
+  sales: SaleTransaction[],
+  imports: ImportTransaction[],
+  stockAdjustments: StockAdjustmentRecord[] = []
+): ProductStockIntegrityResult {
+  let totalImportedQty = 0;
+  let linkedImportCount = 0;
+  for (const imp of imports || []) {
+    if (!doesRecordMatchProduct(product, imp.productId, imp.productName, imp.warehouseName)) {
+      continue;
+    }
+    const q = Math.max(0, Number(imp.quantity) || 0);
+    if (q > 0) {
+      totalImportedQty += q;
+      linkedImportCount += 1;
+    }
+  }
+
+  let totalSoldQty = 0;
+  let totalGiftedQty = 0;
+  const matchedSaleIds = new Set<string>();
+  for (const s of sales || []) {
+    if (doesRecordMatchProduct(product, s.productId, s.productName, s.warehouseName)) {
+      const q = Math.max(0, Number(s.quantity) || 0);
+      if (q > 0) {
+        totalSoldQty += q;
+        matchedSaleIds.add(s.id);
+      }
+    }
+    if (
+      s.giftProductId &&
+      (Number(s.giftQuantity) || 0) > 0 &&
+      doesRecordMatchProduct(product, s.giftProductId, s.giftProductName, s.warehouseName)
+    ) {
+      const gq = Math.max(0, Number(s.giftQuantity) || 0);
+      if (gq > 0) {
+        totalGiftedQty += gq;
+        matchedSaleIds.add(s.id);
+      }
+    }
+  }
+
+  let totalStocktakeDiffQty = 0;
+  for (const adj of stockAdjustments || []) {
+    if (adj.productId !== product.id) continue;
+    totalStocktakeDiffQty += Math.round(Number(adj.diffQty) || 0);
+  }
+
+  const currentStock = Math.max(0, Number(product.stock) || 0);
+  const totalExportedQty = totalSoldQty + totalGiftedQty;
+  const netVoucherBalance = totalImportedQty - totalExportedQty + totalStocktakeDiffQty;
+  const impliedOpeningStock = currentStock - netVoucherBalance;
+  const hasNegativeDrift = impliedOpeningStock < 0;
+  const recommendedReconciledStock = Math.max(0, netVoucherBalance);
+
+  return {
+    productId: product.id,
+    currentStock,
+    totalImportedQty,
+    totalSoldQty,
+    totalGiftedQty,
+    totalExportedQty,
+    totalStocktakeDiffQty,
+    netVoucherBalance,
+    impliedOpeningStock,
+    hasNegativeDrift,
+    recommendedReconciledStock,
+    linkedImportCount,
+    linkedSaleCount: matchedSaleIds.size,
+  };
+}
+
+export interface ImportMutationSafetyResult {
+  allowed: boolean;
+  reasonType: 'ok' | 'ok_with_stock_drift' | 'linked_payment_voucher' | 'active_sales_depend_on_import';
+  message: string;
+  blockingPaymentVouchers: CashPaymentVoucher[];
+  blockingSales: SaleTransaction[];
+  actualSoldQty: number;
+  remainingImportsQtyAfterMutation: number;
+  clampedNextStock: number;
+  hasStockDrift: boolean;
+}
+
+/**
+ * Evaluates whether deleting (`newQuantity = 0`) or reducing (`newQuantity < targetImport.quantity`)
+ * an import receipt is safe based on ACTUAL linked payment vouchers (`PC-...`) and ACTUAL recorded
+ * sales (`HD-...`), instead of blindly blocking when `product.stock` drifted to 0 after sales were deleted.
+ */
+export function evaluateImportMutationSafety(params: {
+  targetImport: ImportTransaction;
+  product?: ProductItem | null;
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  paymentVouchers: CashPaymentVoucher[];
+  stockAdjustments?: StockAdjustmentRecord[];
+  newQuantity: number;
+}): ImportMutationSafetyResult {
+  const { targetImport, product, sales, imports, paymentVouchers } = params;
+  const safeNewQty = Math.max(0, Number(params.newQuantity) || 0);
+  const oldQty = Math.max(0, Number(targetImport.quantity) || 0);
+  const qtyDelta = safeNewQty - oldQty;
+  const isDelete = safeNewQty === 0;
+  const currentStock = product ? Math.max(0, Number(product.stock) || 0) : 0;
+
+  // 1. Linked supplier debt payment vouchers (PC-...) always block until cancelled first
+  const blockingPaymentVouchers = findLinkedPaymentVouchersForImport(targetImport, paymentVouchers);
+  if (blockingPaymentVouchers.length > 0) {
+    const codes = blockingPaymentVouchers.map((p) => p.voucherCode).join(', ');
+    return {
+      allowed: false,
+      reasonType: 'linked_payment_voucher',
+      message: `Phiếu nhập ${targetImport.receiptCode} đã có phiếu chi trả nợ (${codes}). Vui lòng hủy/xóa phiếu chi trước khi ${
+        isDelete ? 'hủy/xóa' : 'chỉnh sửa'
+      } phiếu nhập!`,
+      blockingPaymentVouchers,
+      blockingSales: [],
+      actualSoldQty: 0,
+      remainingImportsQtyAfterMutation: 0,
+      clampedNextStock: currentStock,
+      hasStockDrift: false,
+    };
+  }
+
+  // Gather actual sales referencing this product
+  const matchingSales: SaleTransaction[] = [];
+  let actualSoldQty = 0;
+  for (const s of sales || []) {
+    let matched = false;
+    if (
+      product
+        ? doesRecordMatchProduct(product, s.productId, s.productName, s.warehouseName)
+        : s.productId === targetImport.productId
+    ) {
+      const q = Math.max(0, Number(s.quantity) || 0);
+      if (q > 0) {
+        actualSoldQty += q;
+        matched = true;
+      }
+    }
+    if (
+      s.giftProductId &&
+      (Number(s.giftQuantity) || 0) > 0 &&
+      (product
+        ? doesRecordMatchProduct(product, s.giftProductId, s.giftProductName, s.warehouseName)
+        : s.giftProductId === targetImport.productId)
+    ) {
+      const gq = Math.max(0, Number(s.giftQuantity) || 0);
+      if (gq > 0) {
+        actualSoldQty += gq;
+        matched = true;
+      }
+    }
+    if (matched) matchingSales.push(s);
+  }
+  matchingSales.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+  // Sum all other imports of this product + proposed newQuantity
+  let otherImportsQty = 0;
+  for (const imp of imports || []) {
+    if (imp.id === targetImport.id) continue;
+    const sameProduct = product
+      ? doesRecordMatchProduct(product, imp.productId, imp.productName, imp.warehouseName)
+      : imp.productId === targetImport.productId;
+    if (sameProduct) {
+      otherImportsQty += Math.max(0, Number(imp.quantity) || 0);
+    }
+  }
+  const remainingImportsQtyAfterMutation = otherImportsQty + safeNewQty;
+
+  // 2. If reducing/deleting quantity, check whether stock goes negative AND whether real sales depend on it
+  if (qtyDelta < 0 && product && currentStock + qtyDelta < 0) {
+    // Only block if ACTUAL active sales exist AND removing/reducing this import drops total imports below sold qty
+    if (actualSoldQty > 0 && remainingImportsQtyAfterMutation < actualSoldQty) {
+      const shortfall = actualSoldQty - remainingImportsQtyAfterMutation;
+      const sampleCodes = matchingSales
+        .slice(0, 3)
+        .map((s) => s.invoiceCode)
+        .join(', ');
+      const extraCount = matchingSales.length > 3 ? ` và ${matchingSales.length - 3} đơn khác` : '';
+      return {
+        allowed: false,
+        reasonType: 'active_sales_depend_on_import',
+        message: `Còn ${matchingSales.length} hóa đơn bán hàng đang dùng vật tư "${product.name}" (${sampleCodes}${extraCount} · đã xuất ${actualSoldQty} ${product.unit}, thiếu ${shortfall} ${product.unit} nếu ${
+          isDelete ? 'hủy' : 'giảm'
+        } phiếu nhập ${targetImport.receiptCode}). Vui lòng hủy/sửa hóa đơn bán trước!`,
+        blockingPaymentVouchers: [],
+        blockingSales: matchingSales,
+        actualSoldQty,
+        remainingImportsQtyAfterMutation,
+        clampedNextStock: currentStock,
+        hasStockDrift: false,
+      };
+    }
+
+    // No active blocking sales! Stock was 0 or lower purely due to manual stock edit / stocktake / legacy drift.
+    // Allow mutation cleanly and clamp stock at 0 so user is NEVER deadlocked!
+    const clampedNextStock = Math.max(0, currentStock + qtyDelta);
+    return {
+      allowed: true,
+      reasonType: 'ok_with_stock_drift',
+      message:
+        actualSoldQty === 0
+          ? `Tồn kho "${product.name}" đang lệch (${currentStock} ${product.unit} < ${Math.abs(
+              qtyDelta
+            )} ${product.unit}) nhưng có 0 hóa đơn bán hàng liên kết — cho phép ${
+              isDelete ? 'hủy phiếu nhập' : 'giảm số lượng'
+            } và giữ tồn kho tại ${clampedNextStock} ${product.unit}.`
+          : `Các phiếu nhập khác vẫn đủ bù cho ${actualSoldQty} ${product.unit} đã bán (tồn hiện lệch còn ${currentStock} ${product.unit}) — cho phép ${
+              isDelete ? 'hủy phiếu nhập' : 'giảm số lượng'
+            } và giữ tồn kho tại ${clampedNextStock} ${product.unit}.`,
+      blockingPaymentVouchers: [],
+      blockingSales: [],
+      actualSoldQty,
+      remainingImportsQtyAfterMutation,
+      clampedNextStock,
+      hasStockDrift: true,
+    };
+  }
+
+  return {
+    allowed: true,
+    reasonType: 'ok',
+    message: 'Hợp lệ để cập nhật/hủy phiếu nhập.',
+    blockingPaymentVouchers: [],
+    blockingSales: [],
+    actualSoldQty,
+    remainingImportsQtyAfterMutation,
+    clampedNextStock: product ? Math.max(0, currentStock + qtyDelta) : 0,
+    hasStockDrift: false,
+  };
+}
+
+export interface ImportVoucherDiagnostics {
+  linkedProduct: ProductItem | null;
+  linkedPaymentVouchers: CashPaymentVoucher[];
+  relatedSales: SaleTransaction[];
+  deleteSafety: ImportMutationSafetyResult;
+  stockIntegrity: ProductStockIntegrityResult | null;
+  statusLevel: 'ok' | 'warning' | 'blocked';
+  statusLabel: string;
+}
+
+export function diagnoseImportVoucher(params: {
+  imp: ImportTransaction;
+  products: ProductItem[];
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  paymentVouchers: CashPaymentVoucher[];
+  stockAdjustments?: StockAdjustmentRecord[];
+}): ImportVoucherDiagnostics {
+  const { imp, products, sales, imports, paymentVouchers, stockAdjustments = [] } = params;
+  const linkedProduct =
+    products.find((p) => doesRecordMatchProduct(p, imp.productId, imp.productName, imp.warehouseName)) ||
+    null;
+  const linkedPaymentVouchers = findLinkedPaymentVouchersForImport(imp, paymentVouchers);
+  const relatedSales = sales
+    .filter((s) =>
+      linkedProduct
+        ? doesRecordMatchProduct(linkedProduct, s.productId, s.productName, s.warehouseName) ||
+          (Boolean(s.giftProductId) &&
+            (Number(s.giftQuantity) || 0) > 0 &&
+            doesRecordMatchProduct(linkedProduct, s.giftProductId, s.giftProductName, s.warehouseName))
+        : s.productId === imp.productId || s.giftProductId === imp.productId
+    )
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+  const deleteSafety = evaluateImportMutationSafety({
+    targetImport: imp,
+    product: linkedProduct,
+    sales,
+    imports,
+    paymentVouchers,
+    stockAdjustments,
+    newQuantity: 0,
+  });
+
+  const stockIntegrity = linkedProduct
+    ? evaluateProductStockIntegrity(linkedProduct, sales, imports, stockAdjustments)
+    : null;
+
+  let statusLevel: 'ok' | 'warning' | 'blocked' = 'ok';
+  let statusLabel = 'Khớp chứng từ';
+
+  if (deleteSafety.reasonType === 'linked_payment_voucher') {
+    statusLevel = 'blocked';
+    statusLabel = `Khóa bởi ${linkedPaymentVouchers.map((p) => p.voucherCode).join(', ')}`;
+  } else if (deleteSafety.reasonType === 'active_sales_depend_on_import') {
+    statusLevel = 'blocked';
+    statusLabel = `Đang gắn ${deleteSafety.blockingSales.length} HĐ bán`;
+  } else if (!linkedProduct) {
+    statusLevel = 'warning';
+    statusLabel = 'Vật tư gốc đã bị xóa';
+  } else if (stockIntegrity?.hasNegativeDrift || deleteSafety.hasStockDrift) {
+    statusLevel = 'warning';
+    statusLabel = `Lệch tồn (${linkedProduct.stock}/${stockIntegrity?.recommendedReconciledStock ?? imp.quantity}) · Vẫn hủy được`;
+  }
+
+  return {
+    linkedProduct,
+    linkedPaymentVouchers,
+    relatedSales,
+    deleteSafety,
+    stockIntegrity,
+    statusLevel,
+    statusLabel,
+  };
+}
+
+export interface SaleVoucherDiagnostics {
+  linkedCustomer: CustomerProfile | null;
+  linkedProduct: ProductItem | null;
+  linkedGiftProduct: ProductItem | null;
+  linkedReceiptVouchers: CashReceiptVoucher[];
+  relatedImports: ImportTransaction[];
+  statusLevel: 'ok' | 'warning' | 'blocked';
+  statusLabel: string;
+}
+
+export function diagnoseSaleVoucher(params: {
+  sale: SaleTransaction;
+  products: ProductItem[];
+  customers: CustomerProfile[];
+  imports: ImportTransaction[];
+  receiptVouchers: CashReceiptVoucher[];
+}): SaleVoucherDiagnostics {
+  const { sale, products, customers, imports, receiptVouchers } = params;
+  const linkedCustomer =
+    customers.find(
+      (c) =>
+        c.id === sale.customerId ||
+        (Boolean(sale.customerPhone) && (c.phone || '').trim() === sale.customerPhone.trim())
+    ) || null;
+  const linkedProduct =
+    products.find((p) => doesRecordMatchProduct(p, sale.productId, sale.productName, sale.warehouseName)) ||
+    null;
+  const linkedGiftProduct =
+    sale.giftProductId && (Number(sale.giftQuantity) || 0) > 0
+      ? products.find((p) =>
+          doesRecordMatchProduct(p, sale.giftProductId, sale.giftProductName, sale.warehouseName)
+        ) || null
+      : null;
+  const linkedReceiptVouchers = findLinkedReceiptVouchersForSale(sale, receiptVouchers);
+  const relatedImports = imports
+    .filter((imp) =>
+      linkedProduct
+        ? doesRecordMatchProduct(linkedProduct, imp.productId, imp.productName, imp.warehouseName)
+        : imp.productId === sale.productId
+    )
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+  let statusLevel: 'ok' | 'warning' | 'blocked' = 'ok';
+  let statusLabel = 'Khớp chứng từ';
+
+  if (linkedReceiptVouchers.length > 0) {
+    statusLevel = 'blocked';
+    statusLabel = `Khóa bởi ${linkedReceiptVouchers.map((r) => r.voucherCode).join(', ')}`;
+  } else if (!linkedProduct) {
+    statusLevel = 'warning';
+    statusLabel = 'Vật tư gốc đã bị xóa';
+  } else if (!linkedCustomer) {
+    statusLevel = 'warning';
+    statusLabel = 'Hồ sơ KH đã bị xóa';
+  }
+
+  return {
+    linkedCustomer,
+    linkedProduct,
+    linkedGiftProduct,
+    linkedReceiptVouchers,
+    relatedImports,
+    statusLevel,
+    statusLabel,
   };
 }
 

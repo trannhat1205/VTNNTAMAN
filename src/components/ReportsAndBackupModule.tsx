@@ -3860,18 +3860,48 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       <span>In Hóa Đơn PDF</span>
                     </button>
                     {onNavigateToModule && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const rec = drillDownItem.record;
-                          setDrillDownItem(null);
-                          onNavigateToModule(rec.debtAmount > 0 ? 'debts' : 'sales', rec.id);
-                        }}
-                        className="px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1"
-                      >
-                        <span>Mở trực tiếp tại phân hệ gốc</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const rec = drillDownItem.record;
+                            setDrillDownItem(null);
+                            onNavigateToModule('sales', rec.id);
+                          }}
+                          className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1"
+                        >
+                          <span>Mở Nhật ký Bán</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </button>
+                        {drillDownItem.record.debtAmount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rec = drillDownItem.record;
+                              setDrillDownItem(null);
+                              onNavigateToModule('debts', rec.id);
+                            }}
+                            className="px-3 py-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg flex items-center gap-1"
+                          >
+                            <span>Công nợ KH</span>
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {drillDownItem.record.productId && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rec = drillDownItem.record;
+                              setDrillDownItem(null);
+                              onNavigateToModule('inventory', rec.productId);
+                            }}
+                            className="px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg flex items-center gap-1"
+                          >
+                            <span>Thẻ kho VT</span>
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </>
                     )}
                   </>
                 )}
@@ -3887,18 +3917,48 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       <span>In Phiếu Nhập PDF</span>
                     </button>
                     {onNavigateToModule && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const rec = drillDownItem.record;
-                          setDrillDownItem(null);
-                          onNavigateToModule(rec.debtAmount > 0 ? 'debts' : 'imports', rec.id);
-                        }}
-                        className="px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1"
-                      >
-                        <span>Mở trực tiếp tại phân hệ gốc</span>
-                        <ExternalLink className="w-3.5 h-3.5" />
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const rec = drillDownItem.record;
+                            setDrillDownItem(null);
+                            onNavigateToModule('imports', rec.id);
+                          }}
+                          className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg flex items-center gap-1"
+                        >
+                          <span>Mở &amp; Sửa/Hủy Phiếu Nhập</span>
+                          <ExternalLink className="w-3.5 h-3.5" />
+                        </button>
+                        {drillDownItem.record.debtAmount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rec = drillDownItem.record;
+                              setDrillDownItem(null);
+                              onNavigateToModule('debts', rec.id);
+                            }}
+                            className="px-3 py-1.5 text-xs font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg flex items-center gap-1"
+                          >
+                            <span>Công nợ NCC</span>
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        {drillDownItem.record.productId && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const rec = drillDownItem.record;
+                              setDrillDownItem(null);
+                              onNavigateToModule('inventory', rec.productId);
+                            }}
+                            className="px-3 py-1.5 text-xs font-semibold text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg flex items-center gap-1"
+                          >
+                            <span>Thẻ kho VT</span>
+                            <ExternalLink className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </>
                     )}
                   </>
                 )}

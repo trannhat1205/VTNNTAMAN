@@ -16,10 +16,14 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CashPaymentVoucher,
+  CashReceiptVoucher,
+  CrossLinkNavigateRequest,
   CustomerProfile,
   ImportTransaction,
   ProductItem,
   SaleTransaction,
+  StockAdjustmentRecord,
   UserRole,
   VietQrBankConfig,
 } from '../types';
@@ -29,6 +33,8 @@ import {
   computeDebtAgingSummary,
   computeDueDateAfterDays,
   DEBT_TERM_DAY_OPTIONS,
+  diagnoseImportVoucher,
+  diagnoseSaleVoucher,
   evaluateDebtUrgency,
   formatVND,
   getTodayVietnamDateStr,
@@ -44,16 +50,25 @@ import {
 } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
 import { VietQrPaymentModal } from './VietQrPaymentModal';
+import {
+  CancelImportConfirmModal,
+  CancelSaleConfirmModal,
+  CrossLinkChip,
+} from './VoucherCrossLinkUI';
 
 interface DebtModuleProps {
   products: ProductItem[];
   customers: CustomerProfile[];
   imports: ImportTransaction[];
   sales: SaleTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
+  stockAdjustments?: StockAdjustmentRecord[];
   role: UserRole;
   leadDays: number;
   focusedRecordId?: string | null;
   onClearFocusedRecord?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   onPaySupplierDebt: (importId: string, amount: number, note: string) => void;
   onCollectCustomerDebt: (saleId: string, amount: number, note: string) => void;
   onUpdateSale: (
@@ -123,10 +138,14 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   customers,
   imports,
   sales,
+  receiptVouchers = [],
+  paymentVouchers = [],
+  stockAdjustments = [],
   role,
   leadDays,
   focusedRecordId,
   onClearFocusedRecord,
+  onNavigateCrossLink,
   onPaySupplierDebt,
   onCollectCustomerDebt,
   onUpdateSale,
@@ -231,8 +250,10 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
     zaloMessage?: string;
   } | null>(null);
 
-  // Manager-only Quick Edit Debt Record Modal
+  // Manager-only Quick Edit & Cancel Debt Record Modal
   const [editingDebtType, setEditingDebtType] = useState<'supplier' | 'customer' | null>(null);
+  const [cancelingImport, setCancelingImport] = useState<ImportTransaction | null>(null);
+  const [cancelingSale, setCancelingSale] = useState<SaleTransaction | null>(null);
   const [editingDebtId, setEditingDebtId] = useState('');
   const [editCode, setEditCode] = useState('');
   const [editWarehouse, setEditWarehouse] = useState('');
@@ -1178,11 +1199,33 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
             </button>
           </div>
 
-          {linkedSupplierRecord && (
+          {linkedSupplierRecord && (() => {
+            const supDiag = diagnoseImportVoucher({
+              imp: linkedSupplierRecord,
+              products,
+              sales,
+              imports,
+              paymentVouchers,
+              stockAdjustments,
+            });
+            return (
             <div className="bg-white rounded-lg border border-emerald-200 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-              <div className="space-y-1 text-xs">
-                <div className="text-sm font-bold text-slate-900">
-                  Phiếu nhập {linkedSupplierRecord.receiptCode} — {linkedSupplierRecord.supplierName}
+              <div className="space-y-1.5 text-xs">
+                <div className="text-sm font-bold text-slate-900 flex flex-wrap items-center gap-2">
+                  <span>
+                    Phiếu nhập {linkedSupplierRecord.receiptCode} — {linkedSupplierRecord.supplierName}
+                  </span>
+                  {supDiag.statusLevel !== 'ok' && (
+                    <span
+                      className={`px-2 py-0.5 text-[11px] font-bold rounded border ${
+                        supDiag.statusLevel === 'blocked'
+                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                      }`}
+                    >
+                      {supDiag.statusLabel}
+                    </span>
+                  )}
                 </div>
                 <div className="text-slate-600">
                   Vật tư: <strong>{linkedSupplierRecord.productName}</strong> ({linkedSupplierRecord.quantity}{' '}
@@ -1201,6 +1244,65 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   </span>
                   <span>Hạn trả: {linkedSupplierRecord.dueDate}</span>
                 </div>
+                {onNavigateCrossLink && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <CrossLinkChip
+                      tone="emerald"
+                      label={`Mở phiếu nhập ${linkedSupplierRecord.receiptCode}`}
+                      onClick={() =>
+                        onNavigateCrossLink({
+                          tab: 'imports',
+                          recordId: linkedSupplierRecord.id,
+                          voucherCode: linkedSupplierRecord.receiptCode,
+                          label: `Phiếu nhập ${linkedSupplierRecord.receiptCode}`,
+                        })
+                      }
+                    />
+                    {supDiag.linkedProduct && (
+                      <CrossLinkChip
+                        tone="indigo"
+                        label={`Thẻ kho ${supDiag.linkedProduct.code} (Tồn ${supDiag.linkedProduct.stock})`}
+                        onClick={() =>
+                          onNavigateCrossLink({
+                            tab: 'inventory',
+                            recordId: supDiag.linkedProduct!.id,
+                            label: `Thẻ kho ${supDiag.linkedProduct!.name}`,
+                          })
+                        }
+                      />
+                    )}
+                    {supDiag.linkedPaymentVouchers.map((pv) => (
+                      <CrossLinkChip
+                        key={pv.id}
+                        tone="rose"
+                        label={`Phiếu chi ${pv.voucherCode}`}
+                        onClick={() =>
+                          onNavigateCrossLink({
+                            tab: 'payment_vouchers',
+                            recordId: pv.id,
+                            voucherCode: pv.voucherCode,
+                            label: `Phiếu chi ${pv.voucherCode}`,
+                          })
+                        }
+                      />
+                    ))}
+                    {supDiag.relatedSales.slice(0, 3).map((s) => (
+                      <CrossLinkChip
+                        key={s.id}
+                        tone="sky"
+                        label={`HĐ bán ${s.invoiceCode}`}
+                        onClick={() =>
+                          onNavigateCrossLink({
+                            tab: 'sales',
+                            recordId: s.id,
+                            voucherCode: s.invoiceCode,
+                            label: `Hóa đơn ${s.invoiceCode}`,
+                          })
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
@@ -1241,25 +1343,57 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   Xuất Phiếu PDF
                 </button>
                 {canPerformRoleAction(role, 'edit_record') && (
-                  <button
-                    type="button"
-                    onClick={() => openManagerEditSupplierDebt(linkedSupplierRecord)}
-                    className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                    <span>Sửa chứng từ</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => openManagerEditSupplierDebt(linkedSupplierRecord)}
+                      className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      <span>Sửa chứng từ</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCancelingImport(linkedSupplierRecord)}
+                      className="px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Hủy phiếu</span>
+                    </button>
+                  </>
                 )}
               </div>
             </div>
-          )}
+            );
+          })()}
 
-          {linkedCustomerRecord && (
+          {linkedCustomerRecord && (() => {
+            const custDiag = diagnoseSaleVoucher({
+              sale: linkedCustomerRecord,
+              products,
+              customers,
+              imports,
+              receiptVouchers,
+            });
+            return (
             <div className="bg-white rounded-lg border border-emerald-200 p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-              <div className="space-y-1 text-xs">
-                <div className="text-sm font-bold text-slate-900">
-                  Hóa đơn {linkedCustomerRecord.invoiceCode} — {linkedCustomerRecord.customerName} (
-                  {linkedCustomerRecord.customerPhone})
+              <div className="space-y-1.5 text-xs">
+                <div className="text-sm font-bold text-slate-900 flex flex-wrap items-center gap-2">
+                  <span>
+                    Hóa đơn {linkedCustomerRecord.invoiceCode} — {linkedCustomerRecord.customerName} (
+                    {linkedCustomerRecord.customerPhone})
+                  </span>
+                  {custDiag.statusLevel !== 'ok' && (
+                    <span
+                      className={`px-2 py-0.5 text-[11px] font-bold rounded border ${
+                        custDiag.statusLevel === 'blocked'
+                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                      }`}
+                    >
+                      {custDiag.statusLabel}
+                    </span>
+                  )}
                 </div>
                 <div className="text-slate-600">
                   Vật tư: <strong>{linkedCustomerRecord.productName}</strong> ({linkedCustomerRecord.quantity}{' '}
@@ -1278,6 +1412,63 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   </span>
                   <span>Hạn thu: {linkedCustomerRecord.dueDate}</span>
                 </div>
+                {onNavigateCrossLink && (
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <CrossLinkChip
+                      tone="emerald"
+                      label={`Mở hóa đơn ${linkedCustomerRecord.invoiceCode}`}
+                      onClick={() =>
+                        onNavigateCrossLink({
+                          tab: 'sales',
+                          recordId: linkedCustomerRecord.id,
+                          voucherCode: linkedCustomerRecord.invoiceCode,
+                          label: `Hóa đơn ${linkedCustomerRecord.invoiceCode}`,
+                        })
+                      }
+                    />
+                    {custDiag.linkedCustomer && (
+                      <CrossLinkChip
+                        tone="sky"
+                        label={`Hồ sơ KH ${custDiag.linkedCustomer.code || custDiag.linkedCustomer.name}`}
+                        onClick={() =>
+                          onNavigateCrossLink({
+                            tab: 'customers',
+                            recordId: custDiag.linkedCustomer!.id,
+                            label: `Khách hàng ${custDiag.linkedCustomer!.name}`,
+                          })
+                        }
+                      />
+                    )}
+                    {custDiag.linkedProduct && (
+                      <CrossLinkChip
+                        tone="indigo"
+                        label={`Thẻ kho ${custDiag.linkedProduct.code}`}
+                        onClick={() =>
+                          onNavigateCrossLink({
+                            tab: 'inventory',
+                            recordId: custDiag.linkedProduct!.id,
+                            label: `Thẻ kho ${custDiag.linkedProduct!.name}`,
+                          })
+                        }
+                      />
+                    )}
+                    {custDiag.linkedReceiptVouchers.map((rv) => (
+                      <CrossLinkChip
+                        key={rv.id}
+                        tone="rose"
+                        label={`Phiếu thu ${rv.voucherCode}`}
+                        onClick={() =>
+                          onNavigateCrossLink({
+                            tab: 'receipt_vouchers',
+                            recordId: rv.id,
+                            voucherCode: rv.voucherCode,
+                            label: `Phiếu thu ${rv.voucherCode}`,
+                          })
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
@@ -1318,18 +1509,29 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   Xuất Phiếu Thu PDF
                 </button>
                 {canPerformRoleAction(role, 'edit_record') && (
-                  <button
-                    type="button"
-                    onClick={() => openManagerEditCustomerDebt(linkedCustomerRecord)}
-                    className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                    <span>Sửa hóa đơn</span>
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => openManagerEditCustomerDebt(linkedCustomerRecord)}
+                      className="px-3 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg flex items-center gap-1"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      <span>Sửa hóa đơn</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setCancelingSale(linkedCustomerRecord)}
+                      className="px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Hủy HĐ</span>
+                    </button>
+                  </>
                 )}
               </div>
             </div>
-          )}
+            );
+          })()}
         </div>
       )}
 
@@ -1578,11 +1780,12 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteImport(imp.id)}
-                            aria-label={`Xóa phiếu nợ ${imp.receiptCode}`}
-                            className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg border border-slate-200"
+                            onClick={() => setCancelingImport(imp)}
+                            aria-label={`Hủy phiếu nợ ${imp.receiptCode}`}
+                            className="px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 flex items-center gap-1 whitespace-nowrap"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hủy phiếu</span>
                           </button>
                         </div>
                       ) : (
@@ -1634,6 +1837,14 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                       leadDays
                     );
                     const isHighlighted = selectedLinkedVoucherId === imp.id;
+                    const supDiag = diagnoseImportVoucher({
+                      imp,
+                      products,
+                      sales,
+                      imports,
+                      paymentVouchers,
+                      stockAdjustments,
+                    });
                     return (
                       <tr
                         key={imp.id}
@@ -1655,6 +1866,19 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           <div className="text-xs text-slate-500 font-mono mt-0.5">
                             {imp.createdAt.slice(0, 10)}
                           </div>
+                          {supDiag.statusLevel !== 'ok' && (
+                            <div className="mt-1">
+                              <span
+                                className={`inline-block px-1.5 py-0.5 text-[10px] font-bold rounded border ${
+                                  supDiag.statusLevel === 'blocked'
+                                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}
+                              >
+                                {supDiag.statusLabel}
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 min-w-[190px] align-middle">
                           <div className="font-semibold text-slate-900 leading-snug">{imp.supplierName}</div>
@@ -1665,6 +1889,65 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           <div className="text-xs text-slate-500 font-mono mt-0.5">
                             SL: {imp.quantity} {imp.unit}
                           </div>
+                          {onNavigateCrossLink && (
+                            <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                              <CrossLinkChip
+                                tone="emerald"
+                                label="Phiếu nhập"
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'imports',
+                                    recordId: imp.id,
+                                    voucherCode: imp.receiptCode,
+                                    label: `Phiếu nhập ${imp.receiptCode}`,
+                                  })
+                                }
+                              />
+                              {supDiag.linkedProduct && (
+                                <CrossLinkChip
+                                  tone="indigo"
+                                  label={`Kho (${supDiag.linkedProduct.stock})`}
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'inventory',
+                                      recordId: supDiag.linkedProduct!.id,
+                                      label: `Thẻ kho ${supDiag.linkedProduct!.name}`,
+                                    })
+                                  }
+                                />
+                              )}
+                              {supDiag.linkedPaymentVouchers.map((pv) => (
+                                <CrossLinkChip
+                                  key={pv.id}
+                                  tone="rose"
+                                  label={pv.voucherCode}
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'payment_vouchers',
+                                      recordId: pv.id,
+                                      voucherCode: pv.voucherCode,
+                                      label: `Phiếu chi ${pv.voucherCode}`,
+                                    })
+                                  }
+                                />
+                              ))}
+                              {supDiag.relatedSales.slice(0, 1).map((s) => (
+                                <CrossLinkChip
+                                  key={s.id}
+                                  tone="sky"
+                                  label={s.invoiceCode}
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'sales',
+                                      recordId: s.id,
+                                      voucherCode: s.invoiceCode,
+                                      label: `Hóa đơn ${s.invoiceCode}`,
+                                    })
+                                  }
+                                />
+                              ))}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap align-middle">
                           {formatVND(imp.totalCost)}
@@ -1754,11 +2037,12 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => onDeleteImport(imp.id)}
-                                  aria-label={`Xóa phiếu nợ ${imp.receiptCode}`}
-                                  className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg"
+                                  onClick={() => setCancelingImport(imp)}
+                                  aria-label={`Hủy phiếu nợ ${imp.receiptCode}`}
+                                  className="px-2 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 whitespace-nowrap"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Hủy phiếu</span>
                                 </button>
                               </>
                             ) : (
@@ -1968,11 +2252,12 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteSale(sale.id)}
-                            aria-label={`Xóa hóa đơn nợ ${sale.invoiceCode}`}
-                            className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg border border-slate-200"
+                            onClick={() => setCancelingSale(sale)}
+                            aria-label={`Hủy hóa đơn nợ ${sale.invoiceCode}`}
+                            className="px-2.5 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg border border-rose-200 flex items-center gap-1 whitespace-nowrap"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-3 h-3" />
+                            <span>Hủy HĐ</span>
                           </button>
                         </div>
                       ) : (
@@ -2024,6 +2309,13 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                       leadDays
                     );
                     const isHighlighted = selectedLinkedVoucherId === sale.id;
+                    const custDiag = diagnoseSaleVoucher({
+                      sale,
+                      products,
+                      customers,
+                      imports,
+                      receiptVouchers,
+                    });
                     return (
                       <tr
                         key={sale.id}
@@ -2045,6 +2337,19 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           <div className="text-xs text-slate-500 font-mono mt-0.5">
                             {sale.createdAt.slice(0, 10)}
                           </div>
+                          {custDiag.statusLevel !== 'ok' && (
+                            <div className="mt-1">
+                              <span
+                                className={`inline-block px-1.5 py-0.5 text-[10px] font-bold rounded border ${
+                                  custDiag.statusLevel === 'blocked'
+                                    ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                                }`}
+                              >
+                                {custDiag.statusLabel}
+                              </span>
+                            </div>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 min-w-[190px] align-middle">
                           <div className="font-semibold text-slate-900 leading-snug">{sale.customerName}</div>
@@ -2055,6 +2360,63 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                           <div className="text-xs text-slate-500 font-mono mt-0.5">
                             SL: {sale.quantity} {sale.unit}
                           </div>
+                          {onNavigateCrossLink && (
+                            <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                              <CrossLinkChip
+                                tone="emerald"
+                                label="Hóa đơn"
+                                onClick={() =>
+                                  onNavigateCrossLink({
+                                    tab: 'sales',
+                                    recordId: sale.id,
+                                    voucherCode: sale.invoiceCode,
+                                    label: `Hóa đơn ${sale.invoiceCode}`,
+                                  })
+                                }
+                              />
+                              {custDiag.linkedCustomer && (
+                                <CrossLinkChip
+                                  tone="sky"
+                                  label="Hồ sơ KH"
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'customers',
+                                      recordId: custDiag.linkedCustomer!.id,
+                                      label: `Khách hàng ${custDiag.linkedCustomer!.name}`,
+                                    })
+                                  }
+                                />
+                              )}
+                              {custDiag.linkedProduct && (
+                                <CrossLinkChip
+                                  tone="indigo"
+                                  label={`Kho (${custDiag.linkedProduct.stock})`}
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'inventory',
+                                      recordId: custDiag.linkedProduct!.id,
+                                      label: `Thẻ kho ${custDiag.linkedProduct!.name}`,
+                                    })
+                                  }
+                                />
+                              )}
+                              {custDiag.linkedReceiptVouchers.map((rv) => (
+                                <CrossLinkChip
+                                  key={rv.id}
+                                  tone="rose"
+                                  label={rv.voucherCode}
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'receipt_vouchers',
+                                      recordId: rv.id,
+                                      voucherCode: rv.voucherCode,
+                                      label: `Phiếu thu ${rv.voucherCode}`,
+                                    })
+                                  }
+                                />
+                              ))}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-700 whitespace-nowrap align-middle">
                           {formatVND(sale.totalAmount)}
@@ -2162,11 +2524,12 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => onDeleteSale(sale.id)}
-                                  aria-label={`Xóa hóa đơn nợ ${sale.invoiceCode}`}
-                                  className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg"
+                                  onClick={() => setCancelingSale(sale)}
+                                  aria-label={`Hủy hóa đơn nợ ${sale.invoiceCode}`}
+                                  className="px-2 py-1.5 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg flex items-center gap-1 whitespace-nowrap"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>Hủy HĐ</span>
                                 </button>
                               </>
                             ) : (
@@ -2374,20 +2737,41 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
 
               </div>
 
-              <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2 shrink-0">
+              <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex flex-wrap items-center justify-between gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setEditingDebtType(null)}
-                  className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  onClick={() => {
+                    const t = editingDebtType;
+                    const id = editingDebtId;
+                    setEditingDebtType(null);
+                    if (t === 'supplier') {
+                      const found = imports.find((i) => i.id === id);
+                      if (found) setCancelingImport(found);
+                    } else if (t === 'customer') {
+                      const found = sales.find((s) => s.id === id);
+                      if (found) setCancelingSale(found);
+                    }
+                  }}
+                  className="px-3 py-2 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg inline-flex items-center gap-1"
                 >
-                  Hủy
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{editingDebtType === 'supplier' ? 'Hủy phiếu mua hàng' : 'Hủy hóa đơn'}</span>
                 </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
-                >
-                  Lưu cập nhật công nợ
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingDebtType(null)}
+                    className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
+                  >
+                    Đóng
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                  >
+                    Lưu cập nhật công nợ
+                  </button>
+                </div>
               </div>
             </form>
           </div>
@@ -2518,6 +2902,33 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {cancelingImport && (
+        <CancelImportConfirmModal
+          targetImport={cancelingImport}
+          products={products}
+          sales={sales}
+          imports={imports}
+          paymentVouchers={paymentVouchers}
+          stockAdjustments={stockAdjustments}
+          onClose={() => setCancelingImport(null)}
+          onConfirmDelete={onDeleteImport}
+          onNavigateCrossLink={onNavigateCrossLink}
+        />
+      )}
+
+      {cancelingSale && (
+        <CancelSaleConfirmModal
+          targetSale={cancelingSale}
+          products={products}
+          customers={customers}
+          imports={imports}
+          receiptVouchers={receiptVouchers}
+          onClose={() => setCancelingSale(null)}
+          onConfirmDelete={onDeleteSale}
+          onNavigateCrossLink={onNavigateCrossLink}
+        />
       )}
 
       <VietQrPaymentModal

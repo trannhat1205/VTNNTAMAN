@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Calendar,
   FileDown,
@@ -17,6 +17,8 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CashReceiptVoucher,
+  CrossLinkNavigateRequest,
   CustomerGroup,
   CustomerProfile,
   ImportTransaction,
@@ -30,12 +32,14 @@ import {
   CustomerDebtFilter,
   evaluateDebtUrgency,
   filterCustomers,
+  findLinkedReceiptVouchersForSale,
   formatVND,
   getCurrentMonthRangeVietnam,
   getRecentDaysRangeVietnam,
   getTodayVietnamDateStr,
   previewCustomerFifoDebtSettlement,
 } from '../utils/businessLogic';
+import { CrossLinkChip } from './VoucherCrossLinkUI';
 import {
   exportCombinedReceivedItemsAndDebtExcel,
   exportCombinedReceivedItemsAndDebtPDF,
@@ -51,6 +55,7 @@ interface CustomerModuleProps {
   products: ProductItem[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  receiptVouchers?: CashReceiptVoucher[];
   role: UserRole;
   customerGroups: string[];
   onAddCustomerGroup: (groupName: string) => void;
@@ -71,6 +76,9 @@ interface CustomerModuleProps {
     note: string;
   }) => void;
   onCreateSaleForCustomer: (customerId: string) => void;
+  focusedCustomerId?: string | null;
+  onClearFocusedCustomer?: () => void;
+  onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
   leadDays: number;
 }
 
@@ -79,6 +87,7 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
   products,
   sales,
   imports,
+  receiptVouchers = [],
   role,
   customerGroups,
   onAddCustomerGroup,
@@ -88,14 +97,31 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
   onCollectCustomerDebt,
   onSettleCustomerTotalDebtFifo,
   onCreateSaleForCustomer,
+  focusedCustomerId,
+  onClearFocusedCustomer,
+  onNavigateCrossLink,
   leadDays,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [groupFilter, setGroupFilter] = useState<CustomerGroup | 'all'>('all');
   const [debtFilter, setDebtFilter] = useState<CustomerDebtFilter>('all');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
-    customers[0]?.id || null
+    focusedCustomerId || customers[0]?.id || null
   );
+
+  useEffect(() => {
+    if (!focusedCustomerId) return;
+    const found = customers.find(
+      (c) => c.id === focusedCustomerId || c.code === focusedCustomerId
+    );
+    if (found) {
+      setSearchQuery('');
+      setGroupFilter('all');
+      setDebtFilter('all');
+      setSelectedCustomerId(found.id);
+    }
+    onClearFocusedCustomer?.();
+  }, [focusedCustomerId, customers, onClearFocusedCustomer]);
 
   // Date-range filter for "Danh sách tổng hợp các mặt hàng đã nhận & còn nợ (Từ ngày ... đến ngày ...)"
   const currentMonthRange = useMemo(() => getCurrentMonthRangeVietnam(), []);
@@ -677,9 +703,24 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                           customerReceivedItemsReport.items.map((item) => (
                             <tr key={item.saleId} className="hover:bg-slate-50">
                               <td className="py-2.5 px-2.5 whitespace-nowrap align-middle">
-                                <div className="font-mono font-semibold text-slate-900">
-                                  {item.invoiceCode}
-                                </div>
+                                {onNavigateCrossLink ? (
+                                  <CrossLinkChip
+                                    tone="emerald"
+                                    label={item.invoiceCode}
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'sales',
+                                        recordId: item.saleId,
+                                        voucherCode: item.invoiceCode,
+                                        label: `Hóa đơn ${item.invoiceCode}`,
+                                      })
+                                    }
+                                  />
+                                ) : (
+                                  <div className="font-mono font-semibold text-slate-900">
+                                    {item.invoiceCode}
+                                  </div>
+                                )}
                                 <div className="text-[10px] font-mono text-slate-500 mt-0.5">
                                   {item.date}
                                 </div>
@@ -819,14 +860,31 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                           key={tx.id}
                           className="p-3.5 rounded-lg border border-slate-200 bg-white space-y-2"
                         >
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-mono font-semibold text-slate-900">
-                              {tx.invoiceCode}
-                              <span className="mx-1.5 text-slate-400" aria-hidden="true">·</span>
-                              <span className="font-normal text-slate-500">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              {onNavigateCrossLink ? (
+                                <CrossLinkChip
+                                  tone="emerald"
+                                  label={tx.invoiceCode}
+                                  onClick={() =>
+                                    onNavigateCrossLink({
+                                      tab: 'sales',
+                                      recordId: tx.id,
+                                      voucherCode: tx.invoiceCode,
+                                      label: `Hóa đơn ${tx.invoiceCode}`,
+                                    })
+                                  }
+                                />
+                              ) : (
+                                <span className="font-mono font-semibold text-slate-900">
+                                  {tx.invoiceCode}
+                                </span>
+                              )}
+                              <span className="text-slate-400" aria-hidden="true">·</span>
+                              <span className="font-normal text-slate-500 font-mono">
                                 {tx.createdAt.slice(0, 10)}
                               </span>
-                            </span>
+                            </div>
                             <span
                               className={`font-medium ${
                                 tx.debtAmount === 0
@@ -847,6 +905,57 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
                           <div className="text-xs text-slate-800 font-medium">
                             {tx.productName} ({tx.quantity} {tx.unit} × {formatVND(tx.unitPrice)})
                           </div>
+
+                          {onNavigateCrossLink && (() => {
+                            const linkedRvs = findLinkedReceiptVouchersForSale(tx, receiptVouchers);
+                            const matchedProd = products.find((p) => p.id === tx.productId);
+                            return (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {matchedProd && (
+                                  <CrossLinkChip
+                                    tone="indigo"
+                                    label={`Thẻ kho ${matchedProd.code}`}
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'inventory',
+                                        recordId: matchedProd.id,
+                                        label: `Thẻ kho ${matchedProd.name}`,
+                                      })
+                                    }
+                                  />
+                                )}
+                                {tx.debtAmount > 0 && (
+                                  <CrossLinkChip
+                                    tone="amber"
+                                    label="Công nợ"
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'debts',
+                                        recordId: tx.id,
+                                        subTab: 'customer',
+                                        label: `Công nợ ${tx.invoiceCode}`,
+                                      })
+                                    }
+                                  />
+                                )}
+                                {linkedRvs.map((rv) => (
+                                  <CrossLinkChip
+                                    key={rv.id}
+                                    tone="rose"
+                                    label={`Phiếu thu ${rv.voucherCode}`}
+                                    onClick={() =>
+                                      onNavigateCrossLink({
+                                        tab: 'receipt_vouchers',
+                                        recordId: rv.id,
+                                        voucherCode: rv.voucherCode,
+                                        label: `Phiếu thu ${rv.voucherCode}`,
+                                      })
+                                    }
+                                  />
+                                ))}
+                              </div>
+                            );
+                          })()}
 
                           <div className="flex flex-wrap items-center justify-between gap-2 text-xs pt-1 border-t border-slate-100">
                             <div className="text-slate-600 font-mono tabular-nums">
