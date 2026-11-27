@@ -7471,9 +7471,9 @@ export default function App() {
                   />
                   <span>
                     {isManualCloudSyncing
-                      ? 'Đang đồng bộ...'
+                      ? 'Đang cập nhật...'
                       : rtdbSyncState === 'live'
-                      ? 'Realtime DB'
+                      ? 'Cập nhật'
                       : rtdbSyncState === 'connecting'
                       ? 'Đang kết nối...'
                       : 'Ngoại tuyến'}
@@ -7606,9 +7606,9 @@ export default function App() {
                   />
                   <span>
                     {isManualCloudSyncing
-                      ? 'Đồng bộ...'
+                      ? 'Đang cập nhật...'
                       : rtdbSyncState === 'live'
-                      ? 'Realtime DB'
+                      ? 'Cập nhật'
                       : rtdbSyncState === 'connecting'
                       ? 'Kết nối...'
                       : 'Ngoại tuyến'}
