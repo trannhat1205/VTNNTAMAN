@@ -33,6 +33,7 @@ import {
   off,
   onValue,
   ref as rtdbRef,
+  runTransaction,
   set as rtdbSet,
   update as rtdbUpdate,
 } from 'firebase/database';
@@ -57,7 +58,10 @@ import {
 } from '../types';
 import { ADMIN_BACKUP_EMAIL, PRIMARY_ADMIN_UID } from '../data/seedData';
 import {
+  buildVoucherCounterMeta,
+  extractMaxVoucherSequence,
   formatDefaultWarehouseNameFromGmail,
+  formatVoucherCodeFromSequence,
   getIndependentWarehouseFullPermissions,
   getTodayVietnamDateStr,
 } from '../utils/businessLogic';
@@ -98,6 +102,7 @@ import {
   RtdbUserDirectoryProfile,
   RtdbWorkspacePayload,
   sanitizeForRealtimeDb,
+  toRtdbRecordKey,
   toRtdbUserDirectoryProfile,
 } from '../utils/rtdbSyncLogic';
 
@@ -1973,6 +1978,7 @@ const pendingStorageWriteByUid = new Map<
       allowIntentionalWipe?: boolean;
       force?: boolean;
       allowMultiWarehouseManager?: boolean;
+      allowSharedWarehouseMember?: boolean;
     };
   }
 >();
@@ -1993,6 +1999,7 @@ export async function writeWorkspaceToFirebaseStorage(
     allowIntentionalWipe?: boolean;
     force?: boolean;
     allowMultiWarehouseManager?: boolean;
+    allowSharedWarehouseMember?: boolean;
   }
 ): Promise<boolean> {
   const user = auth.currentUser;
@@ -2001,7 +2008,8 @@ export async function writeWorkspaceToFirebaseStorage(
   if (
     user.uid !== safeUid &&
     !isCurrentUserAdmin(user) &&
-    !options?.allowMultiWarehouseManager
+    !options?.allowMultiWarehouseManager &&
+    !options?.allowSharedWarehouseMember
   ) {
     return false;
   }
@@ -2355,6 +2363,113 @@ export async function writeAdminWorkspacesIndexToFirebaseStorage(
   }
 }
 
+/**
+ * Tracks product record keys (`${safeUid}::${recKey}`) that are currently or just finished
+ * running an atomic server-side `runTransaction` so the 250ms debounced workspace diff sync
+ * does not overwrite the server-committed `stock` / `importPrice` with a pre-transaction snapshot.
+ */
+const recentAtomicProductLocks = new Map<string, number>();
+const ATOMIC_PRODUCT_LOCK_TTL_MS = 1500;
+
+function getActiveSkippedProductKeysForOwner(safeUid: string): Set<string> {
+  const now = Date.now();
+  const prefix = `${safeUid}::`;
+  const skipped = new Set<string>();
+  for (const [lockKey, expiresAt] of recentAtomicProductLocks.entries()) {
+    if (expiresAt <= now) {
+      recentAtomicProductLocks.delete(lockKey);
+      continue;
+    }
+    if (lockKey.startsWith(prefix)) {
+      skipped.add(lockKey.slice(prefix.length));
+    }
+  }
+  return skipped;
+}
+
+/**
+ * Executes an atomic compare-and-swap `runTransaction` on `/workspaces/{ownerUid}/products/{k_prodId}`
+ * in Firebase Realtime Database so concurrent sales/imports/cancellations from multiple accounts
+ * sharing the same warehouse NEVER lose stock deductions or weighted-average cost updates.
+ */
+export async function applyAtomicRealtimeProductMutation(params: {
+  ownerUid: string;
+  productId: string;
+  fallbackProduct?: ProductItem | null;
+  mutate: (currentProduct: ProductItem) => ProductItem;
+}): Promise<ProductItem | null> {
+  const user = auth.currentUser;
+  if (!user || !params.ownerUid || !params.productId) return null;
+  const safeUid = sanitizeFirestoreId(params.ownerUid);
+  const recKey = toRtdbRecordKey(params.productId);
+  const lockKey = `${safeUid}::${recKey}`;
+  recentAtomicProductLocks.set(lockKey, Date.now() + ATOMIC_PRODUCT_LOCK_TTL_MS);
+
+  try {
+    const prodRef = rtdbRef(rtdb, `workspaces/${safeUid}/products/${recKey}`);
+    const txRes = await runTransaction(prodRef, (currentRaw) => {
+      const base: ProductItem | null =
+        currentRaw && typeof currentRaw === 'object' && (currentRaw as ProductItem).id
+          ? (currentRaw as ProductItem)
+          : params.fallbackProduct || null;
+      if (!base) return currentRaw;
+      const mutated = params.mutate(base);
+      return sanitizeForRealtimeDb(mutated);
+    });
+    recentAtomicProductLocks.set(lockKey, Date.now() + ATOMIC_PRODUCT_LOCK_TTL_MS);
+    if (txRes.committed && txRes.snapshot.exists()) {
+      return txRes.snapshot.val() as ProductItem;
+    }
+    return null;
+  } catch (err) {
+    recentAtomicProductLocks.delete(lockKey);
+    console.warn(
+      'applyAtomicRealtimeProductMutation warning:',
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
+/**
+ * Atomically reserves the next sequential voucher code (`HD-YYMM-NNN`, `PN-YYMM-NNN`, `PT-...`, `PC-...`, `KK-...`)
+ * under `/workspaces/{ownerUid}/counters/{prefix_YYMM}` so two accounts creating orders simultaneously
+ * on the same shared warehouse NEVER receive duplicate voucher numbers.
+ */
+export async function reserveNextRealtimeVoucherCode(params: {
+  ownerUid: string;
+  prefix: string;
+  existingCodes: string[];
+  dateInput?: Date;
+}): Promise<string | null> {
+  const user = auth.currentUser;
+  if (!user || !params.ownerUid) return null;
+  const safeUid = sanitizeFirestoreId(params.ownerUid);
+  const { yymm, counterKey } = buildVoucherCounterMeta(params.prefix, params.dateInput);
+  const minBase = extractMaxVoucherSequence(params.prefix, yymm, params.existingCodes);
+
+  try {
+    const counterRef = rtdbRef(rtdb, `workspaces/${safeUid}/counters/${counterKey}`);
+    const txRes = await runTransaction(counterRef, (currentVal) => {
+      const curNum = typeof currentVal === 'number' && Number.isFinite(currentVal) ? currentVal : 0;
+      return Math.max(curNum, minBase) + 1;
+    });
+    if (txRes.committed && txRes.snapshot.exists()) {
+      const seq = Number(txRes.snapshot.val());
+      if (Number.isFinite(seq) && seq >= 1) {
+        return formatVoucherCodeFromSequence(params.prefix, yymm, seq);
+      }
+    }
+    return null;
+  } catch (err) {
+    console.warn(
+      'reserveNextRealtimeVoucherCode warning:',
+      err instanceof Error ? err.message : err
+    );
+    return null;
+  }
+}
+
 export async function writeRealtimeWorkspace(
   ownerUid: string,
   payload: RtdbWorkspacePayload,
@@ -2363,6 +2478,7 @@ export async function writeRealtimeWorkspace(
   options?: {
     forceStorage?: boolean;
     allowMultiWarehouseManager?: boolean;
+    allowSharedWarehouseMember?: boolean;
   }
 ): Promise<boolean> {
   const user = auth.currentUser;
@@ -2371,7 +2487,8 @@ export async function writeRealtimeWorkspace(
   if (
     user.uid !== safeUid &&
     !isCurrentUserAdmin(user) &&
-    !options?.allowMultiWarehouseManager
+    !options?.allowMultiWarehouseManager &&
+    !options?.allowSharedWarehouseMember
   ) {
     return false;
   }
@@ -2403,7 +2520,10 @@ export async function writeRealtimeWorkspace(
       await rtdbSet(wsRef, fullKeyed);
       legacyLayoutOwnerUids.delete(safeUid);
     } else {
-      const diffUpdates = buildWorkspaceDiffUpdates(prevPayload, normalizedPayload);
+      const skipProductKeys = getActiveSkippedProductKeysForOwner(safeUid);
+      const diffUpdates = buildWorkspaceDiffUpdates(prevPayload, normalizedPayload, {
+        skipProductKeys: skipProductKeys.size > 0 ? skipProductKeys : undefined,
+      });
       await rtdbUpdate(wsRef, diffUpdates);
     }
 
@@ -2414,6 +2534,7 @@ export async function writeRealtimeWorkspace(
       allowIntentionalWipe,
       force: options?.forceStorage,
       allowMultiWarehouseManager: options?.allowMultiWarehouseManager,
+      allowSharedWarehouseMember: options?.allowSharedWarehouseMember,
     });
     return true;
   } catch (err) {
@@ -2659,9 +2780,11 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
       const resolvedOwnerUids =
         dir.assignedOwnerUids && typeof dir.assignedOwnerUids === 'object'
           ? dir.assignedOwnerUids
-          : dir.multiWarehouseGrantedByAdmin === false
-          ? undefined
           : prev?.assignedOwnerUids;
+      const resolvedCanonicalOwnerUid =
+        typeof dir.canonicalOwnerUid === 'string' && dir.canonicalOwnerUid.trim()
+          ? dir.canonicalOwnerUid.trim()
+          : prev?.canonicalOwnerUid;
 
       const normalizedExisting = normalizeIndependentWarehouseStaffMember({
         uid,
@@ -2677,6 +2800,7 @@ export async function seedExistingStaffToRealtimeDirectoryIfAdmin(
         assignedWarehouses: resolvedMultiWhs,
         multiWarehouseGrantedByAdmin: resolvedMultiGrant,
         assignedOwnerUids: resolvedOwnerUids,
+        canonicalOwnerUid: resolvedCanonicalOwnerUid,
         warehouseRenameCount:
           typeof dir.warehouseRenameCount === 'number' && Number.isFinite(dir.warehouseRenameCount)
             ? Math.max(0, Math.floor(dir.warehouseRenameCount))

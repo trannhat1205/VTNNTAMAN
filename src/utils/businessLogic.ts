@@ -408,25 +408,126 @@ export function getCurrentQuarterRangeVietnam(dateInput: Date = new Date()): {
   };
 }
 
-export function generateSequentialVoucherCode(
+let localRecordIdSeq = 0;
+
+/**
+ * Generates a collision-free, Firestore/RTDB-safe record ID (`<= 40` chars, `[a-zA-Z0-9_]`)
+ * safe across rapid multi-item creation and concurrent multi-account / multi-device sessions.
+ */
+export function generateUniqueRecordId(prefix: string, nowMs = Date.now()): string {
+  localRecordIdSeq = (localRecordIdSeq + 1) % 1679616; // 36^4
+  const seqStr = localRecordIdSeq.toString(36).padStart(2, '0');
+  const randStr = Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+  const cleanPrefix = (prefix || 'rec').replace(/[^a-zA-Z0-9_]/g, '') || 'rec';
+  return `${cleanPrefix}_${nowMs}_${seqStr}${randStr}`;
+}
+
+export function extractMaxVoucherSequence(
   prefix: string,
-  existingCodes: string[],
-  dateInput: Date = new Date()
-): string {
-  const todayStr = getTodayVietnamDateStr(dateInput);
-  const yymm = `${todayStr.slice(2, 4)}${todayStr.slice(5, 7)}`;
+  yymm: string,
+  existingCodes: string[]
+): number {
   const fullPrefix = `${prefix}-${yymm}-`;
   let maxSeq = 0;
-  for (const code of existingCodes) {
+  for (const code of existingCodes || []) {
     if (typeof code === 'string' && code.startsWith(fullPrefix)) {
-      const tail = Number(code.slice(fullPrefix.length));
+      const tailStr = code.slice(fullPrefix.length).split(/[^0-9]/)[0];
+      const tail = Number(tailStr);
       if (!Number.isNaN(tail) && tail > maxSeq) {
         maxSeq = tail;
       }
     }
   }
-  const nextSeq = maxSeq + 1;
-  return `${fullPrefix}${String(nextSeq).padStart(3, '0')}`;
+  return maxSeq;
+}
+
+export function formatVoucherCodeFromSequence(prefix: string, yymm: string, seq: number): string {
+  return `${prefix}-${yymm}-${String(Math.max(1, Math.floor(seq))).padStart(3, '0')}`;
+}
+
+export function buildVoucherCounterMeta(
+  prefix: string,
+  dateInput: Date = new Date()
+): { yymm: string; counterKey: string } {
+  const todayStr = getTodayVietnamDateStr(dateInput);
+  const yymm = `${todayStr.slice(2, 4)}${todayStr.slice(5, 7)}`;
+  const cleanPrefix = (prefix || 'HD').replace(/[^a-zA-Z0-9_]/g, '').toUpperCase() || 'HD';
+  return {
+    yymm,
+    counterKey: `${cleanPrefix}_${yymm}`,
+  };
+}
+
+export function generateSequentialVoucherCode(
+  prefix: string,
+  existingCodes: string[],
+  dateInput: Date = new Date(),
+  minReservedSeq = 0
+): string {
+  const { yymm } = buildVoucherCounterMeta(prefix, dateInput);
+  const maxSeq = Math.max(
+    extractMaxVoucherSequence(prefix, yymm, existingCodes),
+    Math.max(0, Math.floor(Number(minReservedSeq) || 0))
+  );
+  return formatVoucherCodeFromSequence(prefix, yymm, maxSeq + 1);
+}
+
+/**
+ * Pure atomic server-side stock delta mutator used inside Firebase RTDB `runTransaction`
+ * so concurrent sales/cancellations from 2+ accounts sharing 1 warehouse never overwrite each other's stock.
+ */
+export function computeAtomicProductStockDelta(
+  currentProduct: ProductItem,
+  stockDelta: number,
+  nowIso: string
+): ProductItem {
+  const curStock = Math.max(0, Number(currentProduct.stock) || 0);
+  const delta = Number(stockDelta) || 0;
+  return {
+    ...currentProduct,
+    stock: Math.max(0, curStock + delta),
+    updatedAt: nowIso,
+  };
+}
+
+/**
+ * Pure atomic server-side import mutator used inside Firebase RTDB `runTransaction`:
+ * calculates weighted-average `importPrice`, increments `stock`, and picks FEFO batch/expiry
+ * against the latest server product snapshot.
+ */
+export function computeAtomicProductImportAddition(params: {
+  currentProduct: ProductItem;
+  importQty: number;
+  unitCost: number;
+  nowIso: string;
+  batchNumber?: string;
+  expiryDate?: string;
+}): ProductItem {
+  const { currentProduct, nowIso, batchNumber, expiryDate } = params;
+  const curStock = Math.max(0, Number(currentProduct.stock) || 0);
+  const qty = Math.max(0, Number(params.importQty) || 0);
+  const cost = Math.max(0, Math.round(Number(params.unitCost) || 0));
+  const nextImportPrice = computeWeightedAverageImportPrice(
+    curStock,
+    Math.max(0, Number(currentProduct.importPrice) || 0),
+    qty,
+    cost
+  );
+  const fefo = pickEarlierFefoBatch(
+    currentProduct.batchNumber,
+    currentProduct.expiryDate,
+    batchNumber,
+    expiryDate,
+    curStock
+  );
+  return {
+    ...currentProduct,
+    stock: curStock + qty,
+    importPrice: nextImportPrice,
+    batchNumber: fefo.batchNumber,
+    expiryDate: fefo.expiryDate,
+    updatedAt: nowIso,
+  };
 }
 
 export function evaluateDebtUrgency(

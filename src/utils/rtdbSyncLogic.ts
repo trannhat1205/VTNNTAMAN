@@ -44,6 +44,7 @@ export interface RtdbWorkspaceMeta {
   assignedWarehouse: string;
   updatedAt: string;
   updatedByUid: string;
+  updatedByName?: string;
   schemaVersion: number;
 }
 
@@ -89,6 +90,7 @@ export interface RtdbUserDirectoryProfile {
   assignedWarehouses?: string[];
   multiWarehouseGrantedByAdmin?: boolean;
   assignedOwnerUids?: Record<string, boolean>;
+  canonicalOwnerUid?: string;
   warehouseRenameCount?: number;
   active: boolean;
   createdAt: string;
@@ -258,6 +260,12 @@ export function normalizeIndependentWarehouseStaffMember(staff: StaffMember): St
     assignedWarehouse: fixedWarehouse,
     assignedWarehouses: undefined,
     multiWarehouseGrantedByAdmin: false,
+    ...(staff.assignedOwnerUids && Object.keys(staff.assignedOwnerUids).length > 0
+      ? { assignedOwnerUids: staff.assignedOwnerUids }
+      : {}),
+    ...(staff.canonicalOwnerUid && staff.canonicalOwnerUid.trim()
+      ? { canonicalOwnerUid: staff.canonicalOwnerUid.trim() }
+      : {}),
   };
 }
 
@@ -287,6 +295,9 @@ export function toRtdbUserDirectoryProfile(
     ...(hasMultiGrant ? { multiWarehouseGrantedByAdmin: true } : { multiWarehouseGrantedByAdmin: false }),
     ...(normalized.assignedOwnerUids && Object.keys(normalized.assignedOwnerUids).length > 0
       ? { assignedOwnerUids: normalized.assignedOwnerUids }
+      : {}),
+    ...(normalized.canonicalOwnerUid && normalized.canonicalOwnerUid.trim()
+      ? { canonicalOwnerUid: normalized.canonicalOwnerUid.trim() }
       : {}),
     ...(typeof normalized.warehouseRenameCount === 'number' &&
     Number.isFinite(normalized.warehouseRenameCount)
@@ -336,9 +347,11 @@ export function mergeDirectoryIntoStaffList(
       assignedOwnerUids:
         dir.assignedOwnerUids && typeof dir.assignedOwnerUids === 'object'
           ? dir.assignedOwnerUids
-          : dir.multiWarehouseGrantedByAdmin === false
-          ? undefined
           : prev?.assignedOwnerUids,
+      canonicalOwnerUid:
+        typeof dir.canonicalOwnerUid === 'string' && dir.canonicalOwnerUid.trim()
+          ? dir.canonicalOwnerUid.trim()
+          : prev?.canonicalOwnerUid,
       warehouseRenameCount:
         typeof dir.warehouseRenameCount === 'number' && Number.isFinite(dir.warehouseRenameCount)
           ? Math.max(0, Math.floor(dir.warehouseRenameCount))
@@ -387,6 +400,9 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
       assignedWarehouse: String(rawMeta.assignedWarehouse || ''),
       updatedAt: String(rawMeta.updatedAt || ''),
       updatedByUid: String(rawMeta.updatedByUid || ownerUid),
+      ...(typeof rawMeta.updatedByName === 'string' && rawMeta.updatedByName.trim()
+        ? { updatedByName: rawMeta.updatedByName.trim() }
+        : {}),
       schemaVersion: Number(rawMeta.schemaVersion) || 1,
     },
     products: attachOwnerId(ensureArrayFromRtdb<ProductItem>(obj.products), ownerUid),
@@ -542,7 +558,8 @@ export function buildFullKeyedWorkspace(payload: RtdbWorkspacePayload): Record<s
  */
 export function buildWorkspaceDiffUpdates(
   prev: RtdbWorkspacePayload | null,
-  next: RtdbWorkspacePayload
+  next: RtdbWorkspacePayload,
+  options?: { skipProductKeys?: Set<string> }
 ): Record<string, unknown> {
   if (!prev) return buildFullKeyedWorkspace(next);
 
@@ -550,26 +567,46 @@ export function buildWorkspaceDiffUpdates(
     meta: sanitizeForRealtimeDb(next.meta),
   };
 
+  const skipProdKeys = options?.skipProductKeys;
+
   for (const col of RTDB_RECORD_COLLECTIONS) {
     const prevMap = toKeyedRecordMap(prepareCollectionRecords(prev, col));
     const nextMap = toKeyedRecordMap(prepareCollectionRecords(next, col));
     for (const [key, rec] of Object.entries(nextMap)) {
+      if (col === 'products' && skipProdKeys?.has(key)) continue;
       const before = prevMap[key];
       if (!before || JSON.stringify(before) !== JSON.stringify(rec)) {
         updates[`${col}/${key}`] = rec;
       }
     }
     for (const key of Object.keys(prevMap)) {
+      if (col === 'products' && skipProdKeys?.has(key)) continue;
       if (!(key in nextMap)) {
         updates[`${col}/${key}`] = null;
       }
     }
   }
 
-  const prevSettings = JSON.stringify(sanitizeForRealtimeDb(prev.settings));
-  const nextSettings = sanitizeForRealtimeDb(next.settings);
-  if (prevSettings !== JSON.stringify(nextSettings)) {
-    updates.settings = nextSettings;
+  // Granular per-subfield settings diffing so concurrent edits to different settings
+  // (e.g. Account A deletes a record -> deletedRecords, while Account B adds a productNoteTemplate)
+  // NEVER clobber each other!
+  const prevSettings = sanitizeForRealtimeDb(prev.settings) as unknown as Record<string, unknown>;
+  const nextSettings = sanitizeForRealtimeDb(next.settings) as unknown as Record<string, unknown>;
+  const settingKeys = new Set<string>([
+    ...Object.keys(prevSettings || {}),
+    ...Object.keys(nextSettings || {}),
+  ]);
+  for (const sKey of settingKeys) {
+    const beforeVal = prevSettings ? prevSettings[sKey] : undefined;
+    const afterVal = nextSettings ? nextSettings[sKey] : undefined;
+    const hasBefore = beforeVal !== undefined && beforeVal !== null;
+    const hasAfter = afterVal !== undefined && afterVal !== null;
+    if (!hasBefore && !hasAfter) continue;
+    if (hasBefore && !hasAfter) {
+      updates[`settings/${sKey}`] = null;
+    } else if (!hasBefore || JSON.stringify(beforeVal) !== JSON.stringify(afterVal)) {
+      updates[`settings/${sKey}`] = afterVal;
+    }
   }
 
   return updates;
@@ -813,34 +850,68 @@ export function partitionAdminStateByWorkspace(params: {
     existingMetaByUid = {},
   } = params;
 
-  const ownerByWarehouseKey = new Map<string, string>();
   const staffByUid = new Map<string, StaffMember>();
   for (const st of staffList) {
     staffByUid.set(st.uid, st);
-    const whKey = normalizeWarehouseKey(st.assignedWarehouse);
-    if (
-      whKey &&
-      st.assignedWarehouse !== 'Tất cả kho' &&
-      !ownerByWarehouseKey.has(whKey)
-    ) {
-      ownerByWarehouseKey.set(whKey, st.uid);
-    }
   }
-  for (const [metaUid, meta] of Object.entries(existingMetaByUid)) {
-    const whKey = normalizeWarehouseKey(meta?.assignedWarehouse);
-    if (
-      whKey &&
-      meta.assignedWarehouse !== 'Tất cả kho' &&
-      !ownerByWarehouseKey.has(whKey)
-    ) {
-      ownerByWarehouseKey.set(whKey, metaUid);
+
+  // Build deterministic canonical owner map per warehouse so multiple accounts sharing 1 warehouse
+  // ALWAYS consolidate records into the authoritative shared warehouse workspace bucket!
+  const allCandidateWhNames = new Set<string>();
+  staffList.forEach((st) => {
+    if (st.assignedWarehouse && st.assignedWarehouse !== 'Tất cả kho') {
+      allCandidateWhNames.add(st.assignedWarehouse);
+    }
+  });
+  Object.values(existingMetaByUid).forEach((m) => {
+    if (m?.assignedWarehouse && m.assignedWarehouse !== 'Tất cả kho') {
+      allCandidateWhNames.add(m.assignedWarehouse);
+    }
+  });
+
+  const ownerByWarehouseKey = new Map<string, string>();
+  const recordOwnerHintRecords: Array<{ warehouseName?: string; ownerId?: string }> = [
+    ...products,
+    ...customers,
+    ...suppliers,
+    ...sales,
+    ...imports,
+    ...receiptVouchers,
+    ...paymentVouchers,
+    ...savedVouchers,
+    ...stockAdjustments,
+  ];
+  for (const whName of allCandidateWhNames) {
+    const whKey = normalizeWarehouseKey(whName);
+    if (!whKey || ownerByWarehouseKey.has(whKey)) continue;
+    const canonical = resolveCanonicalOwnerUidForWarehouse({
+      warehouseName: whName,
+      staffList,
+      existingMetaByUid,
+      records: recordOwnerHintRecords,
+      fallbackUid: adminUid,
+    });
+    if (canonical) {
+      ownerByWarehouseKey.set(whKey, canonical);
     }
   }
 
   const resolveOwner = (record: { ownerId?: string; warehouseName?: string; actorUid?: string }): string => {
-    if (record.ownerId && record.ownerId.trim()) return record.ownerId.trim();
-    if (record.actorUid && record.actorUid.trim()) return record.actorUid.trim();
     const whKey = normalizeWarehouseKey(record.warehouseName);
+    if (record.ownerId && record.ownerId.trim()) {
+      const explicitOwner = record.ownerId.trim();
+      const ownerStaff = staffByUid.get(explicitOwner);
+      // If a co-staff account has canonicalOwnerUid pointing to the shared warehouse owner, consolidate there!
+      if (
+        ownerStaff?.canonicalOwnerUid &&
+        ownerStaff.canonicalOwnerUid !== explicitOwner &&
+        (!whKey || normalizeWarehouseKey(ownerStaff.assignedWarehouse) === whKey)
+      ) {
+        return ownerStaff.canonicalOwnerUid;
+      }
+      return explicitOwner;
+    }
+    if (record.actorUid && record.actorUid.trim()) return record.actorUid.trim();
     if (whKey && ownerByWarehouseKey.has(whKey)) {
       return ownerByWarehouseKey.get(whKey) || adminUid;
     }
@@ -994,12 +1065,135 @@ export function resolveDesignatedOwnerUidsForWarehouses(params: {
   }
 
   // SECURITY: Never expose Primary Admin's private workspace (which holds exclusive auditLogs & backups)
-  // to non-admin designated multi-warehouse managers.
+  // to non-admin designated multi-warehouse managers or co-staff.
   if (params.targetUid !== PRIMARY_ADMIN_UID) {
     delete ownerUidsMap[PRIMARY_ADMIN_UID];
   }
 
   return ownerUidsMap;
+}
+
+/**
+ * Resolves the single authoritative (canonical) Firebase workspace owner UID for a warehouse
+ * so that when 2+ accounts co-manage the SAME warehouse, all accounts read & write the exact
+ * same `/workspaces/{canonicalOwnerUid}` node in real time without splitting data across buckets.
+ */
+export function resolveCanonicalOwnerUidForWarehouse(params: {
+  warehouseName?: string | null;
+  staffList?: StaffMember[];
+  workspacesMap?: Record<string, unknown>;
+  adminSummaries?: AdminWarehouseAccountSummary[];
+  existingMetaByUid?: Record<string, RtdbWorkspaceMeta>;
+  records?: Array<{ warehouseName?: string; ownerId?: string }>;
+  fallbackUid?: string;
+}): string {
+  const fallback = (params.fallbackUid || '').trim();
+  const whKey = normalizeWarehouseKey(params.warehouseName || '');
+  if (!whKey || whKey === normalizeWarehouseKey('Tất cả kho')) {
+    return fallback;
+  }
+
+  interface CandidateScore {
+    uid: string;
+    recordCount: number;
+    isRealFirebaseUid: boolean;
+    isSelfCanonical: boolean;
+    createdAt: string;
+  }
+
+  const candidates = new Map<string, CandidateScore>();
+  const staffByUid = new Map<string, StaffMember>();
+  for (const st of params.staffList || []) {
+    if (st?.uid) staffByUid.set(st.uid, st);
+  }
+
+  const upsertCandidate = (uidRaw: string, bonusRecords = 0, createdAtHint = '') => {
+    const uid = (uidRaw || '').trim();
+    if (!uid || uid === PRIMARY_ADMIN_UID) return;
+    const st = staffByUid.get(uid);
+    const prev = candidates.get(uid);
+    const isReal = !uid.startsWith('staff_');
+    const isSelfCanon = !st?.canonicalOwnerUid || st.canonicalOwnerUid === uid;
+    const createdAt = st?.createdAt || prev?.createdAt || createdAtHint || '9999-12-31';
+    candidates.set(uid, {
+      uid,
+      recordCount: (prev?.recordCount || 0) + bonusRecords,
+      isRealFirebaseUid: isReal,
+      isSelfCanonical: isSelfCanon,
+      createdAt,
+    });
+  };
+
+  for (const st of params.staffList || []) {
+    if (!st?.uid || st.assignedWarehouse === 'Tất cả kho') continue;
+    // Skip multi-warehouse managers whose primary warehouse happens to be a different warehouse
+    if (normalizeWarehouseKey(st.assignedWarehouse) === whKey) {
+      if (st.canonicalOwnerUid && st.canonicalOwnerUid !== PRIMARY_ADMIN_UID) {
+        upsertCandidate(st.canonicalOwnerUid, 0, st.createdAt);
+      }
+      upsertCandidate(st.uid, 0, st.createdAt);
+    }
+  }
+
+  for (const sum of params.adminSummaries || []) {
+    if (!sum?.uid || sum.assignedWarehouse === 'Tất cả kho') continue;
+    if (normalizeWarehouseKey(sum.assignedWarehouse) === whKey) {
+      const sumRecords =
+        (sum.productsCount || 0) +
+        (sum.customersCount || 0) +
+        (sum.salesCount || 0) +
+        (sum.importsCount || 0) +
+        (sum.receiptVouchersCount || 0) +
+        (sum.paymentVouchersCount || 0);
+      upsertCandidate(sum.uid, sumRecords);
+    }
+  }
+
+  for (const [metaUid, meta] of Object.entries(params.existingMetaByUid || {})) {
+    if (!metaUid || !meta?.assignedWarehouse || meta.assignedWarehouse === 'Tất cả kho') continue;
+    if (normalizeWarehouseKey(meta.assignedWarehouse) === whKey) {
+      upsertCandidate(metaUid, 0);
+    }
+  }
+
+  for (const [wsUid, rawWs] of Object.entries(params.workspacesMap || {})) {
+    if (!wsUid || !rawWs || typeof rawWs !== 'object') continue;
+    const norm = normalizeWorkspaceFromRtdb(rawWs, wsUid);
+    if (normalizeWarehouseKey(norm.meta.assignedWarehouse) === whKey) {
+      upsertCandidate(wsUid, countWorkspaceBusinessRecords(norm));
+    }
+  }
+
+  for (const rec of params.records || []) {
+    if (
+      rec?.ownerId &&
+      rec.ownerId !== PRIMARY_ADMIN_UID &&
+      normalizeWarehouseKey(rec.warehouseName) === whKey
+    ) {
+      upsertCandidate(rec.ownerId, 1);
+    }
+  }
+
+  if (candidates.size === 0) {
+    return fallback;
+  }
+
+  const sorted = Array.from(candidates.values()).sort((a, b) => {
+    if (a.isRealFirebaseUid !== b.isRealFirebaseUid) {
+      return a.isRealFirebaseUid ? -1 : 1;
+    }
+    if (a.recordCount !== b.recordCount) {
+      return b.recordCount - a.recordCount;
+    }
+    if (a.isSelfCanonical !== b.isSelfCanonical) {
+      return a.isSelfCanonical ? -1 : 1;
+    }
+    const timeCmp = (a.createdAt || '').localeCompare(b.createdAt || '');
+    if (timeCmp !== 0) return timeCmp;
+    return a.uid.localeCompare(b.uid);
+  });
+
+  return sorted[0].uid || fallback;
 }
 
 /**
@@ -1140,7 +1334,8 @@ export function filterOutDeletedRecords<
 export function mergeWorkspacePayloads(
   first: RtdbWorkspacePayload | null | undefined,
   second: RtdbWorkspacePayload | null | undefined,
-  ownerUid: string
+  ownerUid: string,
+  options?: { preferFirstAsLiveRtdb?: boolean }
 ): RtdbWorkspacePayload | null {
   if (!first && !second) return null;
   if (!first) return second || null;
@@ -1155,12 +1350,17 @@ export function mergeWorkspacePayloads(
   const secondCount = countWorkspaceBusinessRecords(second);
   const firstTs = first.meta?.updatedAt || '';
   const secondTs = second.meta?.updatedAt || '';
+  const firstHasAuthoritativeData =
+    firstCount > 0 || (first.settings?.deletedRecords?.length || 0) > 0;
 
-  // Determine which snapshot is newer / authoritative
-  const firstIsAuthoritative =
-    firstTs > secondTs &&
-    (firstCount > 0 || (first.settings?.deletedRecords?.length || 0) > 0);
+  // When `preferFirstAsLiveRtdb` is true and live RTDB (`first`) is populated,
+  // ALWAYS treat live RTDB as authoritative so client clock skew on another device's cached Storage file
+  // can NEVER overwrite live real-time RTDB mutations!
+  const firstIsAuthoritative = options?.preferFirstAsLiveRtdb
+    ? firstHasAuthoritativeData
+    : firstTs > secondTs && firstHasAuthoritativeData;
   const secondIsAuthoritative =
+    !firstIsAuthoritative &&
     secondTs > firstTs &&
     (secondCount > 0 || (second.settings?.deletedRecords?.length || 0) > 0);
 

@@ -12,23 +12,30 @@ import {
   isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
   mergeDeletionTombstones,
+  mergeDirectoryIntoStaffList,
   mergeWorkspacePayloads,
   normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   partitionAdminStateByWorkspace,
+  resolveCanonicalOwnerUidForWarehouse,
   resolveDesignatedOwnerUidsForWarehouses,
   RTDB_RECORD_COLLECTIONS,
   RtdbWorkspacePayload,
   toRtdbRecordKey,
+  toRtdbUserDirectoryProfile,
   VTNNTAMAN99_UID,
 } from './rtdbSyncLogic';
 import {
   canStaffFilterMultiWarehouses,
   canStaffRenameWarehouse,
+  computeAtomicProductImportAddition,
+  computeAtomicProductStockDelta,
   dedupeWarehouseNames,
   evaluateStaffAccessScope,
   filterRecordsBySelectedWarehouses,
   formatSelectedWarehousesBadge,
+  generateSequentialVoucherCode,
+  generateUniqueRecordId,
   getIndependentWarehouseFullPermissions,
   getSelfWarehouseRenameCount,
   getStaffAllowedWarehouses,
@@ -705,4 +712,211 @@ test('One-time warehouse rename policy, Primary Admin unlimited renames, canonic
   // 8. Firebase RTDB database.rules.json enforces server-side warehouseRenameCount lock
   const rulesText = fs.readFileSync(path.resolve(process.cwd(), 'database.rules.json'), 'utf8');
   assert.equal(rulesText.includes('warehouseRenameCount'), true);
+});
+
+test('Phase 1 — Shared single-warehouse canonical routing, atomic stock/cost mutators, collision-free IDs, granular settings diffing, and clock-skew-safe RTDB priority', () => {
+  // 1. Canonical owner resolution when 2+ accounts co-manage the SAME single warehouse ("TÂM AN MỸ NGÃI")
+  const v99Ws = buildRecoveredVtnnTamAn99Workspace('TÂM AN MỸ NGÃI');
+  const ownerStaff = {
+    uid: VTNNTAMAN99_UID,
+    username: 'vtnntaman99',
+    password: '',
+    displayName: 'Chủ kho Mỹ Ngãi',
+    phone: '0708959764',
+    email: 'vtnntaman99@gmail.com',
+    role: 'staff' as const,
+    positionRole: 'warehouse_manager' as const,
+    permissions: getIndependentWarehouseFullPermissions(),
+    assignedWarehouse: 'TÂM AN MỸ NGÃI',
+    active: true,
+    createdAt: '2026-11-25T00:00:00Z',
+    updatedAt: '2026-11-25T00:00:00Z',
+  };
+  const coStaffRaw = {
+    uid: 'uid_costaff_banhang_01',
+    username: 'nhanvien_myngai',
+    password: '',
+    displayName: 'Nhân viên Bán hàng Mỹ Ngãi',
+    phone: '0901234567',
+    email: 'nhanvien.myngai@gmail.com',
+    role: 'staff' as const,
+    positionRole: 'sales_warehouse_staff' as const,
+    permissions: getIndependentWarehouseFullPermissions(),
+    assignedWarehouse: 'Tâm An Mỹ Ngãi', // Mixed case!
+    assignedOwnerUids: { uid_costaff_banhang_01: true, [VTNNTAMAN99_UID]: true },
+    canonicalOwnerUid: VTNNTAMAN99_UID,
+    multiWarehouseGrantedByAdmin: false,
+    active: true,
+    createdAt: '2026-11-27T00:00:00Z',
+    updatedAt: '2026-11-27T00:00:00Z',
+  };
+
+  // Even when coStaff appears FIRST in staffList, canonical resolution picks VTNNTAMAN99_UID (populated owner)
+  const resolvedCanon = resolveCanonicalOwnerUidForWarehouse({
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    staffList: [coStaffRaw, ownerStaff],
+    workspacesMap: {
+      [VTNNTAMAN99_UID]: v99Ws,
+      uid_costaff_banhang_01: makeBasePayload(),
+    },
+    fallbackUid: 'uid_costaff_banhang_01',
+  });
+  assert.equal(resolvedCanon, VTNNTAMAN99_UID);
+
+  // Single-warehouse co-staff retains canonicalOwnerUid & assignedOwnerUids through directory round-trip,
+  // while STILL keeping single-warehouse RBAC (no edit_delete_vouchers!)
+  const dirProfile = toRtdbUserDirectoryProfile(coStaffRaw);
+  assert.equal(dirProfile.canonicalOwnerUid, VTNNTAMAN99_UID);
+  assert.equal(dirProfile.assignedOwnerUids?.[VTNNTAMAN99_UID], true);
+  assert.equal(dirProfile.multiWarehouseGrantedByAdmin, false);
+  const mergedBack = mergeDirectoryIntoStaffList([], [dirProfile]);
+  assert.equal(mergedBack[0].canonicalOwnerUid, VTNNTAMAN99_UID);
+  assert.equal(mergedBack[0].assignedOwnerUids?.[VTNNTAMAN99_UID], true);
+  assert.equal(evaluateStaffAccessScope(mergedBack[0]).canEditDeleteVouchers, false);
+
+  // Records created by coStaff on "Tâm An Mỹ Ngãi" consolidate into VTNNTAMAN99_UID's workspace bucket!
+  const coStaffSale: SaleTransaction = {
+    ...makeSale('sale_by_costaff', 430000),
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    ownerId: 'uid_costaff_banhang_01',
+  };
+  const partitionedShared = partitionAdminStateByWorkspace({
+    products: v99Ws.products,
+    customers: v99Ws.customers,
+    suppliers: v99Ws.suppliers,
+    sales: [...v99Ws.sales, coStaffSale],
+    imports: v99Ws.imports,
+    receiptVouchers: [],
+    paymentVouchers: [],
+    savedVouchers: [],
+    auditLogs: [],
+    backups: [],
+    settings: v99Ws.settings,
+    staffList: [mergedBack[0], ownerStaff],
+    knownOwnerUids: [VTNNTAMAN99_UID, 'uid_costaff_banhang_01'],
+    adminUid: 'uid_costaff_banhang_01',
+    nowIso: '2026-11-27T05:00:00Z',
+  });
+  assert.equal(partitionedShared[VTNNTAMAN99_UID].sales.length, 14);
+  assert.equal(
+    partitionedShared[VTNNTAMAN99_UID].sales.some((s) => s.id === 'sale_by_costaff'),
+    true
+  );
+  assert.equal(partitionedShared['uid_costaff_banhang_01'].sales.length, 0);
+
+  // 2. Atomic server-side stock & weighted-average cost mutators + skipProductKeys lock
+  const serverProd0 = {
+    ...v99Ws.products[0], // BUP PRO, stock=26, importPrice=215000
+    stock: 20,
+    importPrice: 200000,
+  };
+  // Account A imports +10 @ 230,000 -> stock=30, weighted avg = (20*200k + 10*230k)/30 = 210,000
+  const serverProd1 = computeAtomicProductImportAddition({
+    currentProduct: serverProd0,
+    importQty: 10,
+    unitCost: 230000,
+    nowIso: '2026-11-27T05:01:00Z',
+    batchNumber: 'LO-2711',
+    expiryDate: '2027-06-30',
+  });
+  assert.equal(serverProd1.stock, 30);
+  assert.equal(serverProd1.importPrice, 210000);
+  // Account B sells 2 and Account C sells 3 concurrently on the server node -> 30 - 2 - 3 = 25 (zero lost update!)
+  const serverProd2 = computeAtomicProductStockDelta(serverProd1, -2, '2026-11-27T05:01:01Z');
+  const serverProd3 = computeAtomicProductStockDelta(serverProd2, -3, '2026-11-27T05:01:02Z');
+  assert.equal(serverProd3.stock, 25);
+  assert.equal(serverProd3.importPrice, 210000);
+
+  // skipProductKeys prevents debounced workspace diff from clobbering atomic product stock
+  const stalePrev: RtdbWorkspacePayload = { ...makeBasePayload(), products: [serverProd0] };
+  const staleNext: RtdbWorkspacePayload = {
+    ...makeBasePayload(),
+    products: [{ ...serverProd0, stock: 18 }],
+    sales: [makeSale('s_new', 215000)],
+  };
+  const lockedDiff = buildWorkspaceDiffUpdates(stalePrev, staleNext, {
+    skipProductKeys: new Set([toRtdbRecordKey(serverProd0.id)]),
+  });
+  assert.equal(`products/${toRtdbRecordKey(serverProd0.id)}` in lockedDiff, false);
+  assert.ok(lockedDiff['sales/k_s_new']);
+
+  // 3. Collision-free unique IDs & reserved sequential voucher codes
+  const generatedIds = new Set<string>();
+  const fixedNow = 1795752000000;
+  for (let i = 0; i < 200; i++) {
+    const id = generateUniqueRecordId('sale', fixedNow);
+    assert.equal(id.length <= 40, true);
+    assert.match(id, /^[a-zA-Z0-9_]+$/);
+    generatedIds.add(id);
+  }
+  assert.equal(generatedIds.size, 200);
+
+  const fixedDate = new Date('2026-11-27T05:00:00Z');
+  const nextSeqCode = generateSequentialVoucherCode('HD', ['HD-2611-004'], fixedDate, 7);
+  assert.equal(nextSeqCode, 'HD-2611-008');
+
+  // 4. Granular settings/* diffing: Account A deletes a record while Account B adds a productNoteTemplate
+  const baseSettingsWs = makeBasePayload();
+  const wsAfterDeleteByA: RtdbWorkspacePayload = {
+    ...baseSettingsWs,
+    settings: {
+      ...baseSettingsWs.settings,
+      deletedRecords: [{ id: 'sale_del_1', deletedAt: '2026-11-27T05:02:00Z' }],
+    },
+  };
+  const wsAfterNoteByB: RtdbWorkspacePayload = {
+    ...baseSettingsWs,
+    settings: {
+      ...baseSettingsWs.settings,
+      productNoteTemplates: [
+        {
+          id: 'tpl_1',
+          title: 'Liều phun lúa đòng',
+          content: 'Pha 25ml / bình 25 lít',
+          updatedAt: '2026-11-27T05:02:01Z',
+        },
+      ],
+    },
+  };
+  const diffSettingsA = buildWorkspaceDiffUpdates(baseSettingsWs, wsAfterDeleteByA);
+  const diffSettingsB = buildWorkspaceDiffUpdates(baseSettingsWs, wsAfterNoteByB);
+  assert.ok(diffSettingsA['settings/deletedRecords']);
+  assert.equal('settings' in diffSettingsA, false);
+  assert.ok(diffSettingsB['settings/productNoteTemplates']);
+  assert.equal('settings' in diffSettingsB, false);
+
+  let serverSettingsNode = buildFullKeyedWorkspace(baseSettingsWs);
+  serverSettingsNode = applyRtdbUpdates(serverSettingsNode, diffSettingsA);
+  serverSettingsNode = applyRtdbUpdates(serverSettingsNode, diffSettingsB);
+  const normSettingsMerged = normalizeWorkspaceFromRtdb(serverSettingsNode, 'uid_kho_1');
+  assert.equal(normSettingsMerged.settings.deletedRecords?.length, 1);
+  assert.equal(normSettingsMerged.settings.productNoteTemplates?.length, 1);
+
+  // 5. Clock-skew-safe live RTDB priority: live RTDB (14 sales, 05:00:00Z) beats skewed cached Storage (13 sales, 05:00:45Z)
+  const liveRtdbWithNewSale: RtdbWorkspacePayload = {
+    ...v99Ws,
+    meta: { ...v99Ws.meta, updatedAt: '2026-11-27T05:00:00.000Z' },
+    sales: [...v99Ws.sales, makeSale('sale_live_14', 500000)],
+  };
+  const skewedOlderStorage: RtdbWorkspacePayload = {
+    ...v99Ws,
+    meta: { ...v99Ws.meta, updatedAt: '2026-11-27T05:00:45.000Z' }, // Phone clock 45s ahead!
+  };
+  const skewSafeMerged = mergeWorkspacePayloads(
+    liveRtdbWithNewSale,
+    skewedOlderStorage,
+    VTNNTAMAN99_UID,
+    { preferFirstAsLiveRtdb: true }
+  );
+  assert.ok(skewSafeMerged);
+  assert.equal(skewSafeMerged.sales.length, 14);
+  assert.equal(skewSafeMerged.sales.some((s) => s.id === 'sale_live_14'), true);
+
+  // 6. Verify database.rules.json contains atomic counters rule and anti-escalation validation on assignedOwnerUids
+  const rulesRaw = fs.readFileSync(path.resolve(process.cwd(), 'database.rules.json'), 'utf8');
+  const parsedRules = JSON.parse(rulesRaw);
+  assert.ok(parsedRules.rules.workspaces.$ownerUid.counters.$counterKey['.validate']);
+  assert.ok(
+    parsedRules.rules.users_directory.$uid.assignedOwnerUids.$targetOwnerUid['.validate']
+  );
 });

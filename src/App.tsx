@@ -92,6 +92,8 @@ import {
   canStaffFilterMultiWarehouses,
   canStaffRenameWarehouse,
   canViewAuditHistory,
+  computeAtomicProductImportAddition,
+  computeAtomicProductStockDelta,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
   computeSmartDashboardAnalytics,
@@ -107,6 +109,8 @@ import {
   executeFiscalYearCloseAndCleanup,
   executeFullApplicationDataWipe,
   extractCustomWarehouseSuffix,
+  extractMaxVoucherSequence,
+  buildVoucherCounterMeta,
   filterRecordsBySelectedWarehouses,
   findLinkedPaymentVouchersForImport,
   findLinkedReceiptVouchersForSale,
@@ -115,6 +119,7 @@ import {
   formatVND,
   generateSequentialVoucherCode,
   generateSmartNotifications,
+  generateUniqueRecordId,
   getCurrentMonthRangeVietnam,
   getDefaultPermissionsForPosition,
   getIndependentWarehouseFullPermissions,
@@ -140,6 +145,7 @@ import {
 } from './utils/businessLogic';
 import { hashPassword, isHashedPassword, verifyPassword } from './utils/authSecurity';
 import {
+  applyAtomicRealtimeProductMutation,
   auth,
   canWriteToFirestore,
   deleteBackupFileFromDrive,
@@ -152,6 +158,7 @@ import {
   isCurrentUserAdmin,
   isRealtimeWorkspaceLegacyLayout,
   logoutUser,
+  reserveNextRealtimeVoucherCode,
   resendVerificationEmail,
   seedExistingStaffToChatDirectoryIfAdmin,
   seedExistingStaffToRealtimeDirectoryIfAdmin,
@@ -194,6 +201,7 @@ import {
   normalizeIndependentWarehouseStaffMember,
   normalizeWorkspaceFromRtdb,
   partitionAdminStateByWorkspace,
+  resolveCanonicalOwnerUidForWarehouse,
   resolveDesignatedOwnerUidsForWarehouses,
   RtdbUserDirectoryProfile,
   RtdbWorkspaceMeta,
@@ -1293,28 +1301,51 @@ export default function App() {
 
   // Real-time bidirectional sync with Firebase Realtime Database (gapgold-e6b62-default-rtdb)
   // AND Firebase Storage (gapgold-e6b62.firebasestorage.app/files -> /documents/workspaces/ & /backups/)
+  // Supports Primary Admin, Designated Multi-Warehouse Managers, AND Co-Staff sharing 1 Single Warehouse!
+  const localVoucherSeqMapRef = useRef<Record<string, number>>({});
+  const [lastRealtimePeerSyncLabel, setLastRealtimePeerSyncLabel] = useState<string>('');
+
   const designatedMultiWhOwnerUidsKey = useMemo(() => {
-    if (canAccountCreateStaff(currentStaff) || !hasMultiWarehouseManagementGrant(currentStaff)) {
+    if (canAccountCreateStaff(currentStaff)) {
       return '';
     }
+    const hasMultiGrant = hasMultiWarehouseManagementGrant(currentStaff);
     if (
-      currentStaff.assignedWarehouse === 'Tất cả kho' ||
-      currentStaff.positionRole === 'deputy_general_manager' ||
-      Boolean(currentStaff.permissions?.includes('manage_all_warehouses'))
+      hasMultiGrant &&
+      (currentStaff.assignedWarehouse === 'Tất cả kho' ||
+        currentStaff.positionRole === 'deputy_general_manager' ||
+        Boolean(currentStaff.permissions?.includes('manage_all_warehouses')))
     ) {
       return '__ALL__';
     }
+    const extraOwnerUids = Object.entries(currentStaff.assignedOwnerUids || {})
+      .filter(([, allowed]) => Boolean(allowed))
+      .map(([uid]) => uid);
+    const canonUid = (currentStaff.canonicalOwnerUid || '').trim();
+    const hasSharedSingleWarehouseLink =
+      !hasMultiGrant &&
+      ((Boolean(canonUid) && canonUid !== currentStaff.uid) ||
+        extraOwnerUids.some((u) => Boolean(u) && u !== currentStaff.uid));
+
+    if (!hasMultiGrant && !hasSharedSingleWarehouseLink) {
+      return '';
+    }
+
     const uids = Array.from(
       new Set(
         [
           currentStaff.uid,
-          ...Object.entries(currentStaff.assignedOwnerUids || {})
-            .filter(([, allowed]) => Boolean(allowed))
-            .map(([uid]) => uid),
+          ...(canonUid ? [canonUid] : []),
+          ...extraOwnerUids,
         ].filter(Boolean)
       )
     ).sort();
-    const whKeys = dedupeWarehouseNames(currentStaff.assignedWarehouses || [])
+    const effectiveWhList = hasMultiGrant
+      ? dedupeWarehouseNames(currentStaff.assignedWarehouses || [])
+      : currentStaff.assignedWarehouse && currentStaff.assignedWarehouse !== 'Tất cả kho'
+      ? [currentStaff.assignedWarehouse]
+      : [];
+    const whKeys = effectiveWhList
       .map((w) => normalizeWarehouseKey(w))
       .filter(Boolean)
       .sort()
@@ -1386,7 +1417,10 @@ export default function App() {
           const cachedStorage = storageMap[uid] || null;
           if (rawRtdb && cachedStorage) {
             const normRtdb = normalizeWorkspaceFromRtdb(rawRtdb, uid);
-            const merged = mergeWorkspacePayloads(normRtdb, cachedStorage, uid);
+            // Live RTDB is ALWAYS authoritative when populated so device clock skew on Storage files never reverts live edits
+            const merged = mergeWorkspacePayloads(normRtdb, cachedStorage, uid, {
+              preferFirstAsLiveRtdb: true,
+            });
             effectiveWsMap[uid] = merged || rawRtdb;
           } else if (rawRtdb) {
             effectiveWsMap[uid] = rawRtdb;
@@ -1414,38 +1448,76 @@ export default function App() {
           });
         }
 
-        // Primary Admin auto-reconcile: ensure every multi-warehouse account's assignedOwnerUids stays complete
-        // even if a granted warehouse had different casing ("Tâm An Mỹ Ngãi" vs "TÂM AN MỸ NGÃI") or a new owner joined!
+        // Primary Admin auto-reconcile: ensure BOTH multi-warehouse accounts AND accounts sharing 1 warehouse
+        // always have up-to-date `assignedOwnerUids` & `canonicalOwnerUid` in `/users_directory/{uid}`!
         if (isPrimary && Object.keys(effectiveWsMap).length > 0) {
+          const whMemberCountByKey = new Map<string, number>();
           for (const st of mergedStaffSnapshot) {
-            if (
-              !st?.uid ||
-              canAccountCreateStaff(st) ||
-              !st.multiWarehouseGrantedByAdmin ||
-              st.assignedWarehouse === 'Tất cả kho' ||
-              !st.assignedWarehouses ||
-              st.assignedWarehouses.length < 2
-            ) {
+            if (!st?.uid || canAccountCreateStaff(st) || st.assignedWarehouse === 'Tất cả kho') {
               continue;
             }
+            const k = normalizeWarehouseKey(st.assignedWarehouse);
+            if (k) whMemberCountByKey.set(k, (whMemberCountByKey.get(k) || 0) + 1);
+          }
+
+          for (const st of mergedStaffSnapshot) {
+            if (!st?.uid || canAccountCreateStaff(st) || st.assignedWarehouse === 'Tất cả kho') {
+              continue;
+            }
+            const isMulti = Boolean(
+              st.multiWarehouseGrantedByAdmin &&
+                st.assignedWarehouses &&
+                st.assignedWarehouses.length >= 2
+            );
+            const singleWhKey = normalizeWarehouseKey(st.assignedWarehouse);
+            const canonicalForSingle = !isMulti
+              ? resolveCanonicalOwnerUidForWarehouse({
+                  warehouseName: st.assignedWarehouse,
+                  staffList: mergedStaffSnapshot,
+                  workspacesMap: effectiveWsMap,
+                  adminSummaries: agg.adminSummaries,
+                  fallbackUid: st.uid,
+                })
+              : undefined;
+            const isSharedSingleWh =
+              !isMulti &&
+              Boolean(singleWhKey) &&
+              ((whMemberCountByKey.get(singleWhKey) || 0) >= 2 ||
+                (Boolean(canonicalForSingle) && canonicalForSingle !== st.uid));
+
+            if (!isMulti && !isSharedSingleWh) {
+              continue;
+            }
+
+            const targetWhs = isMulti ? st.assignedWarehouses! : [st.assignedWarehouse];
             const expectedOwnerUids = resolveDesignatedOwnerUidsForWarehouses({
               targetUid: st.uid,
-              selectedWarehouses: st.assignedWarehouses,
+              selectedWarehouses: targetWhs,
               staffList: mergedStaffSnapshot,
               workspacesMap: effectiveWsMap,
               adminSummaries: agg.adminSummaries,
             });
+            if (canonicalForSingle && canonicalForSingle !== PRIMARY_ADMIN_UID) {
+              expectedOwnerUids[canonicalForSingle] = true;
+            }
             const curKeys = Object.entries(st.assignedOwnerUids || {})
               .filter(([, allowed]) => Boolean(allowed))
               .map(([k]) => k)
               .sort()
               .join(',');
             const nextKeys = Object.keys(expectedOwnerUids).sort().join(',');
-            if (nextKeys && nextKeys !== curKeys && reconciledOwnerUidsFpRef.current[st.uid] !== nextKeys) {
-              reconciledOwnerUidsFpRef.current[st.uid] = nextKeys;
+            const nextCanon = isSharedSingleWh ? canonicalForSingle : st.canonicalOwnerUid;
+            const compositeFp = `${nextKeys}|${nextCanon || ''}`;
+            if (
+              nextKeys &&
+              (nextKeys !== curKeys || nextCanon !== st.canonicalOwnerUid) &&
+              reconciledOwnerUidsFpRef.current[st.uid] !== compositeFp
+            ) {
+              reconciledOwnerUidsFpRef.current[st.uid] = compositeFp;
               const reconciledStaff: StaffMember = {
                 ...st,
                 assignedOwnerUids: expectedOwnerUids,
+                ...(nextCanon ? { canonicalOwnerUid: nextCanon } : {}),
                 updatedAt: new Date().toISOString(),
               };
               setStaffList((prev) => prev.map((s) => (s.uid === st.uid ? reconciledStaff : s)));
@@ -1468,6 +1540,7 @@ export default function App() {
         // Check if any remote workspace bucket changed compared to our last known fingerprint
         let hasRemoteChanges = rtdbHydratedKeyRef.current !== sessionKey;
         let hasLegacyBucket = false;
+        let latestPeerMeta: RtdbWorkspaceMeta | null = null;
         for (const [uid, normPayload] of Object.entries(agg.normalizedWorkspaces)) {
           rtdbLastPayloadRef.current[uid] = normPayload;
           if (isRealtimeWorkspaceLegacyLayout(uid)) {
@@ -1479,8 +1552,26 @@ export default function App() {
             if (rtdbLastFingerprintsRef.current[uid] !== remoteFp) {
               rtdbLastFingerprintsRef.current[uid] = remoteFp;
               hasRemoteChanges = true;
+              if (
+                normPayload.meta?.updatedByUid &&
+                normPayload.meta.updatedByUid !== activeUid &&
+                (!latestPeerMeta ||
+                  (normPayload.meta.updatedAt || '') > (latestPeerMeta.updatedAt || ''))
+              ) {
+                latestPeerMeta = normPayload.meta;
+              }
             }
           }
+        }
+
+        if (latestPeerMeta?.updatedByName) {
+          const hhmm = new Date(latestPeerMeta.updatedAt || Date.now()).toLocaleTimeString(
+            'vi-VN',
+            { hour: '2-digit', minute: '2-digit' }
+          );
+          setLastRealtimePeerSyncLabel(
+            `Vừa cập nhật bởi ${latestPeerMeta.updatedByName} (${hhmm})`
+          );
         }
 
         if (hasRemoteChanges) {
@@ -1492,9 +1583,11 @@ export default function App() {
 
           // Cloud RTDB + Storage is authoritative for deletions — NEVER union stale localStorage deleted records back!
           const nextProds = filterOutDeletedRecords(agg.products, mergedTombstones);
-          const nextCusts = filterOutDeletedRecords(agg.customers, mergedTombstones);
+          const rawNextCusts = filterOutDeletedRecords(agg.customers, mergedTombstones);
           const nextSups = filterOutDeletedRecords(agg.suppliers, mergedTombstones);
           const nextSales = filterOutDeletedRecords(agg.sales, mergedTombstones);
+          // Self-heal customer totalPurchased & totalDebt directly from live sales across all co-workers!
+          const nextCusts = reconcileCustomersFromSales(rawNextCusts, nextSales).customers;
           const nextImps = filterOutDeletedRecords(agg.imports, mergedTombstones);
           const nextRvs = filterOutDeletedRecords(agg.receiptVouchers, mergedTombstones);
           const nextPvs = filterOutDeletedRecords(agg.paymentVouchers, mergedTombstones);
@@ -1502,10 +1595,13 @@ export default function App() {
           const nextAdjs = filterOutDeletedRecords(agg.stockAdjustments, mergedTombstones);
           const nextLogs = dedupeRecordsById([...agg.auditLogs]).slice(0, 500);
           const nextBks = dedupeRecordsById([...agg.backups]);
-          const ownMultiWhs =
-            isDesignatedMultiWh && currentStaff.assignedWarehouses
+          const ownMultiWhs = isDesignatedMultiWh
+            ? currentStaff.assignedWarehouses && currentStaff.assignedWarehouses.length > 0
               ? currentStaff.assignedWarehouses
-              : [];
+              : currentStaff.assignedWarehouse && currentStaff.assignedWarehouse !== 'Tất cả kho'
+              ? [currentStaff.assignedWarehouse]
+              : []
+            : [];
           const nextWhs = dedupeWarehouseNames([
             ...cur.warehouses,
             ...agg.warehouses,
@@ -1601,7 +1697,13 @@ export default function App() {
             const summaries = await readAdminWorkspacesIndexFromFirebaseStorage();
             if (cancelled) return;
             const grantedWhKeys = new Set(
-              dedupeWarehouseNames(currentStaff.assignedWarehouses || [])
+              dedupeWarehouseNames(
+                currentStaff.assignedWarehouses && currentStaff.assignedWarehouses.length > 0
+                  ? currentStaff.assignedWarehouses
+                  : currentStaff.assignedWarehouse
+                  ? [currentStaff.assignedWarehouse]
+                  : []
+              )
                 .map((w) => normalizeWarehouseKey(w))
                 .filter(Boolean)
             );
@@ -1681,7 +1783,9 @@ export default function App() {
       storageWs: RtdbWorkspacePayload | null
     ) => {
       if (cancelled) return;
-      const mergedWs = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid);
+      const mergedWs = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid, {
+        preferFirstAsLiveRtdb: Boolean(rtdbWs),
+      });
 
       if (!mergedWs) {
         // First time this warehouse user connects to both RTDB & Storage -> push local workspace
@@ -1740,6 +1844,10 @@ export default function App() {
         mergedWs.settings.deletedRecords
       );
 
+      const rawSales = filterOutDeletedRecords(unifyWh(mergedWs.sales), mergedTombstones);
+      const rawCustomers = filterOutDeletedRecords(unifyWh(mergedWs.customers), mergedTombstones);
+      const reconciledCustomers = reconcileCustomersFromSales(rawCustomers, rawSales).customers;
+
       const unifiedWs: RtdbWorkspacePayload = {
         ...mergedWs,
         meta: {
@@ -1747,9 +1855,9 @@ export default function App() {
           assignedWarehouse: resolvedWh || mergedWs.meta.assignedWarehouse,
         },
         products: filterOutDeletedRecords(unifyWh(mergedWs.products), mergedTombstones),
-        customers: filterOutDeletedRecords(unifyWh(mergedWs.customers), mergedTombstones),
+        customers: reconciledCustomers,
         suppliers: filterOutDeletedRecords(unifyWh(mergedWs.suppliers), mergedTombstones),
-        sales: filterOutDeletedRecords(unifyWh(mergedWs.sales), mergedTombstones),
+        sales: rawSales,
         imports: filterOutDeletedRecords(unifyWh(mergedWs.imports), mergedTombstones),
         receiptVouchers: filterOutDeletedRecords(
           unifyWh(mergedWs.receiptVouchers),
@@ -1790,6 +1898,18 @@ export default function App() {
       rtdbHydratedKeyRef.current = sessionKey;
       rtdbLastFingerprintsRef.current[activeUid] = isLegacy || rtdbNeedsHeal ? '' : incomingFp;
       rtdbSuppressNextWriteRef.current = !(isLegacy || rtdbNeedsHeal);
+
+      if (
+        mergedWs.meta?.updatedByUid &&
+        mergedWs.meta.updatedByUid !== activeUid &&
+        mergedWs.meta.updatedByName
+      ) {
+        const hhmm = new Date(mergedWs.meta.updatedAt || Date.now()).toLocaleTimeString('vi-VN', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        setLastRealtimePeerSyncLabel(`Vừa cập nhật bởi ${mergedWs.meta.updatedByName} (${hhmm})`);
+      }
 
       productsRef.current = unifiedWs.products;
       setProducts(unifiedWs.products);
@@ -1998,14 +2118,24 @@ export default function App() {
           }
           const nextFp = computeWorkspaceFingerprint(bucketPayload);
           if (forceStorage || rtdbLastFingerprintsRef.current[bucketUid] !== nextFp) {
-            rtdbLastFingerprintsRef.current[bucketUid] = nextFp;
+            const stampedPayload: RtdbWorkspacePayload = {
+              ...bucketPayload,
+              meta: {
+                ...bucketPayload.meta,
+                updatedAt: nowIso,
+                updatedByUid: activeUid,
+                updatedByName: currentStaff.displayName || fbUser.displayName || '',
+              },
+            };
+            rtdbLastFingerprintsRef.current[bucketUid] = computeWorkspaceFingerprint(stampedPayload);
             rtdbKnownOwnerUidsRef.current.add(bucketUid);
-            void writeRealtimeWorkspace(bucketUid, bucketPayload, prevSnapshot, allowWipe, {
+            void writeRealtimeWorkspace(bucketUid, stampedPayload, prevSnapshot, allowWipe, {
               forceStorage,
               allowMultiWarehouseManager: isDesignatedMultiWh,
+              allowSharedWarehouseMember: isDesignatedMultiWh,
             }).then((ok) => {
               if (ok) {
-                rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
+                rtdbLastPayloadRef.current[bucketUid] = stampedPayload;
               }
             });
           }
@@ -2019,6 +2149,7 @@ export default function App() {
             assignedWarehouse: currentStaff.assignedWarehouse || 'Tâm An Mỹ Ngãi',
             updatedAt: nowIso,
             updatedByUid: activeUid,
+            updatedByName: currentStaff.displayName || fbUser.displayName || '',
             schemaVersion: 1,
           },
           products,
@@ -2254,30 +2385,109 @@ export default function App() {
   };
 
   const resolveOwnerUidForWarehouse = (warehouseName?: string): string => {
-    const fallbackUid = auth.currentUser?.uid || currentStaff.uid;
+    const fallbackUid =
+      currentStaff.canonicalOwnerUid && currentStaff.canonicalOwnerUid !== PRIMARY_ADMIN_UID
+        ? currentStaff.canonicalOwnerUid
+        : auth.currentUser?.uid || currentStaff.uid;
     const whKey = normalizeWarehouseKey(warehouseName);
     if (!whKey || warehouseName === 'Tất cả kho') return fallbackUid;
-    const matchedStaff = staffList.find(
-      (s) =>
-        s.uid &&
-        s.assignedWarehouse !== 'Tất cả kho' &&
-        normalizeWarehouseKey(s.assignedWarehouse) === whKey
+    return resolveCanonicalOwnerUidForWarehouse({
+      warehouseName,
+      staffList,
+      workspacesMap: adminWorkspacesMapRef.current,
+      adminSummaries: adminWorkspaceSummaries,
+      existingMetaByUid: buildExistingMetaByUid(),
+      records: [
+        ...productsRef.current,
+        ...customers,
+        ...sales,
+        ...imports,
+      ],
+      fallbackUid,
+    });
+  };
+
+  /**
+   * Synchronously reserves the next optimistic sequential voucher code locally (preventing rapid
+   * double-click collisions) AND atomically reserves/verifies the counter on Firebase RTDB so
+   * concurrent co-workers on the same warehouse NEVER receive duplicate voucher numbers.
+   */
+  const allocateAtomicWarehouseVoucherCode = (params: {
+    ownerUid: string;
+    prefix: string;
+    existingCodes: string[];
+    onReassigned?: (committedCode: string) => void;
+  }): string => {
+    const { yymm, counterKey } = buildVoucherCounterMeta(params.prefix);
+    const mapKey = `${params.ownerUid || 'local'}::${counterKey}`;
+    const prevReserved = localVoucherSeqMapRef.current[mapKey] || 0;
+    const optimisticCode = generateSequentialVoucherCode(
+      params.prefix,
+      params.existingCodes,
+      new Date(),
+      prevReserved
     );
-    if (matchedStaff?.uid) return matchedStaff.uid;
-    for (const [uid, ws] of Object.entries(rtdbLastPayloadRef.current)) {
-      if (
-        ws?.meta?.assignedWarehouse &&
-        ws.meta.assignedWarehouse !== 'Tất cả kho' &&
-        normalizeWarehouseKey(ws.meta.assignedWarehouse) === whKey
-      ) {
-        return uid;
-      }
+    const optimisticSeq = extractMaxVoucherSequence(params.prefix, yymm, [optimisticCode]);
+    localVoucherSeqMapRef.current[mapKey] = Math.max(prevReserved, optimisticSeq);
+
+    if (isGoogleAuthenticated && isOnline && auth.currentUser && params.ownerUid && params.onReassigned) {
+      void reserveNextRealtimeVoucherCode({
+        ownerUid: params.ownerUid,
+        prefix: params.prefix,
+        existingCodes: params.existingCodes,
+      }).then((committedCode) => {
+        if (!committedCode) return;
+        const committedSeq = extractMaxVoucherSequence(params.prefix, yymm, [committedCode]);
+        localVoucherSeqMapRef.current[mapKey] = Math.max(
+          localVoucherSeqMapRef.current[mapKey] || 0,
+          committedSeq
+        );
+        if (committedCode !== optimisticCode) {
+          params.onReassigned?.(committedCode);
+        }
+      });
     }
-    const existingProd = productsRef.current.find(
-      (p) => p.ownerId && normalizeWarehouseKey(p.warehouseName) === whKey
-    );
-    if (existingProd?.ownerId) return existingProd.ownerId;
-    return fallbackUid;
+
+    return optimisticCode;
+  };
+
+  /**
+   * Runs an atomic `runTransaction` on `/workspaces/{ownerUid}/products/{k_prodId}` and reconciles
+   * local React state to the exact server-committed stock & weighted-average cost.
+   */
+  const dispatchAtomicProductMutation = (
+    ownerUid: string,
+    fallbackProduct: ProductItem,
+    mutate: (cur: ProductItem) => ProductItem
+  ) => {
+    if (!isGoogleAuthenticated || !auth.currentUser || !ownerUid) return;
+    void applyAtomicRealtimeProductMutation({
+      ownerUid,
+      productId: fallbackProduct.id,
+      fallbackProduct,
+      mutate,
+    }).then((committed) => {
+      if (!committed) return;
+      const curList = productsRef.current;
+      const found = curList.find((p) => p.id === committed.id);
+      if (
+        found &&
+        (found.stock !== committed.stock || found.importPrice !== committed.importPrice)
+      ) {
+        const nextList = curList.map((p) => (p.id === committed.id ? committed : p));
+        productsRef.current = nextList;
+        setProducts(nextList);
+      }
+      const prevPayload = rtdbLastPayloadRef.current[ownerUid];
+      if (prevPayload) {
+        rtdbLastPayloadRef.current[ownerUid] = {
+          ...prevPayload,
+          products: prevPayload.products.some((p) => p.id === committed.id)
+            ? prevPayload.products.map((p) => (p.id === committed.id ? committed : p))
+            : [committed, ...prevPayload.products],
+        };
+      }
+    });
   };
 
   // Handlers
@@ -2335,12 +2545,25 @@ export default function App() {
       'Tâm An Mỹ Ngãi';
     const saleOwnerUid =
       updatedProduct.ownerId || resolveOwnerUidForWarehouse(resolvedSaleWh);
+    const newSaleId = generateUniqueRecordId('sale');
+    const newSaleGroupId = generateUniqueRecordId('invgrp');
+    const existingInvoiceCodes = sales.map((s) => s.invoiceCode);
+    const allocatedInvoiceCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: saleOwnerUid,
+      prefix: 'HD',
+      existingCodes: existingInvoiceCodes,
+      onReassigned: (committedCode) => {
+        setSales((prev) =>
+          prev.map((s) =>
+            s.id === newSaleId ? { ...s, invoiceCode: committedCode, updatedAt: new Date().toISOString() } : s
+          )
+        );
+      },
+    });
     const newSale: SaleTransaction = {
-      id: `sale_${Date.now()}`,
-      invoiceCode: generateSequentialVoucherCode(
-        'HD',
-        sales.map((s) => s.invoiceCode)
-      ),
+      id: newSaleId,
+      invoiceCode: allocatedInvoiceCode,
+      invoiceGroupId: newSaleGroupId,
       customerId: payload.customerId,
       customerName: payload.customerName,
       customerPhone: payload.customerPhone,
@@ -2377,6 +2600,21 @@ export default function App() {
     productsRef.current = updatedProducts;
     setProducts(updatedProducts);
     setSales((prev) => [newSale, ...prev]);
+
+    // Atomic server-side stock deduction so concurrent sales on shared warehouse NEVER overwrite each other
+    const mainGiftCombined =
+      updatedGiftProduct && updatedGiftProduct.id === updatedProduct.id
+        ? -(payload.quantity + (payload.giftQuantity || 0))
+        : -payload.quantity;
+    dispatchAtomicProductMutation(saleOwnerUid, updatedProduct, (cur) =>
+      computeAtomicProductStockDelta(cur, mainGiftCombined, nowIso)
+    );
+    if (updatedGiftProduct && updatedGiftProduct.id !== updatedProduct.id && (payload.giftQuantity || 0) > 0) {
+      const giftOwnerUid = updatedGiftProduct.ownerId || saleOwnerUid;
+      dispatchAtomicProductMutation(giftOwnerUid, updatedGiftProduct, (cur) =>
+        computeAtomicProductStockDelta(cur, -(payload.giftQuantity || 0), nowIso)
+      );
+    }
 
     recordAuditLog({
       actionCategory: 'create',
@@ -2509,18 +2747,29 @@ export default function App() {
     }
 
     const nowIso = new Date().toISOString();
-    const sharedInvoiceCode = generateSequentialVoucherCode(
-      'HD',
-      sales.map((s) => s.invoiceCode)
-    );
-    const sharedGroupId = `invgrp_${Date.now()}`;
-    const allocation = allocatePaymentAcrossCartItems(payload.items, payload.totalPaidAmount);
-    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh = lockedWarehouse || payload.warehouseName || 'Tâm An Mỹ Ngãi';
+    const cartOwnerUid = resolveOwnerUidForWarehouse(resolvedWh);
+    const sharedGroupId = generateUniqueRecordId('invgrp');
+    const sharedInvoiceCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: cartOwnerUid,
+      prefix: 'HD',
+      existingCodes: sales.map((s) => s.invoiceCode),
+      onReassigned: (committedCode) => {
+        setSales((prev) =>
+          prev.map((s) =>
+            s.invoiceGroupId === sharedGroupId
+              ? { ...s, invoiceCode: committedCode, updatedAt: new Date().toISOString() }
+              : s
+          )
+        );
+      },
+    });
+    const allocation = allocatePaymentAcrossCartItems(payload.items, payload.totalPaidAmount);
 
     let workingProducts = productsRef.current;
     const createdSales: SaleTransaction[] = [];
     const touchedProductsMap = new Map<string, ProductItem>();
+    const cumulativeStockDeltaByProdId = new Map<string, number>();
 
     allocation.items.forEach((line, idx) => {
       const { updatedProducts, updatedProduct, updatedGiftProduct } = applySaleToInventory(
@@ -2533,12 +2782,20 @@ export default function App() {
       );
       workingProducts = updatedProducts;
       touchedProductsMap.set(updatedProduct.id, updatedProduct);
-      if (updatedGiftProduct) {
+      cumulativeStockDeltaByProdId.set(
+        updatedProduct.id,
+        (cumulativeStockDeltaByProdId.get(updatedProduct.id) || 0) - line.quantity
+      );
+      if (updatedGiftProduct && (line.giftQuantity || 0) > 0) {
         touchedProductsMap.set(updatedGiftProduct.id, updatedGiftProduct);
+        cumulativeStockDeltaByProdId.set(
+          updatedGiftProduct.id,
+          (cumulativeStockDeltaByProdId.get(updatedGiftProduct.id) || 0) - (line.giftQuantity || 0)
+        );
       }
 
       const saleRow: SaleTransaction = {
-        id: `sale_${Date.now()}_${idx}`,
+        id: generateUniqueRecordId(`sale_${idx}`),
         invoiceCode: sharedInvoiceCode,
         invoiceGroupId: sharedGroupId,
         customerId: payload.customerId,
@@ -2577,6 +2834,16 @@ export default function App() {
     productsRef.current = workingProducts;
     setProducts(workingProducts);
     setSales((prev) => [...createdSales, ...prev]);
+
+    // Atomic server-side stock deductions per distinct SKU in POS cart
+    cumulativeStockDeltaByProdId.forEach((delta, prodId) => {
+      const touched = touchedProductsMap.get(prodId);
+      if (!touched || delta === 0) return;
+      const pOwner = touched.ownerId || cartOwnerUid;
+      dispatchAtomicProductMutation(pOwner, touched, (cur) =>
+        computeAtomicProductStockDelta(cur, delta, nowIso)
+      );
+    });
 
     recordAuditLog({
       actionCategory: 'create',
@@ -2733,6 +3000,11 @@ export default function App() {
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
+          dispatchAtomicProductMutation(
+            nextProd.ownerId || resolveOwnerUidForWarehouse(nextProd.warehouseName),
+            nextProd,
+            (cur) => computeAtomicProductStockDelta(cur, delta, nowIso)
+          );
           return nextProd;
         });
         productsRef.current = nextList;
@@ -2815,6 +3087,11 @@ export default function App() {
           if (restoreQty <= 0) return p;
           const restored = { ...p, stock: p.stock + restoreQty, updatedAt: nowIso };
           if (isGoogleAuthenticated) void syncProductToFirestore(restored, false);
+          dispatchAtomicProductMutation(
+            restored.ownerId || resolveOwnerUidForWarehouse(restored.warehouseName),
+            restored,
+            (cur) => computeAtomicProductStockDelta(cur, restoreQty, nowIso)
+          );
           return restored;
         });
         productsRef.current = nextList;
@@ -2919,12 +3196,22 @@ export default function App() {
       'Tâm An Mỹ Ngãi';
     const impOwnerUid =
       updatedProduct.ownerId || resolveOwnerUidForWarehouse(resolvedImpWh);
+    const newImportId = generateUniqueRecordId('imp');
+    const allocatedReceiptCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: impOwnerUid,
+      prefix: 'PN',
+      existingCodes: imports.map((i) => i.receiptCode),
+      onReassigned: (committedCode) => {
+        setImports((prev) =>
+          prev.map((i) =>
+            i.id === newImportId ? { ...i, receiptCode: committedCode, updatedAt: new Date().toISOString() } : i
+          )
+        );
+      },
+    });
     const newImport: ImportTransaction = {
-      id: `imp_${Date.now()}`,
-      receiptCode: generateSequentialVoucherCode(
-        'PN',
-        imports.map((i) => i.receiptCode)
-      ),
+      id: newImportId,
+      receiptCode: allocatedReceiptCode,
       supplierName: payload.supplierName,
       supplierPhone: payload.supplierPhone,
       productId: updatedProduct.id,
@@ -2950,6 +3237,18 @@ export default function App() {
     productsRef.current = updatedProducts;
     setProducts(updatedProducts);
     setImports((prev) => [newImport, ...prev]);
+
+    // Atomic server-side stock addition + weighted-average cost + FEFO batch on shared warehouse
+    dispatchAtomicProductMutation(impOwnerUid, updatedProduct, (cur) =>
+      computeAtomicProductImportAddition({
+        currentProduct: cur,
+        importQty: payload.quantity,
+        unitCost: payload.unitCost,
+        nowIso,
+        batchNumber: payload.batchNumber?.trim() || undefined,
+        expiryDate: payload.expiryDate?.trim() || undefined,
+      })
+    );
 
     recordAuditLog({
       actionCategory: 'create',
@@ -3081,6 +3380,23 @@ export default function App() {
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(nextProd, false);
+          dispatchAtomicProductMutation(
+            nextProd.ownerId || resolveOwnerUidForWarehouse(nextProd.warehouseName),
+            nextProd,
+            (cur) => ({
+              ...cur,
+              stock: Math.max(0, (Number(cur.stock) || 0) + qtyDelta),
+              importPrice: recalculateImportPriceOnImportMutation({
+                product: cur,
+                oldQty: existing.quantity,
+                oldUnitCost: existing.unitCost,
+                newQty: updated.quantity,
+                newUnitCost: updated.unitCost,
+                remainingImports: nextImports,
+              }),
+              updatedAt: nowIso,
+            })
+          );
           return nextProd;
         });
         productsRef.current = nextList;
@@ -3195,6 +3511,23 @@ export default function App() {
             updatedAt: nowIso,
           };
           if (isGoogleAuthenticated) void syncProductToFirestore(adjusted, false);
+          dispatchAtomicProductMutation(
+            adjusted.ownerId || resolveOwnerUidForWarehouse(adjusted.warehouseName),
+            adjusted,
+            (cur) => ({
+              ...cur,
+              stock: Math.max(0, (Number(cur.stock) || 0) - target.quantity),
+              importPrice: recalculateImportPriceOnImportMutation({
+                product: cur,
+                oldQty: target.quantity,
+                oldUnitCost: target.unitCost,
+                newQty: 0,
+                newUnitCost: 0,
+                remainingImports: nextImports,
+              }),
+              updatedAt: nowIso,
+            })
+          );
           return adjusted;
         });
         productsRef.current = nextList;
@@ -3251,6 +3584,11 @@ export default function App() {
     productsRef.current = nextList;
     setProducts(nextList);
     forceStorageSyncRef.current = true;
+    dispatchAtomicProductMutation(
+      updatedProduct.ownerId || resolveOwnerUidForWarehouse(updatedProduct.warehouseName),
+      updatedProduct,
+      (cur) => ({ ...cur, stock: nextStock, updatedAt: nowIso })
+    );
     if (isGoogleAuthenticated) {
       void syncProductToFirestore(updatedProduct, false);
     }
@@ -3280,7 +3618,8 @@ export default function App() {
     const created: SupplierProfile = {
       ...data,
       warehouseName: resolvedWh,
-      id: `sup_${Date.now()}`,
+      ownerId: resolveOwnerUidForWarehouse(resolvedWh),
+      id: generateUniqueRecordId('sup'),
       createdAt: new Date().toISOString(),
     };
     setSuppliers((prev) => [created, ...prev]);
@@ -3337,7 +3676,7 @@ export default function App() {
       const created: ProductItem = {
         ...data,
         warehouseName: resolvedWh,
-        id: `prod_${Date.now()}`,
+        id: generateUniqueRecordId('prod'),
         ownerId: resolveOwnerUidForWarehouse(resolvedWh),
         createdAt: nowIso,
         updatedAt: nowIso,
@@ -3380,13 +3719,23 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh = lockedWarehouse || target.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
-    const adjustmentCode = generateSequentialVoucherCode(
-      'KK',
-      stockAdjustments.map((s) => s.adjustmentCode)
-    );
+    const adjOwnerUid = target.ownerId || resolveOwnerUidForWarehouse(resolvedWh);
+    const adjId = generateUniqueRecordId('kk');
+    const adjustmentCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: adjOwnerUid,
+      prefix: 'KK',
+      existingCodes: stockAdjustments.map((s) => s.adjustmentCode),
+      onReassigned: (committedCode) => {
+        setStockAdjustments((prev) =>
+          prev.map((a) =>
+            a.id === adjId ? { ...a, adjustmentCode: committedCode, updatedAt: new Date().toISOString() } : a
+          )
+        );
+      },
+    });
     const unitCost = Math.max(0, Number(target.importPrice) || 0);
     const record: StockAdjustmentRecord = {
-      id: `kk_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: adjId,
       adjustmentCode,
       productId: target.id,
       productCode: target.code,
@@ -3401,7 +3750,7 @@ export default function App() {
       reason: params.reason.trim() || 'Kiểm kê định kỳ',
       note: params.note?.trim() || '',
       staffName: currentStaff.displayName,
-      ownerId: target.ownerId || activeUid,
+      ownerId: adjOwnerUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -3416,6 +3765,11 @@ export default function App() {
     productsRef.current = nextProducts;
     setProducts(nextProducts);
     setStockAdjustments((prev) => [record, ...prev]);
+    dispatchAtomicProductMutation(adjOwnerUid, updatedProduct, (cur) => ({
+      ...cur,
+      stock: actualQty,
+      updatedAt: nowIso,
+    }));
 
     const signStr = diffQty > 0 ? `+${diffQty}` : `${diffQty}`;
     recordAuditLog({
@@ -3542,8 +3896,8 @@ export default function App() {
       const created: CustomerProfile = {
         ...data,
         warehouseName: resolvedWh,
-        id: `cust_${Date.now()}`,
-        ownerId: activeUid,
+        id: generateUniqueRecordId('cust'),
+        ownerId: resolveOwnerUidForWarehouse(resolvedWh),
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -3658,7 +4012,8 @@ export default function App() {
       const created: SavedVoucherRecord = {
         ...voucherData,
         warehouseName: resolvedWh,
-        id: `vc_${Date.now()}`,
+        ownerId: resolveOwnerUidForWarehouse(resolvedWh),
+        id: generateUniqueRecordId('vc'),
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -3736,15 +4091,26 @@ export default function App() {
       return reconciled.customers;
     });
 
-    const voucherCode = generateSequentialVoucherCode(
-      'PT',
-      receiptVouchers.map((r) => r.voucherCode)
-    );
+    const rvWh = existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const rvOwnerUid = existing.ownerId || resolveOwnerUidForWarehouse(rvWh);
+    const rvId = generateUniqueRecordId('rv_direct');
+    const voucherCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: rvOwnerUid,
+      prefix: 'PT',
+      existingCodes: receiptVouchers.map((r) => r.voucherCode),
+      onReassigned: (committedCode) => {
+        setReceiptVouchers((prev) =>
+          prev.map((r) =>
+            r.id === rvId ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() } : r
+          )
+        );
+      },
+    });
     const linkedReceiptVoucher: CashReceiptVoucher = {
-      id: `rv_direct_${Date.now()}`,
+      id: rvId,
       voucherCode,
       groupName: 'Thu nợ bán hàng khách hàng',
-      warehouseName: existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+      warehouseName: rvWh,
       partnerId: existing.customerId,
       partnerName: existing.customerName,
       partnerPhone: existing.customerPhone || '',
@@ -3770,7 +4136,7 @@ export default function App() {
         cleanNote ||
         `Thu nợ trực tiếp hóa đơn ${existing.invoiceCode} (${existing.customerName})`,
       staffName: currentStaff.displayName,
-      ownerId: existing.ownerId || activeUid,
+      ownerId: rvOwnerUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -3833,15 +4199,31 @@ export default function App() {
       updatedSalesForFirestore.push(updatedSale);
       totalBatchCollected += actualCollected;
 
-      const voucherCode = generateSequentialVoucherCode('PT', existingCodes);
+      const batchWh =
+        existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+      const batchOwnerUid = existing.ownerId || resolveOwnerUidForWarehouse(batchWh);
+      const batchRvId = generateUniqueRecordId(`rv_direct_${idx}`);
+      const voucherCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: batchOwnerUid,
+        prefix: 'PT',
+        existingCodes,
+        onReassigned: (committedCode) => {
+          setReceiptVouchers((prev) =>
+            prev.map((r) =>
+              r.id === batchRvId
+                ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                : r
+            )
+          );
+        },
+      });
       existingCodes = [voucherCode, ...existingCodes];
 
       createdVouchers.push({
-        id: `rv_direct_${Date.now()}_${idx}`,
+        id: batchRvId,
         voucherCode,
         groupName: 'Thu nợ bán hàng khách hàng',
-        warehouseName:
-          existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+        warehouseName: batchWh,
         partnerId: existing.customerId,
         partnerName: existing.customerName,
         partnerPhone: existing.customerPhone || '',
@@ -3867,7 +4249,7 @@ export default function App() {
           cleanNote ||
           `Thu nợ tổng hợp hóa đơn ${existing.invoiceCode} (${existing.customerName})`,
         staffName: currentStaff.displayName,
-        ownerId: existing.ownerId || activeUid,
+        ownerId: batchOwnerUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -3939,15 +4321,26 @@ export default function App() {
       void syncImportToFirestore(updatedImport, false);
     }
 
-    const voucherCode = generateSequentialVoucherCode(
-      'PC',
-      paymentVouchers.map((p) => p.voucherCode)
-    );
+    const pvWh = existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const pvOwnerUid = existing.ownerId || resolveOwnerUidForWarehouse(pvWh);
+    const pvId = generateUniqueRecordId('pv_direct');
+    const voucherCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid: pvOwnerUid,
+      prefix: 'PC',
+      existingCodes: paymentVouchers.map((p) => p.voucherCode),
+      onReassigned: (committedCode) => {
+        setPaymentVouchers((prev) =>
+          prev.map((p) =>
+            p.id === pvId ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() } : p
+          )
+        );
+      },
+    });
     const linkedPaymentVoucher: CashPaymentVoucher = {
-      id: `pv_direct_${Date.now()}`,
+      id: pvId,
       voucherCode,
       groupName: 'Chi trả nợ Nhà cung cấp',
-      warehouseName: existing.warehouseName || lockedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+      warehouseName: pvWh,
       partnerName: existing.supplierName,
       partnerPhone: existing.supplierPhone || '',
       amount: actualPaid,
@@ -3972,7 +4365,7 @@ export default function App() {
         cleanNote ||
         `Thanh toán trực tiếp phiếu nhập ${existing.receiptCode} (${existing.supplierName})`,
       staffName: currentStaff.displayName,
-      ownerId: existing.ownerId || activeUid,
+      ownerId: pvOwnerUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -4068,16 +4461,30 @@ export default function App() {
         fifoResult.unpaidInvoicesOrdered[0]?.warehouseName ||
         'Tâm An Mỹ Ngãi';
 
-      const voucherCode = generateSequentialVoucherCode(
-        'PT',
-        receiptVouchers.map((r) => r.voucherCode)
-      );
+      const fifoRvOwnerUid =
+        fifoResult.unpaidInvoicesOrdered[0]?.ownerId ||
+        resolveOwnerUidForWarehouse(resolvedWarehouse);
+      const fifoRvId = generateUniqueRecordId('rv');
+      const voucherCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: fifoRvOwnerUid,
+        prefix: 'PT',
+        existingCodes: receiptVouchers.map((r) => r.voucherCode),
+        onReassigned: (committedCode) => {
+          setReceiptVouchers((prev) =>
+            prev.map((r) =>
+              r.id === fifoRvId
+                ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                : r
+            )
+          );
+        },
+      });
       const allocDesc = fifoResult.settledAllocations
         .map((a) => `${a.code} (${a.date}: -${formatVND(a.allocatedAmount)})`)
         .join(' · ');
 
       const newReceiptVoucher: CashReceiptVoucher = {
-        id: `rv_${Date.now()}`,
+        id: fifoRvId,
         voucherCode,
         groupName: params.groupName || 'Thu nợ bán hàng khách hàng',
         warehouseName: resolvedWarehouse,
@@ -4095,7 +4502,7 @@ export default function App() {
           params.note.trim() ||
           `Quyết toán tổng công nợ phải thu theo thứ tự ngày nợ (${fifoResult.settledAllocations.length} HĐ)`,
         staffName: currentStaff.displayName,
-        ownerId: activeUid,
+        ownerId: fifoRvOwnerUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -4177,16 +4584,30 @@ export default function App() {
         fifoResult.unpaidReceiptsOrdered[0]?.warehouseName ||
         'Tâm An Mỹ Ngãi';
 
-      const voucherCode = generateSequentialVoucherCode(
-        'PC',
-        paymentVouchers.map((p) => p.voucherCode)
-      );
+      const fifoPvOwnerUid =
+        fifoResult.unpaidReceiptsOrdered[0]?.ownerId ||
+        resolveOwnerUidForWarehouse(resolvedWarehouse);
+      const fifoPvId = generateUniqueRecordId('pv');
+      const voucherCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: fifoPvOwnerUid,
+        prefix: 'PC',
+        existingCodes: paymentVouchers.map((p) => p.voucherCode),
+        onReassigned: (committedCode) => {
+          setPaymentVouchers((prev) =>
+            prev.map((p) =>
+              p.id === fifoPvId
+                ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                : p
+            )
+          );
+        },
+      });
       const allocDesc = fifoResult.settledAllocations
         .map((a) => `${a.code} (${a.date}: -${formatVND(a.allocatedAmount)})`)
         .join(' · ');
 
       const newPaymentVoucher: CashPaymentVoucher = {
-        id: `pv_${Date.now()}`,
+        id: fifoPvId,
         voucherCode,
         groupName: params.groupName || 'Chi trả nợ Nhà cung cấp',
         warehouseName: resolvedWarehouse,
@@ -4203,7 +4624,7 @@ export default function App() {
           params.note.trim() ||
           `Quyết toán tổng công nợ phải trả NCC theo thứ tự ngày nợ (${fifoResult.settledAllocations.length} phiếu nhập)`,
         staffName: currentStaff.displayName,
-        ownerId: activeUid,
+        ownerId: fifoPvOwnerUid,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -4263,15 +4684,24 @@ export default function App() {
       return;
     }
     const nowIso = new Date().toISOString();
-    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh =
       lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const rvOwnerUid = resolveOwnerUidForWarehouse(resolvedWh);
+    const rvId = generateUniqueRecordId('rv');
     const created: CashReceiptVoucher = {
-      id: `rv_${Date.now()}`,
-      voucherCode: generateSequentialVoucherCode(
-        'PT',
-        receiptVouchers.map((r) => r.voucherCode)
-      ),
+      id: rvId,
+      voucherCode: allocateAtomicWarehouseVoucherCode({
+        ownerUid: rvOwnerUid,
+        prefix: 'PT',
+        existingCodes: receiptVouchers.map((r) => r.voucherCode),
+        onReassigned: (committedCode) => {
+          setReceiptVouchers((prev) =>
+            prev.map((r) =>
+              r.id === rvId ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() } : r
+            )
+          );
+        },
+      }),
       groupName: payload.groupName || 'Thu khác',
       warehouseName: resolvedWh,
       partnerId: payload.customerId,
@@ -4284,7 +4714,7 @@ export default function App() {
       countsTowardOtherIncome: payload.countsTowardOtherIncome !== false,
       note: payload.note || `Phiếu thu nhóm ${payload.groupName}`,
       staffName: currentStaff.displayName,
-      ownerId: activeUid,
+      ownerId: rvOwnerUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -4483,15 +4913,24 @@ export default function App() {
       return;
     }
     const nowIso = new Date().toISOString();
-    const activeUid = auth.currentUser?.uid || currentStaff.uid;
     const resolvedWh =
       lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const pvOwnerUid = resolveOwnerUidForWarehouse(resolvedWh);
+    const pvId = generateUniqueRecordId('pv');
     const created: CashPaymentVoucher = {
-      id: `pv_${Date.now()}`,
-      voucherCode: generateSequentialVoucherCode(
-        'PC',
-        paymentVouchers.map((p) => p.voucherCode)
-      ),
+      id: pvId,
+      voucherCode: allocateAtomicWarehouseVoucherCode({
+        ownerUid: pvOwnerUid,
+        prefix: 'PC',
+        existingCodes: paymentVouchers.map((p) => p.voucherCode),
+        onReassigned: (committedCode) => {
+          setPaymentVouchers((prev) =>
+            prev.map((p) =>
+              p.id === pvId ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() } : p
+            )
+          );
+        },
+      }),
       groupName: payload.groupName || 'Chi phí vận hành khác',
       warehouseName: resolvedWh,
       partnerName: payload.partnerName,
@@ -4503,7 +4942,7 @@ export default function App() {
       countsTowardOperatingExpense: payload.countsTowardOperatingExpense !== false,
       note: payload.note || `Phiếu chi nhóm ${payload.groupName}`,
       staffName: currentStaff.displayName,
-      ownerId: activeUid,
+      ownerId: pvOwnerUid,
       createdAt: nowIso,
       updatedAt: nowIso,
     };
@@ -5827,8 +6266,29 @@ export default function App() {
       };
     }
     const nowIso = new Date().toISOString();
-    const newUid = `staff_${Date.now()}`;
+    const newUid = generateUniqueRecordId('staff');
     const hashedPassword = await hashPassword(payload.password, newUid);
+    const assignedWh = payload.assignedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
+    const isNewAllWh = assignedWh === 'Tất cả kho';
+    const canonicalOwnerForNew = !isNewAllWh
+      ? resolveCanonicalOwnerUidForWarehouse({
+          warehouseName: assignedWh,
+          staffList,
+          workspacesMap: adminWorkspacesMapRef.current,
+          adminSummaries: adminWorkspaceSummaries,
+          fallbackUid: newUid,
+        })
+      : undefined;
+    const sharedOwnerUidsForNew =
+      !isNewAllWh && canonicalOwnerForNew && canonicalOwnerForNew !== newUid
+        ? resolveDesignatedOwnerUidsForWarehouses({
+            targetUid: newUid,
+            selectedWarehouses: [assignedWh],
+            staffList,
+            workspacesMap: adminWorkspacesMapRef.current,
+            adminSummaries: adminWorkspaceSummaries,
+          })
+        : undefined;
     const created: StaffMember = {
       uid: newUid,
       username: payload.username,
@@ -5839,7 +6299,11 @@ export default function App() {
       role: payload.role,
       positionRole: payload.positionRole,
       permissions: payload.permissions,
-      assignedWarehouse: payload.assignedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi',
+      assignedWarehouse: assignedWh,
+      ...(sharedOwnerUidsForNew ? { assignedOwnerUids: sharedOwnerUidsForNew } : {}),
+      ...(canonicalOwnerForNew && canonicalOwnerForNew !== newUid
+        ? { canonicalOwnerUid: canonicalOwnerForNew }
+        : {}),
       active: true,
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -5906,28 +6370,51 @@ export default function App() {
       : cleanedWhs[0] || target.assignedWarehouse || warehouses[0] || 'Tâm An Mỹ Ngãi';
 
     // Map each granted warehouse (accent- & case-insensitively!) to ALL its workspace owner UID(s)
-    // so RTDB rules & Firebase Storage hydration grant exact read/write scope
-    const ownerUidsMap: Record<string, boolean> =
-      isMultiGrant && !grantAllWarehouses
-        ? resolveDesignatedOwnerUidsForWarehouses({
-            targetUid: uid,
-            selectedWarehouses: cleanedWhs,
+    // Works for BOTH multi-warehouse managers (2+ warehouses) AND co-staff sharing 1 single warehouse!
+    const allHintRecords = [
+      ...products,
+      ...customers,
+      ...suppliers,
+      ...sales,
+      ...imports,
+      ...receiptVouchers,
+      ...paymentVouchers,
+      ...savedVouchers,
+      ...stockAdjustments,
+    ];
+    const targetWhListForOwnerLookup = !grantAllWarehouses
+      ? cleanedWhs.length > 0
+        ? cleanedWhs
+        : [primaryWarehouseName]
+      : [];
+    const ownerUidsMap: Record<string, boolean> = !grantAllWarehouses
+      ? resolveDesignatedOwnerUidsForWarehouses({
+          targetUid: uid,
+          selectedWarehouses: targetWhListForOwnerLookup,
+          staffList,
+          workspacesMap: adminWorkspacesMapRef.current,
+          adminSummaries: adminWorkspaceSummaries,
+          records: allHintRecords,
+        })
+      : {};
+    const singleWhCanonicalOwner =
+      !grantAllWarehouses && !isMultiGrant
+        ? resolveCanonicalOwnerUidForWarehouse({
+            warehouseName: primaryWarehouseName,
             staffList,
             workspacesMap: adminWorkspacesMapRef.current,
             adminSummaries: adminWorkspaceSummaries,
-            records: [
-              ...products,
-              ...customers,
-              ...suppliers,
-              ...sales,
-              ...imports,
-              ...receiptVouchers,
-              ...paymentVouchers,
-              ...savedVouchers,
-              ...stockAdjustments,
-            ],
+            records: allHintRecords,
+            fallbackUid: uid,
           })
-        : {};
+        : undefined;
+    if (singleWhCanonicalOwner && singleWhCanonicalOwner !== PRIMARY_ADMIN_UID) {
+      ownerUidsMap[singleWhCanonicalOwner] = true;
+    }
+    const hasSharedSingleWhOwner =
+      !grantAllWarehouses &&
+      !isMultiGrant &&
+      Object.keys(ownerUidsMap).some((k) => k !== uid);
 
     const basePerms =
       target.permissions && target.permissions.length > 0
@@ -5977,7 +6464,13 @@ export default function App() {
       assignedWarehouses: !grantAllWarehouses && cleanedWhs.length >= 2 ? cleanedWhs : undefined,
       multiWarehouseGrantedByAdmin: isMultiGrant,
       assignedOwnerUids:
-        !grantAllWarehouses && cleanedWhs.length >= 2 ? ownerUidsMap : undefined,
+        !grantAllWarehouses && (cleanedWhs.length >= 2 || hasSharedSingleWhOwner)
+          ? ownerUidsMap
+          : undefined,
+      canonicalOwnerUid:
+        !grantAllWarehouses && !isMultiGrant && singleWhCanonicalOwner && singleWhCanonicalOwner !== uid
+          ? singleWhCanonicalOwner
+          : undefined,
       updatedAt: nowIso,
     };
 
@@ -6052,29 +6545,57 @@ export default function App() {
         ? 'manager'
         : 'staff';
 
-    const ownerUidsMap: Record<string, boolean> | undefined =
-      !isAllWhs && cleanedMultiWhs.length >= 2
-        ? resolveDesignatedOwnerUidsForWarehouses({
-            targetUid: uid,
-            selectedWarehouses: cleanedMultiWhs,
+    const finalAssignedWh = isAllWhs ? 'Tất cả kho' : cleanedMultiWhs[0] || assignedWarehouse;
+    const permHintRecords = [
+      ...products,
+      ...customers,
+      ...suppliers,
+      ...sales,
+      ...imports,
+      ...receiptVouchers,
+      ...paymentVouchers,
+      ...savedVouchers,
+      ...stockAdjustments,
+    ];
+    const permWhLookup = !isAllWhs
+      ? cleanedMultiWhs.length >= 2
+        ? cleanedMultiWhs
+        : [finalAssignedWh]
+      : [];
+    const rawPermOwnerMap = !isAllWhs
+      ? resolveDesignatedOwnerUidsForWarehouses({
+          targetUid: uid,
+          selectedWarehouses: permWhLookup,
+          staffList,
+          workspacesMap: adminWorkspacesMapRef.current,
+          adminSummaries: adminWorkspaceSummaries,
+          records: permHintRecords,
+        })
+      : {};
+    const permCanonicalSingle =
+      !isAllWhs && !hasMultiWhGrant
+        ? resolveCanonicalOwnerUidForWarehouse({
+            warehouseName: finalAssignedWh,
             staffList,
             workspacesMap: adminWorkspacesMapRef.current,
             adminSummaries: adminWorkspaceSummaries,
-            records: [
-              ...products,
-              ...customers,
-              ...suppliers,
-              ...sales,
-              ...imports,
-              ...receiptVouchers,
-              ...paymentVouchers,
-              ...savedVouchers,
-              ...stockAdjustments,
-            ],
+            records: permHintRecords,
+            fallbackUid: uid,
           })
         : undefined;
-
-    const finalAssignedWh = isAllWhs ? 'Tất cả kho' : cleanedMultiWhs[0] || assignedWarehouse;
+    if (permCanonicalSingle && permCanonicalSingle !== PRIMARY_ADMIN_UID) {
+      rawPermOwnerMap[permCanonicalSingle] = true;
+    }
+    const permHasSharedSingle =
+      !isAllWhs && !hasMultiWhGrant && Object.keys(rawPermOwnerMap).some((k) => k !== uid);
+    const ownerUidsMap: Record<string, boolean> | undefined =
+      !isAllWhs && (cleanedMultiWhs.length >= 2 || permHasSharedSingle)
+        ? rawPermOwnerMap
+        : undefined;
+    const nextCanonicalOwnerUid =
+      !isAllWhs && !hasMultiWhGrant && permCanonicalSingle && permCanonicalSingle !== uid
+        ? permCanonicalSingle
+        : undefined;
 
     setStaffList((prev) =>
       prev.map((s) =>
@@ -6088,6 +6609,7 @@ export default function App() {
               assignedWarehouses: !isAllWhs && cleanedMultiWhs.length >= 2 ? cleanedMultiWhs : undefined,
               multiWarehouseGrantedByAdmin: hasMultiWhGrant,
               assignedOwnerUids: ownerUidsMap,
+              canonicalOwnerUid: nextCanonicalOwnerUid,
               updatedAt: nowIso,
             }
           : s
@@ -6107,6 +6629,7 @@ export default function App() {
           assignedWarehouses: !isAllWhs && cleanedMultiWhs.length >= 2 ? cleanedMultiWhs : undefined,
           multiWarehouseGrantedByAdmin: hasMultiWhGrant,
           assignedOwnerUids: ownerUidsMap,
+          canonicalOwnerUid: nextCanonicalOwnerUid,
           updatedAt: nowIso,
         });
       }
@@ -6819,7 +7342,13 @@ export default function App() {
         // 1. PULL fresh data from BOTH RTDB AND Firebase Storage first (tombstone-safe: deleted records NEVER resurrect!)
         const summaries = await readAdminWorkspacesIndexFromFirebaseStorage();
         const grantedWhKeys = new Set(
-          dedupeWarehouseNames(currentStaff.assignedWarehouses || [])
+          dedupeWarehouseNames(
+            currentStaff.assignedWarehouses && currentStaff.assignedWarehouses.length > 0
+              ? currentStaff.assignedWarehouses
+              : currentStaff.assignedWarehouse
+              ? [currentStaff.assignedWarehouse]
+              : []
+          )
             .map((w) => normalizeWarehouseKey(w))
             .filter(Boolean)
         );
@@ -6883,7 +7412,10 @@ export default function App() {
           const storageWs = storageCachedWorkspaceRef.current[uid] || null;
           if (rtdbRaw && storageWs) {
             const normRtdb = normalizeWorkspaceFromRtdb(rtdbRaw, uid);
-            combinedMap[uid] = mergeWorkspacePayloads(normRtdb, storageWs, uid) || rtdbRaw;
+            combinedMap[uid] =
+              mergeWorkspacePayloads(normRtdb, storageWs, uid, {
+                preferFirstAsLiveRtdb: true,
+              }) || rtdbRaw;
           } else if (rtdbRaw) {
             combinedMap[uid] = rtdbRaw;
           } else if (storageWs) {
@@ -6909,9 +7441,10 @@ export default function App() {
           const agg = aggregateAdminWorkspacesFromRtdb(combinedMap, rtdbUsersDirMapRef.current);
           workingTombstones = mergeDeletionTombstones(cur.deletedRecords, agg.deletedRecords);
           workingProducts = filterOutDeletedRecords(agg.products, workingTombstones);
-          workingCustomers = filterOutDeletedRecords(agg.customers, workingTombstones);
-          workingSuppliers = filterOutDeletedRecords(agg.suppliers, workingTombstones);
           workingSales = filterOutDeletedRecords(agg.sales, workingTombstones);
+          const rawWorkingCusts = filterOutDeletedRecords(agg.customers, workingTombstones);
+          workingCustomers = reconcileCustomersFromSales(rawWorkingCusts, workingSales).customers;
+          workingSuppliers = filterOutDeletedRecords(agg.suppliers, workingTombstones);
           workingImports = filterOutDeletedRecords(agg.imports, workingTombstones);
           workingRvs = filterOutDeletedRecords(agg.receiptVouchers, workingTombstones);
           workingPvs = filterOutDeletedRecords(agg.paymentVouchers, workingTombstones);
@@ -7001,19 +7534,29 @@ export default function App() {
             if (isDestructiveEmptyWorkspaceOverwrite(prevSnapshot, bucketPayload, allowDeletionWipe)) {
               return;
             }
+            const stampedBucket: RtdbWorkspacePayload = {
+              ...bucketPayload,
+              meta: {
+                ...bucketPayload.meta,
+                updatedAt: nowIso,
+                updatedByUid: activeUid,
+                updatedByName: currentStaff.displayName || fbUser.displayName || '',
+              },
+            };
             const ok = await writeRealtimeWorkspace(
               bucketUid,
-              bucketPayload,
+              stampedBucket,
               prevSnapshot,
               allowDeletionWipe,
               {
                 forceStorage: true,
                 allowMultiWarehouseManager: isDesignatedMultiWh,
+                allowSharedWarehouseMember: isDesignatedMultiWh,
               }
             );
             if (ok) {
-              rtdbLastPayloadRef.current[bucketUid] = bucketPayload;
-              rtdbLastFingerprintsRef.current[bucketUid] = computeWorkspaceFingerprint(bucketPayload);
+              rtdbLastPayloadRef.current[bucketUid] = stampedBucket;
+              rtdbLastFingerprintsRef.current[bucketUid] = computeWorkspaceFingerprint(stampedBucket);
             }
           })
         );
@@ -7059,7 +7602,9 @@ export default function App() {
           backups: cur.backups.map((b) => ({ ...b, snapshotPayload: undefined })),
           settings: settingsObj,
         };
-        const cloudMerged = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid);
+        const cloudMerged = mergeWorkspacePayloads(rtdbWs, storageWs, activeUid, {
+          preferFirstAsLiveRtdb: Boolean(rtdbWs),
+        });
         const currentCount = countWorkspaceBusinessRecords(localPayload);
         const finalPayload =
           currentCount === 0 &&
@@ -7451,7 +7996,11 @@ export default function App() {
                   type="button"
                   disabled={isManualCloudSyncing}
                   onClick={() => void handleManualCloudSync()}
-                  title="Bấm để đồng bộ tức thì dữ liệu (kể cả dữ liệu đã xóa) lên Firebase Storage & Realtime Database"
+                  title={
+                    lastRealtimePeerSyncLabel
+                      ? `${lastRealtimePeerSyncLabel} — Bấm để cập nhật & đồng bộ tức thì với Cloud`
+                      : 'Bấm để cập nhật & đồng bộ tức thì dữ liệu (kể cả dữ liệu đã xóa) lên Firebase Storage & Realtime Database'
+                  }
                   className={`hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors shrink-0 ${
                     rtdbSyncState === 'live'
                       ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
@@ -7586,7 +8135,11 @@ export default function App() {
                   type="button"
                   disabled={isManualCloudSyncing}
                   onClick={() => void handleManualCloudSync()}
-                  title="Bấm để đồng bộ tức thì dữ liệu (kể cả dữ liệu đã xóa) lên Firebase Storage & Realtime Database"
+                  title={
+                    lastRealtimePeerSyncLabel
+                      ? `${lastRealtimePeerSyncLabel} — Bấm để cập nhật & đồng bộ tức thì với Cloud`
+                      : 'Bấm để cập nhật & đồng bộ tức thì dữ liệu (kể cả dữ liệu đã xóa) lên Firebase Storage & Realtime Database'
+                  }
                   className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-semibold border whitespace-nowrap transition-colors shrink-0 ${
                     rtdbSyncState === 'live'
                       ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'

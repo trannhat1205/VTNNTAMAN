@@ -261,6 +261,7 @@ export interface SupplierProfile {
   address: string;
   note: string;
   warehouseName?: string;
+  ownerId?: string;
   createdAt: string;
 }
 
@@ -320,8 +321,10 @@ export interface StaffMember {
   assignedWarehouses?: string[];
   /** Explicit flag set ONLY by Primary Admin when granting multi-warehouse management (2+ warehouses or All). */
   multiWarehouseGrantedByAdmin?: boolean;
-  /** Map of workspace owner UIDs readable/writable by a designated multi-warehouse manager in Firebase RTDB. */
+  /** Map of workspace owner UIDs readable/writable by a designated multi-warehouse manager or shared-warehouse co-staff in Firebase RTDB. */
   assignedOwnerUids?: Record<string, boolean>;
+  /** Canonical workspace owner UID when multiple accounts co-manage the same single warehouse in real time. */
+  canonicalOwnerUid?: string;
   /** Number of self-service warehouse renames used by a non-admin account (max 1; Primary Admin is unlimited). */
   warehouseRenameCount?: number;
   active: boolean;
@@ -355,6 +358,7 @@ export interface SavedVoucherRecord {
   paymentMethod: string;
   note: string;
   staffName: string;
+  ownerId?: string;
   createdAt: string;
   updatedAt: string;
 }
