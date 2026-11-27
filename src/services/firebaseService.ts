@@ -26,11 +26,13 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   get as rtdbGet,
   getDatabase,
   off,
+  onDisconnect,
   onValue,
   ref as rtdbRef,
   runTransaction,
@@ -130,6 +132,7 @@ export interface CloudSyncResult {
   syncedToCloud: boolean;
   reason?:
     | 'synced'
+    | 'rtdb_primary'
     | 'unauthenticated'
     | 'email_unverified'
     | 'invalid_id'
@@ -586,10 +589,20 @@ export async function deleteBackupFileFromDrive(storagePathOrId: string, backupI
 // SAFE 2-LAYER FIRESTORE SYNC HELPERS (Rule-Compliant, Zero PERMISSION_DENIED)
 // ============================================================================
 
+/**
+ * Firebase Realtime Database (`/workspaces/{ownerUid}`) is the SINGLE source of truth for business data
+ * (products, customers, suppliers, sales, imports, vouchers, stock adjustments).
+ * Firestore business-collection sync is permanently disabled to avoid divergent copies.
+ */
+export const FIRESTORE_BUSINESS_SYNC_ENABLED = false;
+
 export async function syncProductToFirestore(
   product: ProductItem,
   _preferCreate = false
 ): Promise<CloudSyncResult> {
+  if (!FIRESTORE_BUSINESS_SYNC_ENABLED) {
+    return { ok: true, syncedToCloud: false, reason: 'rtdb_primary' };
+  }
   const user = auth.currentUser;
   if (!canWriteToFirestore(user)) {
     return {
@@ -648,6 +661,9 @@ export async function syncCustomerToFirestore(
   customer: CustomerProfile,
   _preferCreate = false
 ): Promise<CloudSyncResult> {
+  if (!FIRESTORE_BUSINESS_SYNC_ENABLED) {
+    return { ok: true, syncedToCloud: false, reason: 'rtdb_primary' };
+  }
   const user = auth.currentUser;
   if (!canWriteToFirestore(user)) {
     return {
@@ -731,6 +747,9 @@ export async function syncSaleToFirestore(
   _preferCreate = false,
   relatedProduct?: ProductItem
 ): Promise<CloudSyncResult> {
+  if (!FIRESTORE_BUSINESS_SYNC_ENABLED) {
+    return { ok: true, syncedToCloud: false, reason: 'rtdb_primary' };
+  }
   const user = auth.currentUser;
   if (!canWriteToFirestore(user)) {
     return {
@@ -835,6 +854,9 @@ export async function syncImportToFirestore(
   _preferCreate = false,
   relatedProduct?: ProductItem
 ): Promise<CloudSyncResult> {
+  if (!FIRESTORE_BUSINESS_SYNC_ENABLED) {
+    return { ok: true, syncedToCloud: false, reason: 'rtdb_primary' };
+  }
   const user = auth.currentUser;
   if (!canWriteToFirestore(user)) {
     return {
@@ -951,6 +973,120 @@ export async function deleteFirestoreDocIfAdmin(
   }
 }
 
+/**
+ * ADMIN ONLY: permanently deletes every legacy business document from Firestore
+ * (products, customers, customers_private, sales, imports) after the cutover to Realtime Database.
+ */
+export async function purgeFirestoreBusinessCollections(): Promise<{
+  deleted: number;
+  failed: number;
+}> {
+  const user = auth.currentUser;
+  if (!isCurrentUserAdmin(user)) return { deleted: 0, failed: 0 };
+  let deleted = 0;
+  let failed = 0;
+  const names = ['products', 'customers', 'customers_private', 'sales', 'imports'] as const;
+  for (const name of names) {
+    try {
+      const snap = await getDocs(collection(db, name));
+      const docs = snap.docs;
+      for (let i = 0; i < docs.length; i += 400) {
+        const chunk = docs.slice(i, i + 400);
+        try {
+          const batch = writeBatch(db);
+          chunk.forEach((d) => batch.delete(d.ref));
+          await batch.commit();
+          deleted += chunk.length;
+        } catch {
+          failed += chunk.length;
+        }
+      }
+    } catch {
+      failed += 1;
+    }
+  }
+  return { deleted, failed };
+}
+
+/**
+ * Clears ALL business data (products, customers, suppliers, sales, imports, vouchers, stock adjustments,
+ * voucher counters, tombstones) of the given workspaces in Realtime Database and stamps `settings/dataWipedAt`.
+ * Staff accounts, warehouse list, note templates, VietQR config, audit logs and backups are preserved.
+ */
+export async function purgeRealtimeBusinessDataForWorkspaces(
+  ownerUids: string[],
+  wipedAtIso: string,
+  actorUid: string,
+  actorName: string
+): Promise<{ ok: string[]; failed: string[] }> {
+  const ok: string[] = [];
+  const failed: string[] = [];
+  if (!auth.currentUser) return { ok, failed: ownerUids };
+  const uniqueUids = Array.from(
+    new Set(ownerUids.map((u) => sanitizeFirestoreId(u)).filter(Boolean))
+  );
+  await Promise.allSettled(
+    uniqueUids.map(async (uid) => {
+      try {
+        await rtdbUpdate(rtdbRef(rtdb, `workspaces/${uid}`), {
+          products: null,
+          customers: null,
+          suppliers: null,
+          sales: null,
+          imports: null,
+          receiptVouchers: null,
+          paymentVouchers: null,
+          savedVouchers: null,
+          stockAdjustments: null,
+          counters: null,
+          'settings/deletedRecords': null,
+          'settings/dataWipedAt': wipedAtIso,
+          'meta/ownerUid': uid,
+          'meta/updatedAt': wipedAtIso,
+          'meta/updatedByUid': actorUid,
+          'meta/updatedByName': actorName,
+        });
+        ok.push(uid);
+      } catch (err) {
+        console.warn(
+          `purgeRealtimeBusinessDataForWorkspaces(${uid}) warning:`,
+          err instanceof Error ? err.message : err
+        );
+        failed.push(uid);
+      }
+    })
+  );
+  return { ok, failed };
+}
+
+/**
+ * Lightweight presence heartbeat stored on `/users_directory/{uid}` (best-effort; failures are ignored).
+ */
+export async function touchRealtimePresence(
+  uid: string,
+  state: { online: boolean; activeWarehouse?: string }
+): Promise<boolean> {
+  if (!auth.currentUser || !uid) return false;
+  const safeUid = sanitizeFirestoreId(uid);
+  if (!safeUid) return false;
+  try {
+    const dirRef = rtdbRef(rtdb, `users_directory/${safeUid}`);
+    await rtdbUpdate(dirRef, {
+      presenceOnline: state.online,
+      lastSeenAt: Date.now(),
+      presenceWarehouse: state.activeWarehouse || '',
+    });
+    if (state.online) {
+      void onDisconnect(dirRef)
+        .update({ presenceOnline: false, lastSeenAt: Date.now() })
+        .catch(() => undefined);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function syncNotificationPrefsToFirestore(
   prefs: NotificationPrefs,
   _preferCreate = false
@@ -1014,13 +1150,20 @@ export async function fetchUserFirestoreData(
       ? query(collection(db, colName))
       : query(collection(db, colName), where('ownerId', '==', uid));
 
+  type SkippedLegacySnapshot = {
+    docs: Array<{ id: string; data: () => any }>;
+  };
+  const skippedFirestoreQuery = (): Promise<SkippedLegacySnapshot> =>
+    Promise.reject(new Error('rtdb_primary'));
+
   const [prodRes, salesRes, impRes, custRes, custPrivRes, backupRes, prefsRes] =
     await Promise.allSettled([
-      getDocs(buildScopedQuery('products')),
-      getDocs(buildScopedQuery('sales')),
-      getDocs(buildScopedQuery('imports')),
-      getDocs(buildScopedQuery('customers')),
-      getDocs(buildScopedQuery('customers_private')),
+      // Business data now lives ONLY in Realtime Database — skip legacy Firestore business collections.
+      skippedFirestoreQuery(),
+      skippedFirestoreQuery(),
+      skippedFirestoreQuery(),
+      skippedFirestoreQuery(),
+      skippedFirestoreQuery(),
       getDocs(buildScopedQuery('backups')),
       getDoc(doc(db, 'notification_prefs', uid)),
     ]);

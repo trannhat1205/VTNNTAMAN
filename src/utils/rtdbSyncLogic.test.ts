@@ -3,14 +3,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  aggregateAdminWorkspacesFromRtdb,
+  applyDataWipeEpochToPayload,
   buildFullKeyedWorkspace,
   buildRecoveredVtnnTamAn99Workspace,
   buildStorageWorkspacePaths,
   buildWorkspaceDiffUpdates,
   countWorkspaceBusinessRecords,
   filterOutDeletedRecords,
+  filterRecordsCreatedAfterWipe,
   isDestructiveEmptyWorkspaceOverwrite,
   isLegacyArrayWorkspaceLayout,
+  maxIsoTimestamp,
   mergeDeletionTombstones,
   mergeDirectoryIntoStaffList,
   mergeWorkspacePayloads,
@@ -919,4 +923,80 @@ test('Phase 1 — Shared single-warehouse canonical routing, atomic stock/cost m
   assert.ok(
     parsedRules.rules.users_directory.$uid.assignedOwnerUids.$targetOwnerUid['.validate']
   );
+});
+
+test('Wipe epoch: dataWipedAt discards pre-wipe business records in filter, normalize, merge and admin aggregate', () => {
+  const wipe = '2026-11-27T10:00:00.000Z';
+  const recs = [
+    { id: 'a', createdAt: '2026-11-27T09:59:59.000Z' },
+    { id: 'b', createdAt: wipe },
+    { id: 'c', createdAt: '2026-11-27T10:00:01.000Z' },
+    { id: 'd', createdAt: '2026-11-28' },
+    { id: 'e', createdAt: '2026-11-27' },
+  ];
+  assert.deepEqual(
+    filterRecordsCreatedAfterWipe(recs, wipe).map((r) => r.id),
+    ['c', 'd']
+  );
+  assert.equal(filterRecordsCreatedAfterWipe(recs, '').length, 5);
+  assert.equal(maxIsoTimestamp('2026-01-01', '', '2026-03-01', undefined), '2026-03-01');
+
+  const oldSale = { id: 'sale_old', createdAt: '2026-11-26T01:00:00.000Z' };
+  const newSale = { id: 'sale_new', createdAt: '2026-11-27T11:00:00.000Z' };
+
+  // normalize: epoch stored in settings filters the bucket's own records
+  const normalized = normalizeWorkspaceFromRtdb(
+    {
+      meta: { ownerUid: 'u1' },
+      sales: { sale_old: oldSale, sale_new: newSale },
+      settings: { dataWipedAt: wipe },
+    },
+    'u1'
+  );
+  assert.deepEqual(
+    normalized.sales.map((s) => s.id),
+    ['sale_new']
+  );
+  assert.equal(normalized.settings.dataWipedAt, wipe);
+
+  // admin aggregate: one bucket carries the epoch, stale records of ANOTHER bucket are dropped too
+  const agg = aggregateAdminWorkspacesFromRtdb(
+    {
+      u1: { meta: { ownerUid: 'u1' }, sales: { sale_new: newSale }, settings: { dataWipedAt: wipe } },
+      u2: {
+        meta: { ownerUid: 'u2' },
+        sales: { sale_old: { ...oldSale, id: 'sale_old_u2' } },
+      },
+    },
+    {}
+  );
+  assert.deepEqual(
+    agg.sales.map((s) => s.id),
+    ['sale_new']
+  );
+  assert.equal(agg.dataWipedAt, wipe);
+
+  // merge: stale cached snapshot cannot resurrect old records and the max epoch wins
+  const base = makeBasePayload();
+  const live: RtdbWorkspacePayload = {
+    ...base,
+    meta: { ...base.meta, updatedAt: '2026-11-27T11:30:00.000Z' },
+    sales: [newSale as unknown as SaleTransaction],
+    settings: { ...base.settings, dataWipedAt: wipe },
+  };
+  const stale: RtdbWorkspacePayload = {
+    ...base,
+    meta: { ...base.meta, updatedAt: '2026-11-26T01:00:00.000Z' },
+    sales: [oldSale as unknown as SaleTransaction],
+  };
+  const merged = mergeWorkspacePayloads(live, stale, 'uid_kho_1', { preferFirstAsLiveRtdb: true });
+  assert.ok(merged);
+  assert.deepEqual(
+    merged.sales.map((s) => s.id),
+    ['sale_new']
+  );
+  assert.equal(merged.settings.dataWipedAt, wipe);
+
+  const stripped = applyDataWipeEpochToPayload({ ...stale, sales: [oldSale as unknown as SaleTransaction] }, wipe);
+  assert.equal(stripped.sales.length, 0);
 });

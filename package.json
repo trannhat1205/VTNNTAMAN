@@ -10,7 +10,7 @@
     "start": "node server.js",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/utils/businessLogic.test.ts src/utils/rtdbSyncLogic.test.ts src/utils/smartPosFeatures.test.ts firestore.rules.test.ts serverAuth.test.ts",
+    "test": "tsx --test src/utils/businessLogic.test.ts src/utils/rtdbSyncLogic.test.ts src/utils/smartPosFeatures.test.ts src/utils/dataHealth.test.ts firestore.rules.test.ts serverAuth.test.ts",
     "verify": "npm run lint && npm test && npm run build"
   },
   "engines": {
@@ -46,3 +46,4 @@
     "vite": "^8.3.0"
   }
 }
+

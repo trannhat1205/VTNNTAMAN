@@ -58,6 +58,8 @@ export interface RtdbWorkspaceSettings {
   bankQrConfig?: VietQrBankConfig;
   productNoteTemplates?: ProductNoteTemplate[];
   deletedRecords?: DeletedRecordTombstone[];
+  /** ISO timestamp of the last "Xóa dữ liệu kinh doanh" — business records created before/at this instant are discarded everywhere. */
+  dataWipedAt?: string;
   autoDailyBackupEnabled: boolean;
 }
 
@@ -392,7 +394,7 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
       ? (rawSettings.notificationPrefs as Partial<NotificationPrefs>)
       : {};
 
-  return {
+  const normalizedPayload: RtdbWorkspacePayload = {
     meta: {
       ownerUid: String(rawMeta.ownerUid || ownerUid),
       ownerEmail: String(rawMeta.ownerEmail || ''),
@@ -454,11 +456,65 @@ export function normalizeWorkspaceFromRtdb(raw: unknown, ownerUid: string): Rtdb
             deletedRecords: ensureArrayFromRtdb<DeletedRecordTombstone>(rawSettings.deletedRecords),
           }
         : {}),
+      ...(typeof rawSettings.dataWipedAt === 'string' && rawSettings.dataWipedAt.trim()
+        ? { dataWipedAt: rawSettings.dataWipedAt.trim() }
+        : {}),
       autoDailyBackupEnabled:
         typeof rawSettings.autoDailyBackupEnabled === 'boolean'
           ? rawSettings.autoDailyBackupEnabled
           : true,
     },
+  };
+  return applyDataWipeEpochToPayload(normalizedPayload);
+}
+
+/**
+ * Keeps only records created AFTER the last business-data wipe epoch (`settings.dataWipedAt`).
+ * Date-only `createdAt` values (YYYY-MM-DD) are kept only when strictly later than the wipe day.
+ */
+export function filterRecordsCreatedAfterWipe<T extends { createdAt?: string }>(
+  records: T[],
+  wipedAt?: string | null
+): T[] {
+  if (!wipedAt || !Array.isArray(records) || records.length === 0) return records;
+  const wipeDay = wipedAt.slice(0, 10);
+  return records.filter((rec) => {
+    const created = (rec?.createdAt || '').trim();
+    if (!created) return false;
+    if (created.length <= 10) return created > wipeDay;
+    return created > wipedAt;
+  });
+}
+
+export function maxIsoTimestamp(...values: Array<string | undefined | null>): string {
+  let best = '';
+  for (const v of values) {
+    if (v && v > best) best = v;
+  }
+  return best;
+}
+
+/**
+ * Applies the wipe epoch to the 9 business collections of a payload (auditLogs & backups are NOT touched).
+ */
+export function applyDataWipeEpochToPayload(
+  payload: RtdbWorkspacePayload,
+  wipedAtOverride?: string | null
+): RtdbWorkspacePayload {
+  const wipedAt = maxIsoTimestamp(payload.settings?.dataWipedAt, wipedAtOverride);
+  if (!wipedAt) return payload;
+  return {
+    ...payload,
+    products: filterRecordsCreatedAfterWipe(payload.products, wipedAt),
+    customers: filterRecordsCreatedAfterWipe(payload.customers, wipedAt),
+    suppliers: filterRecordsCreatedAfterWipe(payload.suppliers, wipedAt),
+    sales: filterRecordsCreatedAfterWipe(payload.sales, wipedAt),
+    imports: filterRecordsCreatedAfterWipe(payload.imports, wipedAt),
+    receiptVouchers: filterRecordsCreatedAfterWipe(payload.receiptVouchers, wipedAt),
+    paymentVouchers: filterRecordsCreatedAfterWipe(payload.paymentVouchers, wipedAt),
+    savedVouchers: filterRecordsCreatedAfterWipe(payload.savedVouchers, wipedAt),
+    stockAdjustments: filterRecordsCreatedAfterWipe(payload.stockAdjustments || [], wipedAt),
+    settings: { ...payload.settings, dataWipedAt: wipedAt },
   };
 }
 
@@ -657,6 +713,7 @@ export function aggregateAdminWorkspacesFromRtdb(
   receiptGroups: string[];
   paymentGroups: string[];
   deletedRecords: DeletedRecordTombstone[];
+  dataWipedAt: string;
   adminSummaries: AdminWarehouseAccountSummary[];
   normalizedWorkspaces: Record<string, RtdbWorkspacePayload>;
 } {
@@ -774,26 +831,39 @@ export function aggregateAdminWorkspacesFromRtdb(
   );
 
   const mergedDeletedRecords = mergeDeletionTombstones(...allDeletedRecordLists);
+  const maxWipedAt = maxIsoTimestamp(
+    ...Object.values(normalizedWorkspaces).map((w) => w.settings?.dataWipedAt)
+  );
+  const afterWipe = <T extends { createdAt?: string }>(list: T[]): T[] =>
+    filterRecordsCreatedAfterWipe(list, maxWipedAt);
 
   return {
-    products: filterOutDeletedRecords(dedupeRecordsById(allProducts), mergedDeletedRecords),
-    customers: filterOutDeletedRecords(dedupeRecordsById(allCustomers), mergedDeletedRecords),
-    suppliers: filterOutDeletedRecords(dedupeRecordsById(allSuppliers), mergedDeletedRecords),
-    sales: filterOutDeletedRecords(dedupeRecordsById(allSales), mergedDeletedRecords),
-    imports: filterOutDeletedRecords(dedupeRecordsById(allImports), mergedDeletedRecords),
-    receiptVouchers: filterOutDeletedRecords(
-      dedupeRecordsById(allReceiptVouchers),
-      mergedDeletedRecords
+    products: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allProducts), mergedDeletedRecords)
     ),
-    paymentVouchers: filterOutDeletedRecords(
-      dedupeRecordsById(allPaymentVouchers),
-      mergedDeletedRecords
+    customers: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allCustomers), mergedDeletedRecords)
     ),
-    savedVouchers: filterOutDeletedRecords(dedupeRecordsById(allSavedVouchers), mergedDeletedRecords),
-    stockAdjustments: filterOutDeletedRecords(
-      dedupeRecordsById(allStockAdjustments),
-      mergedDeletedRecords
+    suppliers: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allSuppliers), mergedDeletedRecords)
     ),
+    sales: afterWipe(filterOutDeletedRecords(dedupeRecordsById(allSales), mergedDeletedRecords)),
+    imports: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allImports), mergedDeletedRecords)
+    ),
+    receiptVouchers: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allReceiptVouchers), mergedDeletedRecords)
+    ),
+    paymentVouchers: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allPaymentVouchers), mergedDeletedRecords)
+    ),
+    savedVouchers: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allSavedVouchers), mergedDeletedRecords)
+    ),
+    stockAdjustments: afterWipe(
+      filterOutDeletedRecords(dedupeRecordsById(allStockAdjustments), mergedDeletedRecords)
+    ),
+    dataWipedAt: maxWipedAt,
     auditLogs: sortedAuditLogs,
     backups: dedupeRecordsById(allBackups),
     warehouses: dedupeWarehouseNames(Array.from(warehouseSet)),
@@ -1377,22 +1447,30 @@ export function mergeWorkspacePayloads(
     (firstIsAuthoritative || secondIsAuthoritative) &&
     (countWorkspaceBusinessRecords(primary) > 0 || mergedTombstones.length > 0);
 
+  const mergedWipedAt = maxIsoTimestamp(first.settings?.dataWipedAt, second.settings?.dataWipedAt);
+
   const mergeCol = <T extends { id: string; updatedAt?: string; createdAt?: string }>(
     primList: T[] | undefined,
     secList: T[] | undefined
   ): T[] => {
     if (useStrictPrimaryRecords) {
-      return attachOwnerId(
-        filterOutDeletedRecords(dedupeRecordsById(primList || []), mergedTombstones),
-        ownerUid
+      return filterRecordsCreatedAfterWipe(
+        attachOwnerId(
+          filterOutDeletedRecords(dedupeRecordsById(primList || []), mergedTombstones),
+          ownerUid
+        ),
+        mergedWipedAt
       );
     }
-    return attachOwnerId(
-      filterOutDeletedRecords(
-        dedupeRecordsById([...(secList || []), ...(primList || [])]),
-        mergedTombstones
+    return filterRecordsCreatedAfterWipe(
+      attachOwnerId(
+        filterOutDeletedRecords(
+          dedupeRecordsById([...(secList || []), ...(primList || [])]),
+          mergedTombstones
+        ),
+        ownerUid
       ),
-      ownerUid
+      mergedWipedAt
     );
   };
 
@@ -1477,6 +1555,7 @@ export function mergeWorkspacePayloads(
           }
         : {}),
       ...(mergedTombstones.length > 0 ? { deletedRecords: mergedTombstones } : {}),
+      ...(mergedWipedAt ? { dataWipedAt: mergedWipedAt } : {}),
       autoDailyBackupEnabled:
         primary.settings?.autoDailyBackupEnabled ??
         secondary.settings?.autoDailyBackupEnabled ??

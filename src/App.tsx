@@ -7,6 +7,7 @@ import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'rea
 import {
   ArrowDownCircle,
   ArrowUpCircle,
+  Activity,
   Bell,
   Boxes,
   CloudCheck,
@@ -113,7 +114,6 @@ import {
   evaluateStaffAccessScope,
   evaluateStockAlert,
   executeFiscalYearCloseAndCleanup,
-  executeFullApplicationDataWipe,
   extractCustomWarehouseSuffix,
   extractMaxVoucherSequence,
   buildVoucherCounterMeta,
@@ -166,6 +166,8 @@ import {
   isCurrentUserAdmin,
   isRealtimeWorkspaceLegacyLayout,
   logoutUser,
+  purgeFirestoreBusinessCollections,
+  purgeRealtimeBusinessDataForWorkspaces,
   reserveNextRealtimeVoucherCode,
   resendVerificationEmail,
   seedExistingStaffToChatDirectoryIfAdmin,
@@ -202,7 +204,9 @@ import {
   countWorkspaceBusinessRecords,
   dedupeRecordsById,
   filterOutDeletedRecords,
+  filterRecordsCreatedAfterWipe,
   isDestructiveEmptyWorkspaceOverwrite,
+  maxIsoTimestamp,
   mergeDeletionTombstones,
   mergeDirectoryIntoStaffList,
   mergeWorkspacePayloads,
@@ -227,6 +231,14 @@ import { MultiWarehouseFilterPopover } from './components/MultiWarehouseFilterPo
 import { InitialLoginScreenPortal } from './components/InitialLoginScreenPortal';
 import { InstallPwaModal } from './components/InstallPwaModal';
 import { GlobalQuickSearchModal } from './components/GlobalQuickSearchModal';
+import { CloudSyncStatusPanel } from './components/CloudSyncStatusPanel';
+import { DataHealthCenter } from './components/DataHealthCenter';
+import {
+  computeDataHealthReport,
+  DataHealthFixAction,
+  DataHealthItem,
+  findDuplicateSkuProductsToRename,
+} from './utils/dataHealth';
 
 const CustomerModule = lazy(() =>
   import('./components/CustomerModule').then((m) => ({ default: m.CustomerModule }))
@@ -398,6 +410,27 @@ export default function App() {
   const [deletedRecords, setDeletedRecords] = useState<DeletedRecordTombstone[]>(
     () => initialWorkspace.deletedRecords || []
   );
+  const [dataWipedAt, setDataWipedAt] = useState<string>(() => initialWorkspace.dataWipedAt || '');
+  const [lastCloudWriteAt, setLastCloudWriteAt] = useState<string | null>(null);
+
+  // Wipe epoch: discard any business record created at/before the last "Xóa dữ liệu kinh doanh"
+  useEffect(() => {
+    if (!dataWipedAt) return;
+    const strip = <T extends { createdAt?: string }>(list: T[]): T[] => {
+      const next = filterRecordsCreatedAfterWipe(list, dataWipedAt);
+      return next.length === list.length ? list : next;
+    };
+    productsRef.current = strip(productsRef.current);
+    setProducts((prev) => strip(prev));
+    setCustomers((prev) => strip(prev));
+    setSuppliers((prev) => strip(prev));
+    setSales((prev) => strip(prev));
+    setImports((prev) => strip(prev));
+    setReceiptVouchers((prev) => strip(prev));
+    setPaymentVouchers((prev) => strip(prev));
+    setSavedVouchers((prev) => strip(prev));
+    setStockAdjustments((prev) => strip(prev));
+  }, [dataWipedAt]);
   const markRecordsDeleted = (ids: string | string[], nowIso = new Date().toISOString()) => {
     const idArr = Array.isArray(ids) ? ids : [ids];
     const tombstones: DeletedRecordTombstone[] = idArr
@@ -502,6 +535,7 @@ export default function App() {
       bankQrConfig,
       productNoteTemplates,
       deletedRecords,
+      ...(dataWipedAt ? { dataWipedAt } : {}),
       autoDailyBackupEnabled,
     });
   }, [
@@ -526,6 +560,7 @@ export default function App() {
     bankQrConfig,
     productNoteTemplates,
     deletedRecords,
+    dataWipedAt,
     autoDailyBackupEnabled,
   ]);
 
@@ -561,6 +596,9 @@ export default function App() {
         }
         if (parsed.deletedRecords) {
           setDeletedRecords(parsed.deletedRecords);
+        }
+        if (parsed.dataWipedAt) {
+          setDataWipedAt((prev) => maxIsoTimestamp(prev, parsed.dataWipedAt));
         }
       } catch {
         // ignore invalid storage payload
@@ -709,6 +747,60 @@ export default function App() {
         selectedFilterWarehouses
       ),
     [stockAdjustments, currentStaff, warehouses, selectedFilterWarehouses]
+  );
+
+  const [isCloudSyncPanelOpen, setIsCloudSyncPanelOpen] = useState<boolean>(false);
+
+  const syncLocalCounts: Record<string, number> = {
+    products: visibleProducts.length,
+    customers: visibleCustomers.length,
+    suppliers: visibleSuppliers.length,
+    sales: visibleSales.length,
+    imports: visibleImports.length,
+    receiptVouchers: visibleReceiptVouchers.length,
+    paymentVouchers: visiblePaymentVouchers.length,
+    stockAdjustments: visibleStockAdjustments.length,
+    savedVouchers: visibleSavedVouchers.length,
+  };
+
+  const canSeeDataHealth = canViewAuditHistory(currentStaff) || canAccountCreateStaff(currentStaff);
+  const dataHealthReport = useMemo(
+    () =>
+      canSeeDataHealth
+        ? computeDataHealthReport({
+            products: visibleProducts,
+            customers: visibleCustomers,
+            sales: visibleSales,
+            imports: visibleImports,
+            receiptVouchers: visibleReceiptVouchers,
+            paymentVouchers: visiblePaymentVouchers,
+            stockAdjustments: visibleStockAdjustments,
+            warehouses,
+            staffList,
+          })
+        : computeDataHealthReport({
+            products: [],
+            customers: [],
+            sales: [],
+            imports: [],
+            receiptVouchers: [],
+            paymentVouchers: [],
+            stockAdjustments: [],
+            warehouses: [],
+            staffList: [],
+          }),
+    [
+      canSeeDataHealth,
+      visibleProducts,
+      visibleCustomers,
+      visibleSales,
+      visibleImports,
+      visibleReceiptVouchers,
+      visiblePaymentVouchers,
+      visibleStockAdjustments,
+      warehouses,
+      staffList,
+    ]
   );
 
   const isAdminAccount = useMemo(
@@ -993,34 +1085,9 @@ export default function App() {
         try {
           const isRemoteAdmin = isCurrentUserAdmin(user);
           const remote = await fetchUserFirestoreData(user.uid, isRemoteAdmin);
-          // Only pull legacy Firestore docs if RTDB has NOT already hydrated authoritative cloud state,
-          // and ALWAYS filter out deleted record tombstones so deleted items can NEVER resurrect!
+          // Business data (products/customers/sales/imports) lives ONLY in Realtime Database now.
+          // Firestore is only consulted for backups metadata and notification preferences.
           if (remote && !rtdbHydratedKeyRef.current) {
-            const curTombstones = latestWorkspaceRef.current.deletedRecords;
-            if (remote.products.length > 0) {
-              const safeProds = filterOutDeletedRecords(remote.products, curTombstones);
-              if (safeProds.length > 0) {
-                setProducts((prev) => mergeRecordsById(prev, safeProds));
-              }
-            }
-            if (remote.customers.length > 0) {
-              const safeCusts = filterOutDeletedRecords(remote.customers, curTombstones);
-              if (safeCusts.length > 0) {
-                setCustomers((prev) => mergeRecordsById(prev, safeCusts));
-              }
-            }
-            if (remote.sales.length > 0) {
-              const safeSales = filterOutDeletedRecords(remote.sales, curTombstones);
-              if (safeSales.length > 0) {
-                setSales((prev) => mergeRecordsById(prev, safeSales));
-              }
-            }
-            if (remote.imports.length > 0) {
-              const safeImps = filterOutDeletedRecords(remote.imports, curTombstones);
-              if (safeImps.length > 0) {
-                setImports((prev) => mergeRecordsById(prev, safeImps));
-              }
-            }
             if (remote.backups.length > 0) {
               setBackups((prev) => {
                 const map = new Map<string, BackupEntry>();
@@ -1182,6 +1249,7 @@ export default function App() {
     bankQrConfig,
     productNoteTemplates,
     deletedRecords,
+    dataWipedAt,
     autoDailyBackupEnabled,
   });
   latestWorkspaceRef.current = {
@@ -1206,6 +1274,7 @@ export default function App() {
     bankQrConfig,
     productNoteTemplates,
     deletedRecords,
+    dataWipedAt,
     autoDailyBackupEnabled,
   };
 
@@ -1589,6 +1658,7 @@ export default function App() {
 
           const cur = latestWorkspaceRef.current;
           const mergedTombstones = mergeDeletionTombstones(cur.deletedRecords, agg.deletedRecords);
+          const nextWipedAt = maxIsoTimestamp(cur.dataWipedAt, agg.dataWipedAt);
 
           // Cloud RTDB + Storage is authoritative for deletions — NEVER union stale localStorage deleted records back!
           const nextProds = filterOutDeletedRecords(agg.products, mergedTombstones);
@@ -1646,6 +1716,7 @@ export default function App() {
               ...(cur.bankQrConfig ? { bankQrConfig: cur.bankQrConfig } : {}),
               productNoteTemplates: cur.productNoteTemplates,
               ...(mergedTombstones.length > 0 ? { deletedRecords: mergedTombstones } : {}),
+              ...(nextWipedAt ? { dataWipedAt: nextWipedAt } : {}),
               autoDailyBackupEnabled: cur.autoDailyBackupEnabled,
             },
             staffList: mergedStaffSnapshot,
@@ -1675,6 +1746,9 @@ export default function App() {
           setDeletedRecords((prev) =>
             JSON.stringify(prev) === JSON.stringify(mergedTombstones) ? prev : mergedTombstones
           );
+          if (nextWipedAt) {
+            setDataWipedAt((prev) => maxIsoTimestamp(prev, nextWipedAt));
+          }
           setWarehouses((prev) =>
             JSON.stringify(prev) === JSON.stringify(nextWhs) ? prev : nextWhs
           );
@@ -1935,6 +2009,10 @@ export default function App() {
       setDeletedRecords((prev) =>
         JSON.stringify(prev) === JSON.stringify(mergedTombstones) ? prev : mergedTombstones
       );
+      if (unifiedWs.settings.dataWipedAt) {
+        const wipedFromCloud = unifiedWs.settings.dataWipedAt;
+        setDataWipedAt((prev) => maxIsoTimestamp(prev, wipedFromCloud));
+      }
       setWarehouses((prev) => {
         const next = Array.from(
           new Set([
@@ -2088,6 +2166,7 @@ export default function App() {
         ...(bankQrConfig ? { bankQrConfig } : {}),
         productNoteTemplates,
         ...(deletedRecords.length > 0 ? { deletedRecords } : {}),
+        ...(dataWipedAt ? { dataWipedAt } : {}),
         autoDailyBackupEnabled,
       };
 
@@ -2145,6 +2224,7 @@ export default function App() {
             }).then((ok) => {
               if (ok) {
                 rtdbLastPayloadRef.current[bucketUid] = stampedPayload;
+                setLastCloudWriteAt(new Date().toISOString());
               }
             });
           }
@@ -2186,6 +2266,7 @@ export default function App() {
           }).then((ok) => {
             if (ok) {
               rtdbLastPayloadRef.current[activeUid] = payload;
+              setLastCloudWriteAt(new Date().toISOString());
             }
           });
         }
@@ -2224,6 +2305,7 @@ export default function App() {
     bankQrConfig,
     productNoteTemplates,
     deletedRecords,
+    dataWipedAt,
     autoDailyBackupEnabled,
     rtdbWriteTrigger,
   ]);
@@ -7701,7 +7783,9 @@ export default function App() {
     );
   };
 
-  const handleExecuteFullApplicationDataWipe = (autoDownloadBackup: boolean) => {
+  const handleExecuteFullApplicationDataWipe = async (
+    autoDownloadBackup: boolean
+  ): Promise<void> => {
     if (!canViewAuditHistory(currentStaff) && !accessScope.canAccessBackupHistory) {
       showToast('Tài khoản của bạn không có quyền xóa dữ liệu.');
       return;
@@ -7781,31 +7865,83 @@ export default function App() {
       ...savedVouchers.map((x) => x.id),
       ...stockAdjustments.map((x) => x.id),
     ];
-    markRecordsDeleted(allWipedIds, nowWipeIso);
-    const wiped = executeFullApplicationDataWipe({ staffList });
-    setProducts(wiped.products);
-    setCustomers(wiped.customers);
-    setSuppliers(wiped.suppliers);
-    setSales(wiped.sales);
-    setImports(wiped.imports);
-    setReceiptVouchers(wiped.receiptVouchers);
-    setPaymentVouchers(wiped.paymentVouchers);
-    setSavedVouchers(wiped.savedVouchers);
-    setStockAdjustments([]);
-    setStaffList(wiped.preservedStaffList);
+    const wipedAtIso = new Date().toISOString();
+    const actorUid = auth.currentUser?.uid || currentStaff.uid;
+    showToast('Đang xóa dữ liệu kinh doanh trên toàn hệ thống (Realtime DB & Firestore cũ)...');
 
-    recordAuditLog({
-      actionCategory: 'delete',
-      targetEntity: 'backup',
-      targetCode: 'XOA_TOAN_BO_DU_LIEU',
-      warehouseName: 'Tất cả kho',
-      summary: `Quản lý chính (${ADMIN_BACKUP_EMAIL}) đã xóa làm sạch toàn bộ dữ liệu ứng dụng (Đã lưu bản sao lưu ${backupFileName} trước khi xóa)`,
-      details: `Đã xóa toàn bộ dữ liệu vật tư, khách hàng, nhà cung cấp, hóa đơn xuất/nhập và phiếu thu/chi. Có thể khôi phục nguyên trạng từ tệp ${backupFileName}.`,
-    });
+    try {
+      // 1. Wipe local state immediately. Staff accounts, warehouses, note templates, VietQR, audit logs & backups are KEPT.
+      markRecordsDeleted(allWipedIds, nowWipeIso);
+      setDataWipedAt((prev) => maxIsoTimestamp(prev, wipedAtIso));
+      productsRef.current = [];
+      setProducts([]);
+      setCustomers([]);
+      setSuppliers([]);
+      setSales([]);
+      setImports([]);
+      setReceiptVouchers([]);
+      setPaymentVouchers([]);
+      setSavedVouchers([]);
+      setStockAdjustments([]);
 
-    showToast(
-      `Đã xóa làm sạch toàn bộ dữ liệu ứng dụng! Bản sao lưu trước khi xóa (${backupFileName}) đã được lưu trong danh sách Sao lưu.`
-    );
+      // 2. Purge every workspace in Firebase Realtime Database + legacy Firestore business collections
+      let rtdbOkCount = 0;
+      let rtdbFailCount = 0;
+      let fsDeleted = 0;
+      let fsFailed = 0;
+      if (isGoogleAuthenticated && auth.currentUser) {
+        const candidateUids = new Set<string>(
+          [
+            ...(isCurrentUserAdmin(auth.currentUser) ? [PRIMARY_ADMIN_UID] : []),
+            ...Array.from(rtdbKnownOwnerUidsRef.current),
+            ...Object.keys(rtdbLastPayloadRef.current),
+            ...staffList.map((s) => s.uid).filter((u) => Boolean(u) && !u.startsWith('staff_')),
+          ].filter(Boolean)
+        );
+        let existingUids: string[];
+        if (isCurrentUserAdmin(auth.currentUser)) {
+          const allMap = await readRealtimeWorkspacesOnce('__ALL__');
+          existingUids = Array.from(new Set([...Object.keys(allMap), PRIMARY_ADMIN_UID]));
+        } else {
+          const ownMap = await readRealtimeWorkspacesOnce(Array.from(candidateUids));
+          existingUids = Object.keys(ownMap);
+        }
+        const purge = await purgeRealtimeBusinessDataForWorkspaces(
+          existingUids,
+          wipedAtIso,
+          actorUid,
+          currentStaff.displayName || ''
+        );
+        rtdbOkCount = purge.ok.length;
+        rtdbFailCount = purge.failed.length;
+        const fsPurge = await purgeFirestoreBusinessCollections();
+        fsDeleted = fsPurge.deleted;
+        fsFailed = fsPurge.failed;
+      }
+
+      allowEmptyWorkspaceWriteRef.current = true;
+      forceStorageSyncRef.current = true;
+      setRtdbWriteTrigger((n) => n + 1);
+
+      recordAuditLog({
+        actionCategory: 'delete',
+        targetEntity: 'backup',
+        targetCode: 'XOA_DU_LIEU_KINH_DOANH',
+        warehouseName: 'Tất cả kho',
+        summary: `${currentStaff.displayName} (${currentStaff.email || ADMIN_BACKUP_EMAIL}) đã xóa toàn bộ dữ liệu kinh doanh để nhập lại từ đầu (Đã lưu bản sao lưu ${backupFileName} trước khi xóa)`,
+        details: `Realtime DB: ${rtdbOkCount} kho xóa thành công, ${rtdbFailCount} lỗi · Firestore cũ: ${fsDeleted} bản ghi đã xóa, ${fsFailed} lỗi. Giữ nguyên tài khoản nhân viên, phân quyền, danh sách kho, mẫu ghi chú, VietQR. Có thể khôi phục từ tệp ${backupFileName}.`,
+      });
+
+      showToast(
+        rtdbFailCount > 0 || fsFailed > 0
+          ? `Đã xóa dữ liệu kinh doanh (${rtdbOkCount} kho Realtime DB, ${fsDeleted} bản ghi Firestore) nhưng còn ${rtdbFailCount + fsFailed} mục lỗi quyền. Vui lòng thử lại bằng tài khoản Quản lý chính.`
+          : `Đã xóa toàn bộ dữ liệu kinh doanh trên ${rtdbOkCount} kho (Realtime DB) & ${fsDeleted} bản ghi Firestore cũ. Tài khoản nhân viên, danh sách kho, mẫu ghi chú và VietQR được giữ nguyên. Hãy tải lại ứng dụng trên các máy khác.`
+      );
+    } catch (err) {
+      showToast(
+        `Không thể hoàn tất xóa dữ liệu: ${err instanceof Error ? err.message : 'Lỗi không xác định'}`
+      );
+    }
   };
 
   const handleGoogleLogin = async (
@@ -7886,6 +8022,7 @@ export default function App() {
         ...(cur.bankQrConfig ? { bankQrConfig: cur.bankQrConfig } : {}),
         productNoteTemplates: cur.productNoteTemplates,
         ...(cur.deletedRecords.length > 0 ? { deletedRecords: cur.deletedRecords } : {}),
+        ...(cur.dataWipedAt ? { dataWipedAt: cur.dataWipedAt } : {}),
         autoDailyBackupEnabled: cur.autoDailyBackupEnabled,
       };
 
@@ -7991,10 +8128,16 @@ export default function App() {
         let workingBks = cur.backups;
         let workingWhs = cur.warehouses;
         let workingTombstones = cur.deletedRecords;
+        let workingWipedAt = cur.dataWipedAt;
 
         if (Object.keys(combinedMap).length > 0) {
           const agg = aggregateAdminWorkspacesFromRtdb(combinedMap, rtdbUsersDirMapRef.current);
           workingTombstones = mergeDeletionTombstones(cur.deletedRecords, agg.deletedRecords);
+          workingWipedAt = maxIsoTimestamp(cur.dataWipedAt, agg.dataWipedAt);
+          if (workingWipedAt) {
+            const wipedForState = workingWipedAt;
+            setDataWipedAt((prev) => maxIsoTimestamp(prev, wipedForState));
+          }
           workingProducts = filterOutDeletedRecords(agg.products, workingTombstones);
           workingSales = filterOutDeletedRecords(agg.sales, workingTombstones);
           const rawWorkingCusts = filterOutDeletedRecords(agg.customers, workingTombstones);
@@ -8075,6 +8218,7 @@ export default function App() {
             ...settingsObj,
             warehouses: workingWhs,
             ...(workingTombstones.length > 0 ? { deletedRecords: workingTombstones } : {}),
+            ...(workingWipedAt ? { dataWipedAt: workingWipedAt } : {}),
           },
           staffList: cur.staffList,
           knownOwnerUids: Array.from(rtdbKnownOwnerUidsRef.current),
@@ -8111,6 +8255,7 @@ export default function App() {
             );
             if (ok) {
               rtdbLastPayloadRef.current[bucketUid] = stampedBucket;
+              setLastCloudWriteAt(new Date().toISOString());
               rtdbLastFingerprintsRef.current[bucketUid] = computeWorkspaceFingerprint(stampedBucket);
             }
           })
@@ -8184,6 +8329,10 @@ export default function App() {
           if (finalPayload.settings?.deletedRecords?.length) {
             setDeletedRecords(finalPayload.settings.deletedRecords);
           }
+          if (finalPayload.settings?.dataWipedAt) {
+            const wipedFromFinal = finalPayload.settings.dataWipedAt;
+            setDataWipedAt((prev) => maxIsoTimestamp(prev, wipedFromFinal));
+          }
           finalVisibleProducts = finalPayload.products;
           finalVisibleSales = finalPayload.sales;
           finalVisibleCustomers = finalPayload.customers;
@@ -8203,6 +8352,7 @@ export default function App() {
         );
         if (ok) {
           rtdbLastPayloadRef.current[activeUid] = finalPayload;
+          setLastCloudWriteAt(new Date().toISOString());
           rtdbLastFingerprintsRef.current[activeUid] = computeWorkspaceFingerprint(finalPayload);
         }
       }
@@ -8212,6 +8362,104 @@ export default function App() {
       );
     } finally {
       setIsManualCloudSyncing(false);
+    }
+  };
+
+  const handleVerifyWithCloud = async (): Promise<Record<string, number>> => {
+    const fbUser = auth.currentUser;
+    if (!fbUser) return {};
+    const isPrimary = isCurrentUserAdmin(fbUser);
+    const isDesignatedMultiWh = !isPrimary && Boolean(designatedMultiWhOwnerUidsKey);
+    const isDesignatedAllWh = isDesignatedMultiWh && designatedMultiWhOwnerUidsKey === '__ALL__';
+    let map: Record<string, unknown> = {};
+    if (isPrimary) {
+      map = await readRealtimeWorkspacesOnce('__ALL__');
+    } else if (isDesignatedAllWh) {
+      map = await readRealtimeWorkspacesOnce('__ALL__', true);
+    } else if (isDesignatedMultiWh) {
+      const uidList = designatedMultiWhOwnerUidsKey.split('::')[0].split(',').filter(Boolean);
+      map = await readRealtimeWorkspacesOnce(uidList);
+    } else {
+      map = await readRealtimeWorkspacesOnce(
+        [fbUser.uid, currentStaff.canonicalOwnerUid || ''].filter(Boolean)
+      );
+    }
+    const agg = aggregateAdminWorkspacesFromRtdb(map, rtdbUsersDirMapRef.current);
+    const tombstones = mergeDeletionTombstones(
+      latestWorkspaceRef.current.deletedRecords,
+      agg.deletedRecords
+    );
+    const scope = <T extends { id: string; warehouseName?: string; ownerId?: string }>(
+      list: T[]
+    ): number =>
+      filterRecordsBySelectedWarehouses(
+        filterOutDeletedRecords(list as Array<T & { createdAt?: string }>, tombstones),
+        currentStaff,
+        warehouses,
+        selectedFilterWarehouses
+      ).length;
+    return {
+      products: scope(agg.products),
+      customers: scope(agg.customers),
+      suppliers: scope(agg.suppliers as Array<{ id: string; warehouseName?: string; ownerId?: string }>),
+      sales: scope(agg.sales),
+      imports: scope(agg.imports),
+      receiptVouchers: scope(agg.receiptVouchers),
+      paymentVouchers: scope(agg.paymentVouchers),
+      stockAdjustments: scope(agg.stockAdjustments),
+      savedVouchers: scope(agg.savedVouchers),
+    };
+  };
+
+  const handleFixDataHealth = (action: DataHealthFixAction) => {
+    if (!canPerformRoleAction(role, 'edit_record')) {
+      showToast('Chỉ Quản lý mới có quyền sửa dữ liệu tự động.');
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    if (action === 'duplicateSkus') {
+      const toRename = findDuplicateSkuProductsToRename(productsRef.current);
+      if (toRename.length === 0) {
+        showToast('Không còn mã vật tư nào bị trùng.');
+        return;
+      }
+      let working = [...productsRef.current];
+      const renameMap = new Map<string, string>();
+      for (const p of toRename) {
+        const nextCode = generateNextUniqueProductCode(working, p.warehouseName, p.id);
+        renameMap.set(p.id, nextCode);
+        working = working.map((x) => (x.id === p.id ? { ...x, code: nextCode } : x));
+      }
+      const nextList = productsRef.current.map((p) =>
+        renameMap.has(p.id) ? { ...p, code: renameMap.get(p.id)!, updatedAt: nowIso } : p
+      );
+      productsRef.current = nextList;
+      setProducts(nextList);
+      recordAuditLog({
+        actionCategory: 'update',
+        targetEntity: 'product',
+        targetCode: 'SUA_MA_TRUNG',
+        warehouseName: 'Tất cả kho',
+        summary: `Tự động đánh lại mã cho ${renameMap.size} vật tư bị trùng mã`,
+        details: toRename
+          .map((p) => `${p.name}: ${p.code} → ${renameMap.get(p.id)}`)
+          .join(' · '),
+      });
+      showToast(`Đã đánh lại mã không trùng cho ${renameMap.size} vật tư.`);
+      return;
+    }
+    if (action === 'customerDebtMismatch') {
+      const allSales = latestWorkspaceRef.current.sales;
+      setCustomers((prev) => reconcileCustomersFromSales(prev, allSales, nowIso).customers);
+      showToast('Đã tính lại tổng mua và công nợ của khách hàng từ các hóa đơn thực tế.');
+      return;
+    }
+    if (action === 'stockDrift') {
+      const driftIds = dataHealthReport.byId.stockDrift.items
+        .map((i) => i.recordId)
+        .filter((id): id is string => Boolean(id));
+      driftIds.forEach((id) => handleReconcileProductStock(id));
+      showToast(`Đã đối soát tồn kho ${driftIds.length} vật tư theo sổ chứng từ.`);
     }
   };
 
@@ -8450,6 +8698,14 @@ export default function App() {
                       {urgentSupplierDebts.length}
                     </span>
                   )}
+                  {item.id === 'backup_history' && canSeeDataHealth && dataHealthReport.totalIssues > 0 && (
+                    <span
+                      title="Có điểm dữ liệu cần kiểm tra trong Trung tâm sức khỏe dữ liệu"
+                      className="px-1.5 py-0.5 rounded-full bg-rose-600 text-white text-[10px] font-bold"
+                    >
+                      {dataHealthReport.totalIssues}
+                    </span>
+                  )}
                   {item.id === 'backup_history' && canViewAuditHistory(currentStaff) && (
                     <span
                       className={`font-mono text-xs ${
@@ -8582,6 +8838,19 @@ export default function App() {
                       ? 'Đang kết nối...'
                       : 'Ngoại tuyến'}
                   </span>
+                </button>
+              )}
+
+              {/* Cloud Sync Status Panel Trigger */}
+              {isGoogleAuthenticated && (
+                <button
+                  type="button"
+                  onClick={() => setIsCloudSyncPanelOpen(true)}
+                  title="Trạng thái đồng bộ Cloud (Realtime Database)"
+                  aria-label="Trạng thái đồng bộ Cloud"
+                  className="hidden md:inline-flex items-center justify-center p-1.5 rounded-lg text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 shrink-0"
+                >
+                  <Activity className="w-3.5 h-3.5" />
                 </button>
               )}
 
@@ -8751,6 +9020,16 @@ export default function App() {
                   <span>Cài App</span>
                 </button>
               )}
+              {isGoogleAuthenticated && (
+                <button
+                  type="button"
+                  onClick={() => setIsCloudSyncPanelOpen(true)}
+                  aria-label="Trạng thái đồng bộ Cloud"
+                  className="p-1 text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg shrink-0"
+                >
+                  <Activity className="w-3.5 h-3.5" />
+                </button>
+              )}
             </div>
 
             <div className="min-w-0 flex items-center justify-end">
@@ -8850,7 +9129,7 @@ export default function App() {
         {cloudSyncStatus === 'unverified' && (
           <div className="mx-4 sm:mx-6 mt-3 px-4 py-2.5 bg-amber-50 border border-amber-300 text-amber-900 text-xs rounded-lg flex flex-wrap items-center justify-between gap-2">
             <span>
-              Dữ liệu đang được lưu an toàn tại máy. Vui lòng xác minh hộp thư Gmail để bật đồng bộ Cloud Firestore.
+              Dữ liệu bán hàng vẫn đồng bộ thời gian thực qua Firebase Realtime Database. Vui lòng xác minh hộp thư Gmail để dùng đầy đủ chat nội bộ &amp; sao lưu.
             </span>
             <button
               type="button"
@@ -9858,6 +10137,38 @@ export default function App() {
             />
           )}
 
+          {isSessionLoggedIn && activeTab === 'backup_history' && (
+            <div className="space-y-4">
+              <CloudSyncStatusPanel
+                variant="inline"
+                rtdbSyncState={rtdbSyncState}
+                isOnline={isOnline}
+                offlineQueueCount={offlineQueue.length}
+                lastPeerSyncLabel={lastRealtimePeerSyncLabel}
+                lastCloudWriteAt={lastCloudWriteAt}
+                dataWipedAt={dataWipedAt}
+                localCounts={syncLocalCounts}
+                onSyncNow={() => void handleManualCloudSync()}
+                onVerifyWithCloud={handleVerifyWithCloud}
+              />
+              {canSeeDataHealth && (
+                <DataHealthCenter
+                  report={dataHealthReport}
+                  onFix={handleFixDataHealth}
+                  onOpenItem={(item: DataHealthItem) => {
+                    if (!item.tab) return;
+                    handleNavigateCrossLink({
+                      tab: item.tab,
+                      recordId: item.recordId,
+                      voucherCode: item.code,
+                      label: item.label,
+                    });
+                  }}
+                />
+              )}
+            </div>
+          )}
+
           {isSessionLoggedIn && (activeTab === 'reports' || activeTab === 'backup_history') && (
             <ReportsAndBackupModule
               mode={activeTab === 'backup_history' ? 'backup_history' : 'reports'}
@@ -10014,6 +10325,22 @@ export default function App() {
           </nav>
         )}
       </div>
+
+      {/* Cloud Sync Status Panel (Realtime Database) */}
+      <CloudSyncStatusPanel
+        variant="modal"
+        isOpen={isCloudSyncPanelOpen && isSessionLoggedIn}
+        onClose={() => setIsCloudSyncPanelOpen(false)}
+        rtdbSyncState={rtdbSyncState}
+        isOnline={isOnline}
+        offlineQueueCount={offlineQueue.length}
+        lastPeerSyncLabel={lastRealtimePeerSyncLabel}
+        lastCloudWriteAt={lastCloudWriteAt}
+        dataWipedAt={dataWipedAt}
+        localCounts={syncLocalCounts}
+        onSyncNow={() => void handleManualCloudSync()}
+        onVerifyWithCloud={handleVerifyWithCloud}
+      />
 
       {/* Global Quick Search Modal (Ctrl+K) */}
       <GlobalQuickSearchModal

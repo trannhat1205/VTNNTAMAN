@@ -56,6 +56,8 @@ export interface WorkspacePersistedState {
   bankQrConfig?: VietQrBankConfig;
   productNoteTemplates?: ProductNoteTemplate[];
   deletedRecords?: DeletedRecordTombstone[];
+  /** Last "Xóa dữ liệu kinh doanh" epoch (ISO) — business records created before it are discarded. */
+  dataWipedAt?: string;
   autoDailyBackupEnabled: boolean;
 }
 
@@ -195,6 +197,9 @@ export function loadWorkspaceFromStorage(): WorkspacePersistedState {
         typeof parsed.autoDailyBackupEnabled === 'boolean'
           ? parsed.autoDailyBackupEnabled
           : true,
+      ...(typeof parsed.dataWipedAt === 'string' && parsed.dataWipedAt
+        ? { dataWipedAt: parsed.dataWipedAt }
+        : {}),
     };
   } catch {
     return defaults;

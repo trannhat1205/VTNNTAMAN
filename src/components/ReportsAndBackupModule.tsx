@@ -132,7 +132,7 @@ interface ReportsAndBackupModuleProps {
     fiscalYear: number,
     autoDownloadBackup: boolean
   ) => void;
-  onExecuteFullApplicationDataWipe?: (autoDownloadBackup: boolean) => void;
+  onExecuteFullApplicationDataWipe?: (autoDownloadBackup: boolean) => void | Promise<void>;
   onNavigateToModule?: (
     tab:
       | 'sales'
@@ -281,6 +281,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
   const [confirmFiscalCloseModalOpen, setConfirmFiscalCloseModalOpen] = useState<boolean>(false);
   const [autoBackupBeforeFullWipe, setAutoBackupBeforeFullWipe] = useState<boolean>(true);
   const [confirmFullWipeModalOpen, setConfirmFullWipeModalOpen] = useState<boolean>(false);
+  const [wipeConfirmPhrase, setWipeConfirmPhrase] = useState<string>('');
   const fiscalCloseSectionRef = useRef<HTMLDivElement | null>(null);
   const fullWipeSectionRef = useRef<HTMLDivElement | null>(null);
 
@@ -4220,7 +4221,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 className="w-full sm:w-auto px-3.5 py-2 text-xs font-bold text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-300 rounded-lg transition-colors flex items-center justify-center gap-1.5"
               >
                 <Trash2 className="w-4 h-4 text-rose-700 shrink-0" />
-                <span>Xóa toàn bộ dữ liệu ứng dụng</span>
+                <span>Xóa dữ liệu kinh doanh để nhập lại từ đầu</span>
               </button>
             </div>
           </div>
@@ -4437,7 +4438,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 <span>
                   Mục 2 ·{' '}
                   {isPrimaryAdmin
-                    ? `Quản lý chính (${ADMIN_BACKUP_EMAIL}): Xóa Toàn Bộ Dữ Liệu Ứng Dụng`
+                    ? `Quản lý chính (${ADMIN_BACKUP_EMAIL}): Xóa Dữ Liệu Kinh Doanh Toàn Hệ Thống`
                     : `Quản lý kho (${currentStaff.assignedWarehouse}): Xóa Toàn Bộ Dữ Liệu Kho ${currentStaff.assignedWarehouse}`}
                 </span>
               </div>
@@ -4457,7 +4458,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   className="w-full sm:w-auto px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-lg flex items-center justify-center gap-1.5 shadow-sm"
                 >
                   <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                  <span>Xóa toàn bộ dữ liệu ứng dụng</span>
+                  <span>Xóa dữ liệu kinh doanh</span>
                 </button>
               </div>
             </div>
@@ -5298,7 +5299,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
               <div className="flex items-center gap-2 min-w-0">
                 <Trash2 className="w-4 h-4 text-rose-700 shrink-0" />
                 <h3 className="text-sm sm:text-base font-bold text-rose-950 truncate">
-                  Xác Nhận Xóa Toàn Bộ Dữ Liệu Ứng Dụng?
+                  Xóa Dữ Liệu Kinh Doanh Để Nhập Lại Từ Đầu?
                 </h3>
               </div>
               <button
@@ -5317,12 +5318,17 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   <span>Nhắc lưu dữ liệu trước khi xóa toàn bộ:</span>
                 </div>
                 <p className="text-amber-900 leading-relaxed">
-                  Thao tác này sẽ xóa toàn bộ danh mục vật tư ({products.length}), hồ sơ khách hàng
-                  ({customers.length}), hóa đơn bán hàng ({sales.length}), phiếu nhập kho (
-                  {imports.length}), phiếu thu ({receiptVouchers.length}) và phiếu chi (
-                  {paymentVouchers.length}). Vui lòng lưu tệp sao lưu (.json) về máy tính trước khi
-                  xóa.
+                  Thao tác này sẽ xóa vĩnh viễn trên <strong>tất cả các kho</strong> (Realtime Database
+                  + Firestore cũ): danh mục vật tư ({products.length}), hồ sơ khách hàng (
+                  {customers.length}), nhà cung cấp, hóa đơn bán hàng ({sales.length}), phiếu nhập kho (
+                  {imports.length}), phiếu thu ({receiptVouchers.length}), phiếu chi (
+                  {paymentVouchers.length}), phiếu kiểm kê và chứng từ in. Vui lòng lưu tệp sao lưu (.json)
+                  về máy tính trước khi xóa.
                 </p>
+                <div className="p-2.5 bg-emerald-50 border border-emerald-300 rounded-md text-emerald-950 leading-relaxed">
+                  <strong>GIỮ NGUYÊN:</strong> tài khoản nhân viên &amp; phân quyền, danh sách kho, mẫu ghi
+                  chú sản phẩm, cấu hình VietQR, lịch sử thao tác và các bản sao lưu.
+                </div>
                 <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                   <label className="inline-flex items-center gap-2 font-bold text-emerald-900 cursor-pointer">
                     <input
@@ -5343,26 +5349,43 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   </button>
                 </div>
               </div>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-bold text-rose-900">
+                  Gõ chính xác cụm <span className="font-mono">XOA DU LIEU</span> để mở khóa nút xóa:
+                </label>
+                <input
+                  type="text"
+                  value={wipeConfirmPhrase}
+                  onChange={(e) => setWipeConfirmPhrase(e.target.value)}
+                  placeholder="XOA DU LIEU"
+                  className="w-full px-3 py-2 text-sm font-mono bg-white border border-rose-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-500"
+                />
+              </div>
             </div>
 
             <div className="px-5 py-3.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-end gap-2.5">
               <button
                 type="button"
-                onClick={() => setConfirmFullWipeModalOpen(false)}
+                onClick={() => {
+                  setConfirmFullWipeModalOpen(false);
+                  setWipeConfirmPhrase('');
+                }}
                 className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg"
               >
                 Hủy bỏ
               </button>
               <button
                 type="button"
+                disabled={wipeConfirmPhrase.trim().toUpperCase() !== 'XOA DU LIEU'}
                 onClick={() => {
                   setConfirmFullWipeModalOpen(false);
-                  onExecuteFullApplicationDataWipe?.(autoBackupBeforeFullWipe);
+                  setWipeConfirmPhrase('');
+                  void onExecuteFullApplicationDataWipe?.(autoBackupBeforeFullWipe);
                 }}
-                className="px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-lg flex items-center gap-1.5"
+                className="px-4 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 disabled:bg-slate-300 disabled:cursor-not-allowed rounded-lg flex items-center gap-1.5"
               >
                 <Trash2 className="w-4 h-4 shrink-0" />
-                <span>Xác nhận xóa toàn bộ dữ liệu</span>
+                <span>Xác nhận xóa dữ liệu kinh doanh</span>
               </button>
             </div>
           </div>

@@ -99,6 +99,15 @@ import { SearchableSelect } from './SearchableSelect';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { VietQrPaymentModal } from './VietQrPaymentModal';
 
+/** Scrolls to the top of the page and focuses the first control of the creation form (empty-state CTA). */
+const scrollToFormTop = (): void => {
+  if (typeof window === 'undefined') return;
+  window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+  window.setTimeout(() => {
+    document.querySelector<HTMLElement>('form input, form [role="combobox"], form select')?.focus();
+  }, 350);
+};
+
 interface SalesLogViewProps {
   products: ProductItem[];
   customers: CustomerProfile[];
@@ -3138,6 +3147,20 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             {filteredSales.length === 0 ? (
               <div className="py-10 px-4 text-center text-xs text-slate-500">
                 Không có hóa đơn bán hàng nào khớp với bộ lọc hiện tại.
+                {sales.length === 0 && (
+                  <div className="mt-3 space-y-2">
+                    <div className="text-slate-600">
+                      Chưa có hóa đơn nào — chọn khách hàng &amp; vật tư ở khung bên trái để lập đơn đầu tiên.
+                    </div>
+                    <button
+                      type="button"
+                      onClick={scrollToFormTop}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập hóa đơn đầu tiên
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               displayedFlatSales.map((s) => {
@@ -3427,6 +3450,20 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   <tr>
                     <td colSpan={6} className="py-10 px-4 text-center text-xs text-slate-500">
                       Không có hóa đơn bán hàng nào khớp với bộ lọc hiện tại.
+                {sales.length === 0 && (
+                  <div className="mt-3 space-y-2">
+                    <div className="text-slate-600">
+                      Chưa có hóa đơn nào — chọn khách hàng &amp; vật tư ở khung bên trái để lập đơn đầu tiên.
+                    </div>
+                    <button
+                      type="button"
+                      onClick={scrollToFormTop}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập hóa đơn đầu tiên
+                    </button>
+                  </div>
+                )}
                     </td>
                   </tr>
                 ) : (
@@ -6204,6 +6241,17 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
             {filteredImportEntries.length === 0 ? (
               <div className="py-10 px-4 text-center text-xs text-slate-500">
                 Chưa có phiếu nhập kho nào khớp với bộ lọc hiện tại.
+                {imports.length === 0 && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={scrollToFormTop}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập phiếu nhập đầu tiên
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               displayedImportEntries.map(({ imp, diag }) => {
@@ -6436,6 +6484,17 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   <tr>
                     <td colSpan={6} className="py-10 px-4 text-center text-xs text-slate-500">
                       Không có phiếu nhập kho nào khớp với bộ lọc hiện tại.
+                      {imports.length === 0 && (
+                        <div className="mt-3">
+                          <button
+                            type="button"
+                            onClick={scrollToFormTop}
+                            className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                          >
+                            Lập phiếu nhập đầu tiên
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ) : (

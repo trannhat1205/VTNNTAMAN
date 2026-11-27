@@ -1628,6 +1628,17 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
             {filteredSupplierDebts.length === 0 ? (
               <div className="py-12 px-4 text-center text-xs text-slate-500">
                 Không có khoản công nợ nhà cung cấp nào trong mục này.
+                {imports.length === 0 && onNavigateCrossLink && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateCrossLink({ tab: 'imports', label: 'Lập phiếu nhập' })}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập phiếu nhập đầu tiên
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               filteredSupplierDebts.map((imp) => {
@@ -1826,6 +1837,17 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   <tr>
                     <td colSpan={8} className="py-12 px-4 text-center text-slate-500">
                       Không có khoản công nợ nhà cung cấp nào trong mục này.
+                {imports.length === 0 && onNavigateCrossLink && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateCrossLink({ tab: 'imports', label: 'Lập phiếu nhập' })}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập phiếu nhập đầu tiên
+                    </button>
+                  </div>
+                )}
                     </td>
                   </tr>
                 ) : (
@@ -2103,6 +2125,17 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
             {filteredCustomerDebts.length === 0 ? (
               <div className="py-12 px-4 text-center text-xs text-slate-500">
                 Không có khoản công nợ khách hàng nào trong mục này.
+                {sales.length === 0 && onNavigateCrossLink && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateCrossLink({ tab: 'sales', label: 'Lập đơn bán' })}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập đơn bán đầu tiên
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               filteredCustomerDebts.map((sale) => {
@@ -2319,6 +2352,17 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                   <tr>
                     <td colSpan={8} className="py-12 px-4 text-center text-slate-500">
                       Không có khoản công nợ khách hàng nào trong mục này.
+                {sales.length === 0 && onNavigateCrossLink && (
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      onClick={() => onNavigateCrossLink({ tab: 'sales', label: 'Lập đơn bán' })}
+                      className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+                    >
+                      Lập đơn bán đầu tiên
+                    </button>
+                  </div>
+                )}
                     </td>
                   </tr>
                 ) : (

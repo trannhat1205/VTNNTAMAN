@@ -900,6 +900,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
             displayedProducts.map((p) => {
               const alert = evaluateStockAlert(p);
               const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
+              const mobileIntegrity = evaluateProductStockIntegrity(p, sales, imports, stockAdjustments);
               return (
                 <div
                   key={p.id}
@@ -922,6 +923,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         <span aria-hidden="true">·</span>
                         <span>ĐVT: {p.unit}</span>
                         <span aria-hidden="true">·</span>
+                        {mobileIntegrity.impliedOpeningStock > 0 && (
+                          <span className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 font-mono text-[10px] font-semibold">
+                            Đầu kỳ {mobileIntegrity.impliedOpeningStock}
+                          </span>
+                        )}
+                        {p.sellPrice > 0 && p.sellPrice === p.importPrice && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold">
+                            Lãi 0%
+                          </span>
+                        )}
                         <span className="font-mono text-emerald-700">+{movCounts.qtyIn}</span>
                         <span className="font-mono text-amber-700">-{movCounts.qtyOut}</span>
                         {p.batchNumber && (
@@ -1163,12 +1174,28 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             Bán &lt; Giá vốn
                           </span>
                         )}
+                        {p.sellPrice > 0 && p.sellPrice === p.importPrice && (
+                          <span
+                            title="Giá bán bằng giá vốn: bán ra không có lãi"
+                            className="px-1.5 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded"
+                          >
+                            Lãi 0%
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
                         <span className="font-mono">{p.code}</span>
                         <span aria-hidden="true">·</span>
                         <span>Đơn vị: {p.unit}</span>
                         <span aria-hidden="true">·</span>
+                        {integrity.impliedOpeningStock > 0 && (
+                          <span
+                            title="Phần tồn có sẵn từ lúc tạo vật tư, chưa có phiếu nhập kho tương ứng"
+                            className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 font-mono text-[10px] font-semibold"
+                          >
+                            Đầu kỳ {integrity.impliedOpeningStock}
+                          </span>
+                        )}
                         <span className="font-mono text-emerald-700 font-semibold">
                           +{movCounts.qtyIn}
                         </span>
