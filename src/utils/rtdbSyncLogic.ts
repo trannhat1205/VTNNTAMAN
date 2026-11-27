@@ -98,6 +98,46 @@ export interface RtdbUserDirectoryProfile {
   createdAt: string;
   updatedAt: string;
   lastSyncedAt?: string;
+  presenceOnline?: boolean;
+  lastSeenAt?: number;
+  presenceWarehouse?: string;
+}
+
+export interface OnlineUserSummary {
+  uid: string;
+  displayName: string;
+  warehouse: string;
+}
+
+export const PRESENCE_ONLINE_TTL_MS = 150000;
+
+/** Users whose heartbeat is fresh (presenceOnline && lastSeenAt within TTL). */
+export function deriveOnlineUsersFromDirectory(
+  dirMap: Record<string, RtdbUserDirectoryProfile>,
+  nowMs: number = Date.now(),
+  ttlMs: number = PRESENCE_ONLINE_TTL_MS
+): OnlineUserSummary[] {
+  return Object.entries(dirMap || {})
+    .filter(([, p]) => p && p.presenceOnline === true && nowMs - (Number(p.lastSeenAt) || 0) < ttlMs)
+    .map(([uid, p]) => ({
+      uid: p.uid || uid,
+      displayName: p.displayName || p.username || uid,
+      warehouse: p.presenceWarehouse || p.assignedWarehouse || '',
+    }))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName, 'vi'));
+}
+
+/** Signature of the directory ignoring presence/heartbeat fields so heartbeats do not trigger re-aggregation. */
+export function directoryStructureSignature(dirMap: Record<string, RtdbUserDirectoryProfile>): string {
+  return JSON.stringify(
+    Object.entries(dirMap || {})
+      .map(([uid, p]) => {
+        const { presenceOnline, lastSeenAt, presenceWarehouse, lastSyncedAt, ...rest } = (p || {}) as RtdbUserDirectoryProfile;
+        void presenceOnline; void lastSeenAt; void presenceWarehouse; void lastSyncedAt;
+        return [uid, rest] as const;
+      })
+      .sort((a, b) => a[0].localeCompare(b[0]))
+  );
 }
 
 export interface AdminWarehouseAccountSummary {

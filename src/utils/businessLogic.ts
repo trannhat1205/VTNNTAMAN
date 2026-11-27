@@ -5775,3 +5775,68 @@ export function computeCustomerSaleReturnCalculation(params: {
 
 
 
+
+/**
+ * Builds the mirrored PT/PC voucher pair for a customer return that refunds cash.
+ * - PT (non-settlement, not other income) is dated at the ORIGINAL sale date so the sale month keeps the cash it really received.
+ * - PC (not operating expense) is dated NOW, the month the refund really leaves the till.
+ * All-time net cash is unchanged (reduced sale paid + PT - PC); only the period split becomes exact.
+ */
+export function buildCustomerReturnRefundVouchers(params: {
+  sale: Pick<
+    SaleTransaction,
+    'invoiceCode' | 'customerId' | 'customerName' | 'customerPhone' | 'createdAt' | 'warehouseName' | 'ownerId'
+  >;
+  cashRefundAmount: number;
+  returnCode: string;
+  receiptId: string;
+  receiptCode: string;
+  paymentId: string;
+  paymentCode: string;
+  ownerId: string;
+  warehouseName: string;
+  staffName: string;
+  nowIso: string;
+}): { receipt: CashReceiptVoucher; payment: CashPaymentVoucher } | null {
+  const amount = Math.max(0, Math.round(Number(params.cashRefundAmount) || 0));
+  if (amount <= 0) return null;
+  const note = `Tự động từ phiếu trả hàng ${params.returnCode} (HĐ ${params.sale.invoiceCode})`;
+  const receipt: CashReceiptVoucher = {
+    id: params.receiptId,
+    voucherCode: params.receiptCode,
+    groupName: 'Điều chỉnh tiền bán đã hoàn trả',
+    warehouseName: params.warehouseName,
+    partnerId: params.sale.customerId,
+    partnerName: params.sale.customerName,
+    partnerPhone: params.sale.customerPhone || '',
+    amount,
+    paymentMethod: 'Tiền mặt',
+    isDebtSettlement: false,
+    settledAllocations: [],
+    countsTowardOtherIncome: false,
+    note,
+    staffName: params.staffName,
+    ownerId: params.ownerId,
+    createdAt: params.sale.createdAt || params.nowIso,
+    updatedAt: params.nowIso,
+  };
+  const payment: CashPaymentVoucher = {
+    id: params.paymentId,
+    voucherCode: params.paymentCode,
+    groupName: 'Hoàn tiền khách trả hàng',
+    warehouseName: params.warehouseName,
+    partnerName: params.sale.customerName,
+    partnerPhone: params.sale.customerPhone || '',
+    amount,
+    paymentMethod: 'Tiền mặt',
+    isDebtSettlement: false,
+    settledAllocations: [],
+    countsTowardOperatingExpense: false,
+    note,
+    staffName: params.staffName,
+    ownerId: params.ownerId,
+    createdAt: params.nowIso,
+    updatedAt: params.nowIso,
+  };
+  return { receipt, payment };
+}

@@ -1000,3 +1000,31 @@ test('Wipe epoch: dataWipedAt discards pre-wipe business records in filter, norm
   const stripped = applyDataWipeEpochToPayload({ ...stale, sales: [oldSale as unknown as SaleTransaction] }, wipe);
   assert.equal(stripped.sales.length, 0);
 });
+
+import {
+  deriveOnlineUsersFromDirectory,
+  directoryStructureSignature,
+  type RtdbUserDirectoryProfile as PresenceDirProfile,
+} from './rtdbSyncLogic';
+
+test('Presence: only fresh online heartbeats are listed and heartbeats do not change the structure signature', () => {
+  const base = {
+    username: 'u', phone: '', email: '', role: 'staff', positionRole: 'warehouse_manager',
+    permissions: {}, assignedWarehouse: 'Kho A', active: true, createdAt: 'x', updatedAt: 'x',
+  } as unknown as PresenceDirProfile;
+  const now = 1_000_000;
+  const dir: Record<string, PresenceDirProfile> = {
+    a: { ...base, uid: 'a', displayName: 'An', presenceOnline: true, lastSeenAt: now - 10_000, presenceWarehouse: 'Kho A' },
+    b: { ...base, uid: 'b', displayName: 'Bình', presenceOnline: true, lastSeenAt: now - 400_000 },
+    c: { ...base, uid: 'c', displayName: 'Cường', presenceOnline: false, lastSeenAt: now },
+  };
+  const online = deriveOnlineUsersFromDirectory(dir, now);
+  assert.deepEqual(online.map((u) => u.uid), ['a']);
+  assert.equal(online[0].warehouse, 'Kho A');
+
+  const sig1 = directoryStructureSignature(dir);
+  const beat = { ...dir, a: { ...dir.a, lastSeenAt: now + 60_000, lastSyncedAt: 'later' } };
+  assert.equal(directoryStructureSignature(beat), sig1);
+  const renamed = { ...dir, a: { ...dir.a, displayName: 'An 2' } };
+  assert.notEqual(directoryStructureSignature(renamed), sig1);
+});

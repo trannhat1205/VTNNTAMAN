@@ -4519,6 +4519,12 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <strong>{formatVND(retPreview.cashRefundAmount)}</strong>
                     </div>
                   )}
+                  {retPreview.cashRefundAmount > 0 && (
+                    <p className="text-[10px] leading-snug text-slate-500">
+                      Hệ thống tự lập 2 phiếu: Phiếu thu điều chỉnh (đúng ngày bán, không tính thu nhập khác) và
+                      Phiếu chi hoàn tiền (hôm nay, không tính chi phí) để dòng tiền từng tháng luôn chính xác.
+                    </p>
+                  )}
                   <div className="flex justify-between pt-1.5 border-t border-emerald-200">
                     <span className="font-sans font-semibold text-slate-800">
                       {retPreview.isFullReturn ? 'Trạng thái sau trả:' : 'HĐ còn lại sau trả:'}

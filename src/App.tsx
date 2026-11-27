@@ -99,6 +99,7 @@ import {
   computeAtomicProductImportAddition,
   computeAtomicProductStockDelta,
   computeCustomerSaleReturnCalculation,
+  buildCustomerReturnRefundVouchers,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
   computeSmartDashboardAnalytics,
@@ -168,6 +169,7 @@ import {
   logoutUser,
   purgeFirestoreBusinessCollections,
   purgeRealtimeBusinessDataForWorkspaces,
+  touchRealtimePresence,
   reserveNextRealtimeVoucherCode,
   resendVerificationEmail,
   seedExistingStaffToChatDirectoryIfAdmin,
@@ -216,6 +218,8 @@ import {
   resolveCanonicalOwnerUidForWarehouse,
   resolveDesignatedOwnerUidsForWarehouses,
   RtdbUserDirectoryProfile,
+  deriveOnlineUsersFromDirectory,
+  directoryStructureSignature,
   RtdbWorkspaceMeta,
   RtdbWorkspacePayload,
 } from './utils/rtdbSyncLogic';
@@ -362,6 +366,11 @@ export default function App() {
   const rtdbKnownOwnerUidsRef = useRef<Set<string>>(new Set([PRIMARY_ADMIN_UID]));
   const adminWorkspacesMapRef = useRef<Record<string, unknown>>({});
   const rtdbUsersDirMapRef = useRef<Record<string, RtdbUserDirectoryProfile>>({});
+  const rtdbUsersDirSigRef = useRef<string>('');
+  const onlineUsersKeyRef = useRef<string>('');
+  const [onlineUsers, setOnlineUsers] = useState<
+    Array<{ uid: string; displayName: string; warehouse: string }>
+  >([]);
   const prevAuthenticatedUidRef = useRef<string | null>(null);
   const allowEmptyWorkspaceWriteRef = useRef<boolean>(false);
   const forceStorageSyncRef = useRef<boolean>(false);
@@ -1377,6 +1386,28 @@ export default function App() {
     };
   }, [isGoogleAuthenticated]);
 
+  // Presence heartbeat (best-effort; silently ignored if the directory rejects the write)
+  useEffect(() => {
+    if (!isSessionLoggedIn || !isGoogleAuthenticated || !auth.currentUser) return;
+    const presenceUid = auth.currentUser.uid;
+    const presenceWarehouse = lockedWarehouse || currentStaff.assignedWarehouse || '';
+    const beat = () => {
+      void touchRealtimePresence(presenceUid, { online: true, activeWarehouse: presenceWarehouse });
+    };
+    beat();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') beat();
+    }, 60000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') beat();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [isSessionLoggedIn, isGoogleAuthenticated, lockedWarehouse, currentStaff.assignedWarehouse]);
+
   // Real-time bidirectional sync with Firebase Realtime Database (gapgold-e6b62-default-rtdb)
   // AND Firebase Storage (gapgold-e6b62.firebasestorage.app/files -> /documents/workspaces/ & /backups/)
   // Supports Primary Admin, Designated Multi-Warehouse Managers, AND Co-Staff sharing 1 Single Warehouse!
@@ -1850,7 +1881,18 @@ export default function App() {
             });
       const unsubDir = subscribeToRealtimeUsersDirectory(activeUid, isPrimary, (dirMap) => {
         rtdbUsersDirMapRef.current = dirMap;
-        applyAdminAggregate();
+        const nextOnline = deriveOnlineUsersFromDirectory(dirMap);
+        const nextOnlineKey = nextOnline.map((u) => `${u.uid}:${u.warehouse}`).join('|');
+        if (nextOnlineKey !== onlineUsersKeyRef.current) {
+          onlineUsersKeyRef.current = nextOnlineKey;
+          setOnlineUsers(nextOnline);
+        }
+        // Heartbeats (presence fields) must not trigger a full workspace re-aggregation
+        const nextDirSig = directoryStructureSignature(dirMap);
+        if (nextDirSig !== rtdbUsersDirSigRef.current) {
+          rtdbUsersDirSigRef.current = nextDirSig;
+          applyAdminAggregate();
+        }
       });
 
       return () => {
@@ -3503,6 +3545,57 @@ export default function App() {
         return nextCust;
       });
     });
+
+    // 3. Cash refund → mirrored PT (sale date) + PC (today) so each month's cashflow stays exact
+    if (calc.cashRefundAmount > 0) {
+      const refundRvId = generateUniqueRecordId('rv_ret');
+      const refundPvId = generateUniqueRecordId('pv_ret');
+      const refundRvCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: retOwnerUid,
+        prefix: 'PT',
+        existingCodes: receiptVouchers.map((r) => r.voucherCode),
+        onReassigned: (committedCode) => {
+          setReceiptVouchers((prev) =>
+            prev.map((r) =>
+              r.id === refundRvId
+                ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                : r
+            )
+          );
+        },
+      });
+      const refundPvCode = allocateAtomicWarehouseVoucherCode({
+        ownerUid: retOwnerUid,
+        prefix: 'PC',
+        existingCodes: paymentVouchers.map((p) => p.voucherCode),
+        onReassigned: (committedCode) => {
+          setPaymentVouchers((prev) =>
+            prev.map((p) =>
+              p.id === refundPvId
+                ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                : p
+            )
+          );
+        },
+      });
+      const refundPair = buildCustomerReturnRefundVouchers({
+        sale: existing,
+        cashRefundAmount: calc.cashRefundAmount,
+        returnCode,
+        receiptId: refundRvId,
+        receiptCode: refundRvCode,
+        paymentId: refundPvId,
+        paymentCode: refundPvCode,
+        ownerId: retOwnerUid,
+        warehouseName: resolvedWh,
+        staffName: currentStaff.displayName,
+        nowIso,
+      });
+      if (refundPair) {
+        setReceiptVouchers((prev) => [refundPair.receipt, ...prev]);
+        setPaymentVouchers((prev) => [refundPair.payment, ...prev]);
+      }
+    }
 
     const financialEffectDesc = [
       calc.debtReducedAmount > 0 ? `Giảm nợ KH: -${formatVND(calc.debtReducedAmount)}` : '',
@@ -6624,7 +6717,11 @@ export default function App() {
   };
 
   const handleLogoutApp = () => {
-    logoutUser().catch(() => {});
+    const presenceUid = auth.currentUser?.uid;
+    const presenceDone = presenceUid
+      ? touchRealtimePresence(presenceUid, { online: false })
+      : Promise.resolve(false);
+    void presenceDone.then(() => logoutUser().catch(() => {}));
     setIsGoogleAuthenticated(false);
     setCloudSyncStatus('local');
     setIsSessionLoggedIn(false);
@@ -10150,6 +10247,7 @@ export default function App() {
                 localCounts={syncLocalCounts}
                 onSyncNow={() => void handleManualCloudSync()}
                 onVerifyWithCloud={handleVerifyWithCloud}
+                onlineUsers={onlineUsers}
               />
               {canSeeDataHealth && (
                 <DataHealthCenter
@@ -10340,6 +10438,7 @@ export default function App() {
         localCounts={syncLocalCounts}
         onSyncNow={() => void handleManualCloudSync()}
         onVerifyWithCloud={handleVerifyWithCloud}
+                onlineUsers={onlineUsers}
       />
 
       {/* Global Quick Search Modal (Ctrl+K) */}
