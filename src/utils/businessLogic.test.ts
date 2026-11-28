@@ -1784,9 +1784,10 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
   assert.equal(adminScope.allowedTabs.includes('backup_history'), true);
   assert.equal(adminScope.allowedTabs.includes('gemini_chat'), true);
   assert.equal(adminScope.allowedTabs.includes('internal_chat'), true);
-  assert.equal(adminScope.allowedTabs.length, 14);
+  assert.equal(adminScope.allowedTabs.includes('suppliers'), true);
+  assert.equal(adminScope.allowedTabs.length, 15);
 
-  // 4. Independent single-warehouse user account has 13 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
+  // 4. Independent single-warehouse user account has 14 tabs (all tabs EXCEPT backup_history) and all 8 report categories (including financial_profit) scoped strictly to their own warehouse
   const newGmailUser: StaffMember = {
     uid: 'user_uid_vtnntaman',
     username: 'vtnntaman',
@@ -1807,7 +1808,8 @@ test('Gmail registration default warehouse naming, immutable TÂM AN prefix rena
   const userScope = evaluateStaffAccessScope(newGmailUser);
   assert.equal(userScope.isPrimaryOwner, false);
   assert.equal(userScope.canAccessBackupHistory, false);
-  assert.equal(userScope.allowedTabs.length, 13);
+  assert.equal(userScope.allowedTabs.includes('suppliers'), true);
+  assert.equal(userScope.allowedTabs.length, 14);
   assert.equal(userScope.allowedTabs.includes('reports'), true);
   assert.equal(userScope.allowedTabs.includes('gemini_chat'), true);
   assert.equal(userScope.allowedTabs.includes('internal_chat'), true);
@@ -4580,4 +4582,222 @@ test('Supplier contra offset is non-cash, nets to zero profit, does not block th
   assert.equal(reversed.updatedImports.find((i) => i.id === 'i3')?.debtAmount, 800000);
   const totalDebt = reversed.updatedImports.reduce((s, i) => s + i.debtAmount, 0);
   assert.equal(totalDebt, 1700000);
+});
+/* ---- Phase 2 (2A Supplier Ledger · 2B Import Markup Helper · 2C Sale Loss Guard) ---- */
+import {
+  computeSupplierDetailLedgers as p2ComputeSupplierLedgers,
+  evaluateStaffAccessScope as p2EvaluateScope,
+} from './businessLogic';
+import {
+  computeImportSellPriceSuggestion as p2ImportSuggestion,
+  evaluateSaleOrderProfitability as p2EvaluateProfit,
+} from './smartInsights';
+
+test('Phase 2A: computeSupplierDetailLedgers tracks per-product import price trends, contra offsets, and RBAC tab access', () => {
+  const scope = p2EvaluateScope({
+    uid: 'u_wh1',
+    username: 'wh1',
+    password: '',
+    displayName: 'Quản lý kho',
+    email: 'wh1@gmail.com',
+    phone: '',
+    role: 'staff',
+    positionRole: 'warehouse_manager',
+    assignedWarehouse: 'TÂM AN MỸ NGÃI',
+    active: true,
+    createdAt: '2026-11-01T00:00:00Z',
+    updatedAt: '2026-11-01T00:00:00Z',
+  });
+  assert.equal(scope.canAccessSuppliers, true);
+  assert.equal(scope.allowedTabs.includes('suppliers'), true);
+
+  const prod: ProductItem = {
+    id: 'p_bpro',
+    code: 'BPRO',
+    name: 'Búp Pro',
+    category: 'Thuốc BVTV',
+    unit: 'Chai',
+    importPrice: 165000,
+    sellPrice: 195000,
+    stock: 15,
+    minStock: 5,
+    supplierName: 'GAP Nhất',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    ownerId: 'u1',
+    createdAt: '2026-11-01T00:00:00Z',
+    updatedAt: '2026-11-28T00:00:00Z',
+  };
+
+  const imports: ImportTransaction[] = [
+    {
+      id: 'imp_old',
+      receiptCode: 'PN-2611-001',
+      supplierName: 'GAP Nhất',
+      supplierPhone: '0393120246',
+      productId: 'p_bpro',
+      productName: 'Búp Pro',
+      unit: 'Chai',
+      quantity: 10,
+      unitCost: 150000,
+      totalCost: 1500000,
+      paidAmount: 1500000,
+      debtAmount: 0,
+      dueDate: '2026-11-20',
+      status: 'paid',
+      warehouseName: 'TÂM AN MỸ NGÃI',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-10T01:00:00Z',
+      updatedAt: '2026-11-10T01:00:00Z',
+    },
+    {
+      id: 'imp_new',
+      receiptCode: 'PN-2611-002',
+      supplierName: 'GAP Nhất',
+      supplierPhone: '0393120246',
+      productId: 'p_bpro',
+      productName: 'Búp Pro',
+      unit: 'Chai',
+      quantity: 10,
+      unitCost: 165000,
+      totalCost: 1650000,
+      paidAmount: 320000,
+      debtAmount: 1330000,
+      dueDate: '2026-12-15',
+      status: 'partial',
+      warehouseName: 'TÂM AN MỸ NGÃI',
+      note: '',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-28T02:00:00Z',
+      updatedAt: '2026-11-28T02:00:00Z',
+    },
+  ];
+
+  const contraPv: CashPaymentVoucher = {
+    id: 'pv_c1',
+    voucherCode: 'PC-2611-010',
+    groupName: 'Cấn trừ công nợ Nhà cung cấp',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    partnerName: 'GAP Nhất',
+    partnerPhone: '0393120246',
+    amount: 320000,
+    paymentMethod: 'Cấn trừ công nợ',
+    isDebtSettlement: true,
+    isContraOffset: true,
+    countsTowardOperatingExpense: false,
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-28T03:00:00Z',
+    updatedAt: '2026-11-28T03:00:00Z',
+  };
+
+  const ledgers = p2ComputeSupplierLedgers({
+    suppliers: [],
+    imports,
+    products: [prod],
+    paymentVouchers: [contraPv],
+    todayStr: '2026-11-28',
+  });
+  assert.equal(ledgers.length, 1);
+  const g = ledgers[0];
+  assert.equal(g.name, 'GAP Nhất');
+  assert.equal(g.totalImportedCost, 3150000);
+  assert.equal(g.totalPaidAmount, 1820000);
+  assert.equal(g.totalContraOffsetAmount, 320000);
+  assert.equal(g.totalRemainingDebt, 1330000);
+  assert.equal(g.productPriceHistory.length, 1);
+  assert.equal(g.productPriceHistory[0].latestUnitCost, 165000);
+  assert.equal(g.productPriceHistory[0].previousUnitCost, 150000);
+  assert.equal(g.productPriceHistory[0].costDelta, 15000);
+  assert.equal(g.productPriceHistory[0].costDeltaPct, 10);
+  assert.equal(g.productPriceHistory[0].minUnitCost, 150000);
+  assert.equal(g.productPriceHistory[0].maxUnitCost, 165000);
+});
+
+test('Phase 2B: computeImportSellPriceSuggestion projects weighted-average cost and +10..30% presets', () => {
+  const s = p2ImportSuggestion({
+    previousStock: 10,
+    previousImportPrice: 150000,
+    currentSellPrice: 155000,
+    incomingQty: 10,
+    incomingUnitCost: 170000,
+  });
+  // Weighted average: (10*150k + 10*170k) / 20 = 160k
+  assert.equal(s.newWeightedImportPrice, 160000);
+  assert.equal(s.costDeltaVsPrevAvg, 10000);
+  assert.equal(s.isCurrentSellBelowOrEqualNewCost, true);
+  const p20 = s.presets.find((p) => p.markupPct === 20);
+  assert.equal(p20?.sellPrice, 192000);
+});
+
+test('Phase 2C: evaluateSaleOrderProfitability warns on negative margin, respects supplier cost-price offset, and computes break-even discount', () => {
+  // 1. Healthy order: 2 * 195k = 390k, cost = 320k, discount = 20k -> profit +50k
+  const healthy = p2EvaluateProfit([
+    {
+      productId: 'p1',
+      productName: 'Búp Pro',
+      unit: 'Chai',
+      quantity: 2,
+      unitPrice: 195000,
+      unitCost: 160000,
+      discountAmount: 20000,
+    },
+  ]);
+  assert.equal(healthy.level, 'healthy');
+  assert.equal(healthy.estimatedGrossProfit, 50000);
+  assert.equal(healthy.maxBreakEvenDiscount, 70000);
+
+  // 2. Loss due to excessive discount + promotional gift: 390k - 60k = 330k < 320k + 25k (345k) -> loss 15k
+  const loss = p2EvaluateProfit([
+    {
+      productId: 'p1',
+      productName: 'Búp Pro',
+      unit: 'Chai',
+      quantity: 2,
+      unitPrice: 195000,
+      unitCost: 160000,
+      discountAmount: 60000,
+      giftProductName: 'Áo thun',
+      giftQuantity: 1,
+      giftUnitCost: 25000,
+    },
+  ]);
+  assert.equal(loss.level, 'loss');
+  assert.equal(loss.estimatedGrossProfit, -15000);
+  assert.equal(loss.lossAmount, 15000);
+  assert.equal(loss.maxBreakEvenDiscount, 45000);
+  assert.ok(loss.reasons.length >= 1);
+
+  // 3. Supplier contra-offset sale at exact import cost (0 profit) is NOT flagged as warning/loss
+  const supEven = p2EvaluateProfit(
+    [
+      {
+        productId: 'p1',
+        productName: 'Búp Pro',
+        unit: 'Chai',
+        quantity: 2,
+        unitPrice: 160000,
+        unitCost: 160000,
+      },
+    ],
+    { isSupplierSale: true }
+  );
+  assert.equal(supEven.level, 'break_even_supplier');
+  assert.equal(supEven.lossAmount, 0);
+
+  // 4. Thin margin (< 5%) on regular sale
+  const thin = p2EvaluateProfit([
+    {
+      productId: 'p1',
+      productName: 'Búp Pro',
+      unit: 'Chai',
+      quantity: 1,
+      unitPrice: 165000,
+      unitCost: 160000,
+    },
+  ]);
+  assert.equal(thin.level, 'thin_margin');
 });

@@ -645,6 +645,8 @@ export interface ImportCartDraftItem {
   unitCost: number;
   batchNumber?: string;
   expiryDate?: string;
+  /** Optional updated retail selling price applied atomically when saving this import receipt. */
+  newSellPrice?: number;
 }
 
 export interface AllocatedImportCartItem extends ImportCartDraftItem {

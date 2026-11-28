@@ -30,6 +30,7 @@ interface NotificationCenterProps {
       | 'receipt_vouchers'
       | 'payment_vouchers'
       | 'customers'
+      | 'suppliers'
       | 'reports'
       | 'vouchers'
       | 'staff_accounts'

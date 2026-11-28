@@ -1650,6 +1650,7 @@ export interface StaffAccessScope {
   canAccessImports: boolean;
   canAccessInventory: boolean;
   canAccessCustomers: boolean;
+  canAccessSuppliers: boolean;
   canAccessCustomerDebts: boolean;
   canAccessSupplierDebts: boolean;
   canAccessDebts: boolean;
@@ -1719,6 +1720,8 @@ export function evaluateStaffAccessScope(
     perms.includes('cash_treasurer') ||
     perms.includes('bank_treasurer') ||
     perms.includes('warehouse_accounting');
+
+  const canAccessSuppliers = canAccessImports || canAccessSupplierDebts;
 
   const canAccessDebts = canAccessCustomerDebts || canAccessSupplierDebts;
 
@@ -1812,6 +1815,7 @@ export function evaluateStaffAccessScope(
   if (canAccessPaymentVouchers) allowedTabs.push('payment_vouchers');
   if (canAccessInventory) allowedTabs.push('inventory');
   if (canAccessCustomers) allowedTabs.push('customers');
+  if (canAccessSuppliers) allowedTabs.push('suppliers');
   if (canAccessDebts) allowedTabs.push('debts');
   if (canAccessVouchers) allowedTabs.push('vouchers');
   allowedTabs.push('staff_accounts');
@@ -1827,6 +1831,7 @@ export function evaluateStaffAccessScope(
     canAccessImports,
     canAccessInventory,
     canAccessCustomers,
+    canAccessSuppliers,
     canAccessCustomerDebts,
     canAccessSupplierDebts,
     canAccessDebts,
@@ -2813,7 +2818,7 @@ export interface SupplierFifoSettlementPreview {
 }
 
 export function matchesSupplierRecord(
-  imp: ImportTransaction,
+  imp: Pick<ImportTransaction, 'supplierName' | 'supplierPhone' | 'warehouseName'>,
   identifier: SupplierMatchIdentifier
 ): boolean {
   if (
@@ -6404,4 +6409,269 @@ export function computeSupplierSaleOffsetPreview(params: {
     supplierRemainingDebtAfterOffset,
     status,
   };
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Phase 2A — Supplier Detail Ledger & Per-Product Import Price History (Sổ chi tiết Nhà cung cấp)
+ * ---------------------------------------------------------------------------------------------- */
+
+export interface SupplierProductPriceTrack {
+  productKey: string;
+  productId?: string;
+  productCode?: string;
+  productName: string;
+  unit: string;
+  warehouseName?: string;
+  currentStock: number | null;
+  currentImportPrice: number | null;
+  currentSellPrice: number | null;
+  importCount: number;
+  totalQtyImported: number;
+  totalValueImported: number;
+  latestUnitCost: number;
+  latestDate: string;
+  latestReceiptCode: string;
+  previousUnitCost: number | null;
+  previousDate: string | null;
+  costDelta: number;
+  costDeltaPct: number;
+  minUnitCost: number;
+  maxUnitCost: number;
+}
+
+export interface SupplierDetailLedger {
+  key: string;
+  profile: SupplierProfile | null;
+  isImplicitFromImports: boolean;
+  code: string;
+  name: string;
+  phone: string;
+  address: string;
+  note: string;
+  warehouseName?: string;
+  totalImportedCost: number;
+  totalPaidAmount: number;
+  totalContraOffsetAmount: number;
+  totalRemainingDebt: number;
+  overdueDebtAmount: number;
+  distinctReceiptCount: number;
+  unpaidReceiptCount: number;
+  suppliedProductsCount: number;
+  lastImportDate: string;
+  productPriceHistory: SupplierProductPriceTrack[];
+  importReceipts: ImportTransaction[];
+  paymentHistory: CashPaymentVoucher[];
+  contraSales: SaleTransaction[];
+}
+
+/**
+ * Builds complete per-supplier detail ledgers including product-level import price trends,
+ * payable balances, overdue aging, payment vouchers, and contra-offset sales.
+ */
+export function computeSupplierDetailLedgers(params: {
+  suppliers: SupplierProfile[];
+  imports: ImportTransaction[];
+  products: ProductItem[];
+  sales?: SaleTransaction[];
+  paymentVouchers?: CashPaymentVoucher[];
+  todayStr?: string;
+  leadDays?: number;
+}): SupplierDetailLedger[] {
+  const {
+    suppliers = [],
+    imports = [],
+    products = [],
+    sales = [],
+    paymentVouchers = [],
+    todayStr = getTodayVietnamDateStr(),
+    leadDays = 5,
+  } = params;
+
+  const directory = buildAvailableSupplierDirectory(suppliers, imports, products);
+  const profileByKey = new Map<string, SupplierProfile>();
+  for (const sp of suppliers) {
+    const k = normalizeVietnameseSearch(sp.name);
+    if (k && !profileByKey.has(k)) {
+      profileByKey.set(k, sp);
+    }
+  }
+
+  return directory.map((dirItem) => {
+    const profile = profileByKey.get(dirItem.key) || null;
+    const matchTarget = { supplierName: dirItem.name, supplierPhone: dirItem.phone };
+
+    const matchedImports = imports
+      .filter((imp) => matchesSupplierRecord(imp, matchTarget))
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+    const matchedPayments = paymentVouchers
+      .filter((pv) =>
+        matchesSupplierRecord(
+          { supplierName: pv.partnerName, supplierPhone: pv.partnerPhone },
+          matchTarget
+        )
+      )
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+    const matchedContraSales = sales
+      .filter(
+        (s) =>
+          (s.isSupplierSale || (s.supplierOffsetAmount || 0) > 0) &&
+          matchesSupplierRecord(
+            { supplierName: s.customerName, supplierPhone: s.customerPhone },
+            matchTarget
+          )
+      )
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+
+    const totalImportedCost = matchedImports.reduce(
+      (sum, imp) => sum + (Number(imp.totalCost) || 0),
+      0
+    );
+    const totalPaidAmount = matchedImports.reduce(
+      (sum, imp) => sum + (Number(imp.paidAmount) || 0),
+      0
+    );
+    const totalRemainingDebt = matchedImports.reduce(
+      (sum, imp) => sum + (Number(imp.debtAmount) || 0),
+      0
+    );
+    const totalContraOffsetAmount = matchedPayments
+      .filter((pv) => isContraOffsetVoucher(pv))
+      .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
+
+    let overdueDebtAmount = 0;
+    for (const imp of matchedImports) {
+      if ((Number(imp.debtAmount) || 0) <= 0) continue;
+      const urg = evaluateDebtUrgency(imp.dueDate, imp.debtAmount, todayStr, leadDays);
+      if (urg.urgency === 'overdue') {
+        overdueDebtAmount += Number(imp.debtAmount) || 0;
+      }
+    }
+
+    // Group imports by product to compute price history (newest -> oldest)
+    const importsByProd = new Map<string, ImportTransaction[]>();
+    for (const imp of matchedImports) {
+      const matchedProd = products.find((p) =>
+        doesRecordMatchProduct(p, imp.productId, imp.productName, imp.warehouseName)
+      );
+      const pKey = matchedProd
+        ? `id:${matchedProd.id}`
+        : `name:${normalizeVietnameseSearch(imp.productName)}|${normalizeWarehouseKey(imp.warehouseName)}`;
+      const list = importsByProd.get(pKey) || [];
+      list.push(imp);
+      importsByProd.set(pKey, list);
+    }
+
+    const productPriceHistory: SupplierProductPriceTrack[] = [];
+    importsByProd.forEach((prodImports, pKey) => {
+      // prodImports is already sorted newest-first
+      const latest = prodImports[0];
+      const previous = prodImports.length > 1 ? prodImports[1] : null;
+      const linkedProd =
+        products.find((p) =>
+          doesRecordMatchProduct(p, latest.productId, latest.productName, latest.warehouseName)
+        ) || null;
+
+      const costs = prodImports.map((i) => Math.max(0, Math.round(Number(i.unitCost) || 0)));
+      const nonZeroCosts = costs.filter((c) => c > 0);
+      const minUnitCost = nonZeroCosts.length > 0 ? Math.min(...nonZeroCosts) : 0;
+      const maxUnitCost = nonZeroCosts.length > 0 ? Math.max(...nonZeroCosts) : 0;
+
+      const latestUnitCost = Math.max(0, Math.round(Number(latest.unitCost) || 0));
+      const previousUnitCost =
+        previous !== null ? Math.max(0, Math.round(Number(previous.unitCost) || 0)) : null;
+      const costDelta =
+        previousUnitCost !== null && previousUnitCost > 0 ? latestUnitCost - previousUnitCost : 0;
+      const costDeltaPct =
+        previousUnitCost !== null && previousUnitCost > 0
+          ? Math.round((costDelta / previousUnitCost) * 1000) / 10
+          : 0;
+
+      productPriceHistory.push({
+        productKey: pKey,
+        productId: linkedProd?.id || latest.productId,
+        productCode: linkedProd?.code,
+        productName: linkedProd?.name || latest.productName,
+        unit: linkedProd?.unit || latest.unit,
+        warehouseName: linkedProd?.warehouseName || latest.warehouseName,
+        currentStock: linkedProd ? Number(linkedProd.stock) || 0 : null,
+        currentImportPrice: linkedProd ? Number(linkedProd.importPrice) || 0 : null,
+        currentSellPrice: linkedProd ? Number(linkedProd.sellPrice) || 0 : null,
+        importCount: prodImports.length,
+        totalQtyImported: prodImports.reduce((s, i) => s + (Number(i.quantity) || 0), 0),
+        totalValueImported: prodImports.reduce((s, i) => s + (Number(i.totalCost) || 0), 0),
+        latestUnitCost,
+        latestDate: (latest.createdAt || '').slice(0, 10),
+        latestReceiptCode: latest.receiptCode,
+        previousUnitCost,
+        previousDate: previous ? (previous.createdAt || '').slice(0, 10) : null,
+        costDelta,
+        costDeltaPct,
+        minUnitCost,
+        maxUnitCost,
+      });
+    });
+
+    // Also include products linked to this supplier by supplierName that have 0 import receipts yet
+    for (const p of products) {
+      if (normalizeVietnameseSearch(p.supplierName) !== dirItem.key) continue;
+      if (productPriceHistory.some((t) => t.productId === p.id)) continue;
+      productPriceHistory.push({
+        productKey: `id:${p.id}`,
+        productId: p.id,
+        productCode: p.code,
+        productName: p.name,
+        unit: p.unit,
+        warehouseName: p.warehouseName,
+        currentStock: Number(p.stock) || 0,
+        currentImportPrice: Number(p.importPrice) || 0,
+        currentSellPrice: Number(p.sellPrice) || 0,
+        importCount: 0,
+        totalQtyImported: 0,
+        totalValueImported: 0,
+        latestUnitCost: Number(p.importPrice) || 0,
+        latestDate: (p.createdAt || '').slice(0, 10),
+        latestReceiptCode: 'Danh mục',
+        previousUnitCost: null,
+        previousDate: null,
+        costDelta: 0,
+        costDeltaPct: 0,
+        minUnitCost: Number(p.importPrice) || 0,
+        maxUnitCost: Number(p.importPrice) || 0,
+      });
+    }
+
+    productPriceHistory.sort(
+      (a, b) => b.totalValueImported - a.totalValueImported || a.productName.localeCompare(b.productName, 'vi')
+    );
+
+    const distinctReceiptCount = countDistinctImportReceipts(matchedImports);
+    const unpaidReceiptCount = matchedImports.filter((i) => (Number(i.debtAmount) || 0) > 0).length;
+
+    return {
+      key: dirItem.key,
+      profile,
+      isImplicitFromImports: !profile,
+      code: profile?.code || dirItem.code,
+      name: profile?.name || dirItem.name,
+      phone: profile?.phone || dirItem.phone,
+      address: profile?.address || dirItem.address,
+      note: profile?.note || '',
+      warehouseName: profile?.warehouseName || dirItem.warehouseName,
+      totalImportedCost,
+      totalPaidAmount,
+      totalContraOffsetAmount,
+      totalRemainingDebt,
+      overdueDebtAmount,
+      distinctReceiptCount,
+      unpaidReceiptCount,
+      suppliedProductsCount: productPriceHistory.length,
+      lastImportDate: matchedImports[0] ? (matchedImports[0].createdAt || '').slice(0, 10) : '',
+      productPriceHistory,
+      importReceipts: matchedImports,
+      paymentHistory: matchedPayments,
+      contraSales: matchedContraSales,
+    };
+  });
 }

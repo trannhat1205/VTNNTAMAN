@@ -191,6 +191,7 @@ export interface AppNotification {
     | 'inventory'
     | 'debts'
     | 'customers'
+    | 'suppliers'
     | 'receipt_vouchers'
     | 'payment_vouchers'
     | 'vouchers'
@@ -287,6 +288,7 @@ export interface SupplierProfile {
   warehouseName?: string;
   ownerId?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export type StaffPositionRole =
@@ -401,6 +403,7 @@ export type AuditTargetEntity =
   | 'import'
   | 'product'
   | 'customer'
+  | 'supplier'
   | 'voucher'
   | 'staff'
   | 'backup'
@@ -451,6 +454,7 @@ export type CrossLinkTargetTab =
   | 'imports'
   | 'inventory'
   | 'customers'
+  | 'suppliers'
   | 'debts'
   | 'receipt_vouchers'
   | 'payment_vouchers'

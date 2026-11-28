@@ -100,11 +100,16 @@ import { CreditGradeBadge } from './CreditGradeBadge';
 import {
   computeCustomerCreditGrade,
   computeFrequentlyBoughtTogether,
+  computeImportSellPriceSuggestion,
+  computeMarginInfo,
+  evaluateSaleOrderProfitability,
   isOverCreditLimit,
+  priceFromMarkup,
   resolveCustomerGroupPrice,
   addParkedOrder,
   loadParkedOrders,
   saveParkedOrders,
+  VTNN_MARKUP_PRESETS,
   type ParkedOrder,
 } from '../utils/smartInsights';
 import { ExcelDataBar } from './ExcelDataBar';
@@ -824,6 +829,26 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     supplierOffsetPreview &&
       supplierOffsetPreview.offsetAmount > 0 &&
       supplierOffsetPreview.remainingPayableAfterOffset === 0
+  );
+
+  const profitEval = evaluateSaleOrderProfitability(
+    combinedPreviewItems.map((it) => {
+      const p = products.find((x) => x.id === it.productId);
+      const gp = it.giftProductId ? products.find((x) => x.id === it.giftProductId) : undefined;
+      return {
+        productId: it.productId,
+        productName: it.productName,
+        unit: it.unit,
+        quantity: it.quantity,
+        unitPrice: it.unitPrice,
+        unitCost: p ? Number(p.importPrice) || 0 : 0,
+        discountAmount: it.discountAmount || 0,
+        giftProductName: it.giftProductName,
+        giftQuantity: it.giftQuantity || 0,
+        giftUnitCost: gp ? Number(gp.importPrice) || 0 : 0,
+      };
+    }),
+    { isSupplierSale: Boolean(selectedSupplierObj) }
   );
 
   const clearCurrentLineInputsOnly = () => {
@@ -1696,16 +1721,16 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       placeholder="VD: Tâm An Tháp Mười"
                       className="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                     />
-                    <button
-                      type="button"
-                      onClick={handleConfirmInlineWarehouseInSale}
-                      className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md whitespace-nowrap"
-                    >
-                      Lưu kho & Chọn
-                    </button>
+                      <button
+                        type="button"
+                        onClick={handleConfirmInlineWarehouseInSale}
+                        className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md whitespace-nowrap"
+                      >
+                        Lưu kho & Chọn
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
             </div>
 
             {/* 1. Customer Selection + Inline New Customer Creation */}
@@ -2765,6 +2790,88 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* Phase 2C: Instant Loss / Thin-Margin Warning when Discount, Gift, or Price causes Negative Gross Profit */}
+              {profitEval.hasItems && profitEval.level === 'loss' && (
+                <div className="p-3 rounded-lg border-2 border-rose-400 bg-rose-50 text-xs text-rose-950 space-y-2">
+                  <div className="font-bold flex items-start gap-1.5 text-rose-800">
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                    <span>
+                      Cảnh báo bán lỗ dưới giá vốn: Đơn này đang ÂM LÃI GỘP -
+                      {formatVND(profitEval.lossAmount)}!
+                    </span>
+                  </div>
+                  <div className="text-[11px] space-y-0.5 text-rose-900">
+                    <div>
+                      • Doanh thu thuần sau CK:{' '}
+                      <strong className="font-mono">{formatVND(profitEval.netRevenue)}</strong> &lt;
+                      Tổng giá vốn xuất kho:{' '}
+                      <strong className="font-mono">{formatVND(profitEval.totalCost)}</strong> (vốn
+                      hàng: {formatVND(profitEval.productCogs)}
+                      {profitEval.giftPromoCost > 0
+                        ? ` + quà KM: ${formatVND(profitEval.giftPromoCost)}`
+                        : ''}
+                      ).
+                    </div>
+                    {profitEval.reasons.map((r, idx) => (
+                      <div key={idx}>• {r}</div>
+                    ))}
+                    <div>
+                      • Mức giảm giá tối đa để hòa vốn:{' '}
+                      <strong className="font-mono text-emerald-800">
+                        {formatVND(profitEval.maxBreakEvenDiscount)}
+                      </strong>
+                    </div>
+                  </div>
+                  {posCartItems.length === 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                      {hasDiscountActive &&
+                        computedDiscountAmount > profitEval.maxBreakEvenDiscount && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDiscountMode('amount');
+                              setDiscountInput(String(profitEval.maxBreakEvenDiscount));
+                            }}
+                            className="px-2.5 py-1 text-[11px] font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-md"
+                          >
+                            Chỉnh giảm giá về mức hòa vốn ({formatVND(profitEval.maxBreakEvenDiscount)})
+                          </button>
+                        )}
+                      {currentProduct && priceNum < currentProduct.importPrice && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setUnitPrice(String(currentProduct.importPrice))}
+                            className="px-2.5 py-1 text-[11px] font-bold text-rose-900 bg-white hover:bg-rose-100 border border-rose-300 rounded-md"
+                          >
+                            Đưa đơn giá về Giá vốn ({formatVND(currentProduct.importPrice)})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setUnitPrice(String(currentProduct.sellPrice))}
+                            className="px-2.5 py-1 text-[11px] font-bold text-emerald-900 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 rounded-md"
+                          >
+                            Đưa về Giá bán lẻ ({formatVND(currentProduct.sellPrice)})
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {profitEval.hasItems && profitEval.level === 'thin_margin' && (
+                <div className="p-2.5 rounded-lg border border-amber-300 bg-amber-50/90 text-xs text-amber-950 flex items-center justify-between gap-2">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                    <span>Lưu ý biên lợi nhuận mỏng (&lt; 5%):</span>
+                  </span>
+                  <span className="font-mono font-bold text-amber-900">
+                    Lãi gộp +{formatVND(profitEval.estimatedGrossProfit)} ({profitEval.grossMarginPct}%)
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Thêm ghi chú sản phẩm — Searchable Saved Templates & Auto-Remember Binding */}
@@ -3399,6 +3506,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   {formatVND(summary.totalAmount)}
                 </span>
               </div>
+              {profitEval.hasItems && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-600">Lãi gộp dự kiến (sau CK &amp; quà KM):</span>
+                  <span
+                    className={`font-mono tabular-nums font-bold ${
+                      profitEval.estimatedGrossProfit < 0
+                        ? 'text-rose-600'
+                        : profitEval.level === 'thin_margin'
+                        ? 'text-amber-700'
+                        : 'text-emerald-700'
+                    }`}
+                  >
+                    {profitEval.estimatedGrossProfit >= 0 ? '+' : ''}
+                    {formatVND(profitEval.estimatedGrossProfit)} ({profitEval.grossMarginPct}%)
+                  </span>
+                </div>
+              )}
               <div className="flex items-center justify-between">
                 <span className="text-slate-600">Khách thanh toán:</span>
                 <span className="font-mono tabular-nums text-emerald-700 font-semibold">
@@ -4298,6 +4422,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                               }
                             />
                           )}
+                          {s.isSupplierSale && s.customerName && (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label={`Sổ NCC: ${s.customerName}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'suppliers',
+                                  recordId: s.customerName,
+                                  label: `Sổ NCC ${s.customerName}`,
+                                })
+                              }
+                            />
+                          )}
                           {diag.linkedProduct && (
                             <CrossLinkChip
                               tone="indigo"
@@ -5153,6 +5290,8 @@ interface ImportLogViewProps {
   lockedWarehouse: string | null;
   preselectedProductId: string | null;
   onClearPreselectedProduct: () => void;
+  preselectedSupplierName?: string | null;
+  onClearPreselectedSupplier?: () => void;
   focusedImportId?: string | null;
   onClearFocusedImport?: () => void;
   onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
@@ -5168,6 +5307,7 @@ interface ImportLogViewProps {
     warehouseName: string;
     batchNumber?: string;
     expiryDate?: string;
+    newSellPrice?: number;
   }) => ImportTransaction;
   onCreateMultiItemImport?: (payload: {
     supplierName: string;
@@ -5220,6 +5360,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   lockedWarehouse,
   preselectedProductId,
   onClearPreselectedProduct,
+  preselectedSupplierName,
+  onClearPreselectedSupplier,
   focusedImportId,
   onClearFocusedImport,
   onNavigateCrossLink,
@@ -5311,6 +5453,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [importCartItems, setImportCartItems] = useState<ImportCartDraftItem[]>([]);
   // Zero-cost imports (free samples / promo goods from supplier) must be confirmed explicitly
   const [isFreeSampleImport, setIsFreeSampleImport] = useState<boolean>(false);
+  // Phase 2B: Suggested retail price update based on target markup % when import cost changes
+  const [applyNewSellPriceOnImport, setApplyNewSellPriceOnImport] = useState<boolean>(false);
+  const [newSellPriceOnImport, setNewSellPriceOnImport] = useState<string>('');
+  const [userTouchedSellPriceToggle, setUserTouchedSellPriceToggle] = useState<boolean>(false);
   const ZERO_COST_IMPORT_ERROR =
     'Đơn giá nhập đang là 0 đ. Vui lòng nhập Đơn giá nhập thực tế (> 0 đ), hoặc tích chọn "Hàng tặng / Hàng mẫu 0 đ từ NCC" nếu đây là hàng khuyến mãi không tính tiền.';
   const [importRowLimit, setImportRowLimit] = useState<number>(80);
@@ -5363,6 +5509,9 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     setNote('');
     setImportCartItems([]);
     setIsFreeSampleImport(false);
+    setApplyNewSellPriceOnImport(false);
+    setNewSellPriceOnImport('');
+    setUserTouchedSellPriceToggle(false);
     setShowNewProductBox(false);
     setNewProdCode('');
     setNewProdName('');
@@ -5391,6 +5540,19 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       onClearPreselectedProduct();
     }
   }, [preselectedProductId, products, suppliers, lockedWarehouse, onClearPreselectedProduct]);
+
+  useEffect(() => {
+    if (preselectedSupplierName) {
+      setSelectedSupplierName(preselectedSupplierName);
+      setShowNewSupplierBox(false);
+      const supDir = buildAvailableSupplierDirectory(suppliers, imports, products);
+      const matched = supDir.find(
+        (s) => normalizeVietnameseSearch(s.name) === normalizeVietnameseSearch(preselectedSupplierName)
+      );
+      if (matched?.phone) setSupplierPhone(matched.phone);
+      onClearPreselectedSupplier?.();
+    }
+  }, [preselectedSupplierName, suppliers, imports, products, onClearPreselectedSupplier]);
 
   useEffect(() => {
     if (newProductRedirectTrigger) {
@@ -5435,6 +5597,9 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     }
     setSelectedProductId(prodId);
     setShowNewProductBox(false);
+    setApplyNewSellPriceOnImport(false);
+    setNewSellPriceOnImport('');
+    setUserTouchedSellPriceToggle(false);
     const prod = products.find((p) => p.id === prodId);
     if (prod) {
       setUnitCost(String(prod.importPrice));
@@ -5551,6 +5716,34 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const costNum = Math.max(0, Number(unitCost) || 0);
   const paidNum = Math.max(0, Number(paidAmount) || 0);
 
+  const sellPriceSuggestion =
+    currentProduct && !isFreeSampleImport && (costNum > 0 || currentProduct.importPrice > 0)
+      ? computeImportSellPriceSuggestion({
+          previousStock: currentProduct.stock,
+          previousImportPrice: currentProduct.importPrice,
+          currentSellPrice: currentProduct.sellPrice,
+          incomingQty: qtyNum > 0 ? qtyNum : 1,
+          incomingUnitCost: costNum > 0 ? costNum : currentProduct.importPrice,
+        })
+      : null;
+
+  useEffect(() => {
+    if (!sellPriceSuggestion || userTouchedSellPriceToggle) return;
+    if (sellPriceSuggestion.isCurrentSellBelowOrEqualNewCost) {
+      const preset20 =
+        sellPriceSuggestion.presets.find((p) => p.markupPct === 20) ||
+        sellPriceSuggestion.presets[0];
+      if (preset20 && preset20.sellPrice > 0) {
+        setApplyNewSellPriceOnImport(true);
+        setNewSellPriceOnImport(String(preset20.sellPrice));
+      }
+    }
+  }, [
+    sellPriceSuggestion?.isCurrentSellBelowOrEqualNewCost,
+    sellPriceSuggestion?.newWeightedImportPrice,
+    userTouchedSellPriceToggle,
+  ]);
+
   const currentImportDraftItem: ImportCartDraftItem | null =
     currentProduct && qtyNum > 0
       ? {
@@ -5597,6 +5790,9 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     setUnitCost('');
     setBatchNumber('');
     setExpiryDate('');
+    setApplyNewSellPriceOnImport(false);
+    setNewSellPriceOnImport('');
+    setUserTouchedSellPriceToggle(false);
   };
 
   const quickImportQuantities = importCartItems.reduce<Record<string, number>>((acc, item) => {
@@ -5647,6 +5843,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       setFeedback({ type: 'error', text: ZERO_COST_IMPORT_ERROR });
       return;
     }
+    const resolvedNewSell =
+      applyNewSellPriceOnImport && Number(newSellPriceOnImport) > 0
+        ? Math.round(Number(newSellPriceOnImport))
+        : undefined;
     const newItem: ImportCartDraftItem = {
       id: `imp_cart_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       productId: resolvedProduct.id,
@@ -5656,6 +5856,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       unitCost: effectiveCost,
       batchNumber: batchNumber.trim() || undefined,
       expiryDate: expiryDate || undefined,
+      newSellPrice: resolvedNewSell,
     };
     const nextCart = [...importCartItems, newItem];
     setImportCartItems(nextCart);
@@ -5730,6 +5931,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
             unitCost: costNum > 0 ? costNum : draftProd.importPrice,
             batchNumber: batchNumber.trim() || undefined,
             expiryDate: expiryDate || undefined,
+            newSellPrice:
+              applyNewSellPriceOnImport && Number(newSellPriceOnImport) > 0
+                ? Math.round(Number(newSellPriceOnImport))
+                : undefined,
           });
         }
       }
@@ -5849,6 +6054,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       warehouseName: resolvedWarehouse,
       batchNumber: batchNumber.trim() || undefined,
       expiryDate: expiryDate || undefined,
+      newSellPrice:
+        applyNewSellPriceOnImport && Number(newSellPriceOnImport) > 0
+          ? Math.round(Number(newSellPriceOnImport))
+          : undefined,
     });
 
     if (shouldExportPDF) {
@@ -6109,6 +6318,11 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                                 Lô: {item.batchNumber}
                               </span>
                             )}
+                            {item.newSellPrice && item.newSellPrice > 0 && (
+                              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">
+                                → Giá bán mới: {formatVND(item.newSellPrice)}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5 shrink-0">
@@ -6286,6 +6500,28 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                       />
                     </div>
                   </div>
+                  {Number(newProdImportPrice) > 0 && (
+                    <div className="flex flex-wrap items-center gap-1 text-[11px]">
+                      <span className="text-slate-600 font-medium">Gợi ý giá bán theo % lãi:</span>
+                      {VTNN_MARKUP_PRESETS.map((pct) => {
+                        const suggested = priceFromMarkup(Number(newProdImportPrice), pct);
+                        return (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => setNewProdSellPrice(String(suggested))}
+                            className={`px-2 py-0.5 rounded border font-mono font-semibold ${
+                              Number(newProdSellPrice) === suggested
+                                ? 'bg-emerald-700 text-white border-emerald-700'
+                                : 'bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-50'
+                            }`}
+                          >
+                            +{pct}% ({formatVND(suggested)})
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                   <button
                     type="button"
                     onClick={handleConfirmInlineProductInImport}
@@ -6526,6 +6762,140 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
               />
               <span>Hàng tặng / Hàng mẫu 0 đ từ NCC (không tính tiền)</span>
             </label>
+
+            {/* Phase 2B: Smart Retail Price Suggestion by Target Markup % when Import Cost Changes */}
+            {sellPriceSuggestion && currentProduct && (
+              <div
+                className={`p-3.5 rounded-xl border space-y-2.5 text-xs ${
+                  sellPriceSuggestion.isCurrentSellBelowOrEqualNewCost
+                    ? 'bg-rose-50/90 border-rose-300 text-rose-950'
+                    : 'bg-emerald-50/55 border-emerald-200 text-slate-800'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-slate-900">
+                    Giá vốn BQ mới dự kiến:{' '}
+                    <span className="font-mono text-emerald-800">
+                      {formatVND(sellPriceSuggestion.newWeightedImportPrice)}
+                    </span>
+                    {sellPriceSuggestion.costDeltaVsPrevAvg !== 0 && (
+                      <span
+                        className={`ml-1.5 px-1.5 py-0.5 text-[10px] font-mono rounded ${
+                          sellPriceSuggestion.costDeltaVsPrevAvg > 0
+                            ? 'bg-amber-100 text-amber-900'
+                            : 'bg-emerald-100 text-emerald-800'
+                        }`}
+                      >
+                        {sellPriceSuggestion.costDeltaVsPrevAvg > 0 ? '+' : ''}
+                        {formatVND(sellPriceSuggestion.costDeltaVsPrevAvg)} vs vốn cũ
+                      </span>
+                    )}
+                  </span>
+                  <span className="text-[11px] font-mono text-slate-600">
+                    Giá bán hiện tại: <strong>{formatVND(currentProduct.sellPrice)}</strong> (Lãi:{' '}
+                    <strong
+                      className={
+                        sellPriceSuggestion.currentMarginAfterImport.profitPerUnit <= 0
+                          ? 'text-rose-600'
+                          : 'text-emerald-700'
+                      }
+                    >
+                      {sellPriceSuggestion.currentMarginAfterImport.markupPct}%
+                    </strong>
+                    )
+                  </span>
+                </div>
+
+                {sellPriceSuggestion.isCurrentSellBelowOrEqualNewCost && (
+                  <div className="p-2 rounded-lg bg-rose-100/80 border border-rose-300 text-[11px] font-semibold text-rose-900 flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-700 shrink-0 mt-0.5" />
+                    <span>
+                      Giá bán lẻ hiện tại ({formatVND(currentProduct.sellPrice)}) đang thấp hơn hoặc
+                      bằng giá vốn mới ({formatVND(sellPriceSuggestion.newWeightedImportPrice)}) —
+                      nên cập nhật Giá bán lẻ mới bên dưới để tránh bán lỗ!
+                    </span>
+                  </div>
+                )}
+
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-semibold text-slate-700">
+                    Chọn nhanh Giá bán lẻ mới theo % lãi trên vốn mới:
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {sellPriceSuggestion.presets.map((p) => {
+                      const isPicked =
+                        applyNewSellPriceOnImport && Number(newSellPriceOnImport) === p.sellPrice;
+                      return (
+                        <button
+                          key={p.markupPct}
+                          type="button"
+                          onClick={() => {
+                            setUserTouchedSellPriceToggle(true);
+                            setApplyNewSellPriceOnImport(true);
+                            setNewSellPriceOnImport(String(p.sellPrice));
+                          }}
+                          className={`px-2 py-1 rounded-lg border text-[11px] font-mono font-bold transition-colors ${
+                            isPicked
+                              ? 'bg-emerald-700 text-white border-emerald-700'
+                              : 'bg-white text-emerald-900 border-emerald-300 hover:bg-emerald-100/70'
+                          }`}
+                        >
+                          +{p.markupPct}% ({formatVND(p.sellPrice)})
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 border-t border-emerald-200/70">
+                  <label className="inline-flex items-center gap-2 font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={applyNewSellPriceOnImport}
+                      onChange={(e) => {
+                        setUserTouchedSellPriceToggle(true);
+                        const checked = e.target.checked;
+                        setApplyNewSellPriceOnImport(checked);
+                        if (checked && !newSellPriceOnImport) {
+                          const p20 =
+                            sellPriceSuggestion.presets.find((x) => x.markupPct === 20) ||
+                            sellPriceSuggestion.presets[0];
+                          if (p20) setNewSellPriceOnImport(String(p20.sellPrice));
+                        }
+                      }}
+                      className="w-4 h-4 accent-emerald-700"
+                    />
+                    <span>Cập nhật luôn Giá bán lẻ mới khi lưu phiếu nhập:</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      value={newSellPriceOnImport}
+                      onChange={(e) => {
+                        setUserTouchedSellPriceToggle(true);
+                        setNewSellPriceOnImport(e.target.value);
+                        if (Number(e.target.value) > 0) setApplyNewSellPriceOnImport(true);
+                      }}
+                      placeholder="Nhập giá bán mới..."
+                      className="w-36 px-2.5 py-1 text-xs font-mono font-bold bg-white border border-slate-300 rounded-lg"
+                    />
+                    {applyNewSellPriceOnImport && Number(newSellPriceOnImport) > 0 && (
+                      <span className="text-[11px] font-mono font-bold text-emerald-800 whitespace-nowrap">
+                        (
+                        {
+                          computeMarginInfo(
+                            Number(newSellPriceOnImport),
+                            sellPriceSuggestion.newWeightedImportPrice
+                          ).markupPct
+                        }
+                        % lãi)
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -6987,6 +7357,19 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                       )}
                       {onNavigateCrossLink && (
                         <>
+                          {imp.supplierName && (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label={`Sổ NCC: ${imp.supplierName}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'suppliers',
+                                  recordId: imp.supplierName,
+                                  label: `Sổ NCC ${imp.supplierName}`,
+                                })
+                              }
+                            />
+                          )}
                           {diag.linkedProduct && (
                             <CrossLinkChip
                               tone="indigo"
@@ -7221,7 +7604,20 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         </div>
                         {onNavigateCrossLink && (
                           <div className="flex flex-wrap items-center gap-1 mt-1.5">
-                            {diag.linkedProduct && (
+                            {imp.supplierName && (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label={`Sổ NCC: ${imp.supplierName}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'suppliers',
+                                  recordId: imp.supplierName,
+                                  label: `Sổ NCC ${imp.supplierName}`,
+                                })
+                              }
+                            />
+                          )}
+                          {diag.linkedProduct && (
                               <CrossLinkChip
                                 tone="indigo"
                                 label={`Thẻ kho (Tồn ${diag.linkedProduct.stock})`}

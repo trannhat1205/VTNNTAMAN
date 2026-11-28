@@ -312,3 +312,259 @@ export function computeShiftCloseSummary(input: ShiftCloseInput): ShiftCloseSumm
       : Math.round(Number(input.countedCash) - expectedCash);
   return { cashIn, cashOut, nonCashIn, nonCashOut, expectedCash, difference, byMethodIn, byMethodOut };
 }
+
+/* -------------------------------------------- Phase 2B: import markup helper */
+
+export const VTNN_MARKUP_PRESETS = [10, 15, 20, 25, 30] as const;
+
+export interface ImportSellPricePreset {
+  markupPct: number;
+  sellPrice: number;
+  profitPerUnit: number;
+  marginPct: number;
+}
+
+export interface ImportSellPriceSuggestion {
+  previousStock: number;
+  previousImportPrice: number;
+  incomingQty: number;
+  incomingUnitCost: number;
+  newWeightedImportPrice: number;
+  costDeltaVsPrevAvg: number;
+  costDeltaPctVsPrevAvg: number;
+  currentSellPrice: number;
+  currentMarginAfterImport: MarginInfo;
+  isCurrentSellBelowOrEqualNewCost: boolean;
+  presets: ImportSellPricePreset[];
+}
+
+/**
+ * Computes the projected weighted-average cost after an import and suggests retail prices at
+ * +10% / +15% / +20% / +25% / +30% markup (rounded cleanly to 1.000 đ, or 100 đ for low-cost items).
+ */
+export function computeImportSellPriceSuggestion(params: {
+  previousStock: number;
+  previousImportPrice: number;
+  currentSellPrice: number;
+  incomingQty: number;
+  incomingUnitCost: number;
+}): ImportSellPriceSuggestion {
+  const prevStock = Math.max(0, Number(params.previousStock) || 0);
+  const prevCost = Math.max(0, Math.round(Number(params.previousImportPrice) || 0));
+  const curSell = Math.max(0, Math.round(Number(params.currentSellPrice) || 0));
+  const inQty = Math.max(0, Number(params.incomingQty) || 0);
+  const inCost = Math.max(0, Math.round(Number(params.incomingUnitCost) || 0));
+
+  const newWeightedImportPrice =
+    prevStock > 0 && prevCost > 0 && inQty > 0
+      ? Math.round((prevStock * prevCost + inQty * inCost) / (prevStock + inQty))
+      : inCost > 0
+      ? inCost
+      : prevCost;
+
+  const costDeltaVsPrevAvg = prevCost > 0 ? newWeightedImportPrice - prevCost : 0;
+  const costDeltaPctVsPrevAvg =
+    prevCost > 0 ? Math.round((costDeltaVsPrevAvg / prevCost) * 1000) / 10 : 0;
+
+  const currentMarginAfterImport = computeMarginInfo(curSell, newWeightedImportPrice);
+  const isCurrentSellBelowOrEqualNewCost =
+    newWeightedImportPrice > 0 && curSell <= newWeightedImportPrice;
+
+  const presets: ImportSellPricePreset[] = VTNN_MARKUP_PRESETS.map((pct) => {
+    const roundedThousand = priceFromMarkup(newWeightedImportPrice, pct);
+    const exactTarget = newWeightedImportPrice * (1 + pct / 100);
+    const sellPrice =
+      newWeightedImportPrice <= 0
+        ? 0
+        : roundedThousand > newWeightedImportPrice
+        ? roundedThousand
+        : Math.ceil(exactTarget / 100) * 100;
+    const m = computeMarginInfo(sellPrice, newWeightedImportPrice);
+    return {
+      markupPct: pct,
+      sellPrice,
+      profitPerUnit: m.profitPerUnit,
+      marginPct: m.marginPct,
+    };
+  });
+
+  return {
+    previousStock: prevStock,
+    previousImportPrice: prevCost,
+    incomingQty: inQty,
+    incomingUnitCost: inCost,
+    newWeightedImportPrice,
+    costDeltaVsPrevAvg,
+    costDeltaPctVsPrevAvg,
+    currentSellPrice: curSell,
+    currentMarginAfterImport,
+    isCurrentSellBelowOrEqualNewCost,
+    presets,
+  };
+}
+
+/* ------------------------------------------- Phase 2C: sale loss guard */
+
+export interface SaleLineProfitInput {
+  productId: string;
+  productName: string;
+  unit: string;
+  quantity: number;
+  unitPrice: number;
+  unitCost: number;
+  discountAmount?: number;
+  giftProductName?: string;
+  giftQuantity?: number;
+  giftUnitCost?: number;
+}
+
+export interface SaleOrderProfitabilityEvaluation {
+  hasItems: boolean;
+  grossRevenue: number;
+  totalDiscount: number;
+  netRevenue: number;
+  productCogs: number;
+  giftPromoCost: number;
+  totalCost: number;
+  estimatedGrossProfit: number;
+  grossMarginPct: number;
+  markupOnCostPct: number;
+  maxBreakEvenDiscount: number;
+  lossAmount: number;
+  level: 'healthy' | 'break_even_supplier' | 'thin_margin' | 'loss';
+  losingLines: Array<{
+    productName: string;
+    lineNet: number;
+    lineCost: number;
+    lineLoss: number;
+  }>;
+  reasons: string[];
+}
+
+/**
+ * Evaluates real-time order profitability across main items, discounts, and promotional gifts so
+ * cashiers immediately see if a discount, low selling price, or gift pushes the order into a loss.
+ */
+export function evaluateSaleOrderProfitability(
+  lines: SaleLineProfitInput[],
+  options?: { isSupplierSale?: boolean }
+): SaleOrderProfitabilityEvaluation {
+  const validLines = (lines || []).filter((l) => (Number(l.quantity) || 0) > 0);
+  if (validLines.length === 0) {
+    return {
+      hasItems: false,
+      grossRevenue: 0,
+      totalDiscount: 0,
+      netRevenue: 0,
+      productCogs: 0,
+      giftPromoCost: 0,
+      totalCost: 0,
+      estimatedGrossProfit: 0,
+      grossMarginPct: 0,
+      markupOnCostPct: 0,
+      maxBreakEvenDiscount: 0,
+      lossAmount: 0,
+      level: 'healthy',
+      losingLines: [],
+      reasons: [],
+    };
+  }
+
+  let grossRevenue = 0;
+  let totalDiscount = 0;
+  let productCogs = 0;
+  let giftPromoCost = 0;
+  let hasUnderCostUnitPrice = false;
+  const losingLines: Array<{
+    productName: string;
+    lineNet: number;
+    lineCost: number;
+    lineLoss: number;
+  }> = [];
+
+  for (const l of validLines) {
+    const qty = Math.max(0, Number(l.quantity) || 0);
+    const price = Math.max(0, Math.round(Number(l.unitPrice) || 0));
+    const cost = Math.max(0, Math.round(Number(l.unitCost) || 0));
+    const lineGross = Math.round(qty * price);
+    const lineDisc = Math.min(lineGross, Math.max(0, Math.round(Number(l.discountAmount) || 0)));
+    const lineNet = Math.max(0, lineGross - lineDisc);
+    const lineProdCost = Math.round(qty * cost);
+    const gQty = Math.max(0, Number(l.giftQuantity) || 0);
+    const gCost = Math.max(0, Math.round(Number(l.giftUnitCost) || 0));
+    const lineGiftCost = Math.round(gQty * gCost);
+    const lineCost = lineProdCost + lineGiftCost;
+
+    if (price < cost) {
+      hasUnderCostUnitPrice = true;
+    }
+    if (lineNet < lineCost) {
+      losingLines.push({
+        productName: l.productName,
+        lineNet,
+        lineCost,
+        lineLoss: lineCost - lineNet,
+      });
+    }
+
+    grossRevenue += lineGross;
+    totalDiscount += lineDisc;
+    productCogs += lineProdCost;
+    giftPromoCost += lineGiftCost;
+  }
+
+  const netRevenue = Math.max(0, grossRevenue - totalDiscount);
+  const totalCost = productCogs + giftPromoCost;
+  const estimatedGrossProfit = netRevenue - totalCost;
+  const maxBreakEvenDiscount = Math.max(0, grossRevenue - totalCost);
+  const lossAmount = Math.max(0, -estimatedGrossProfit);
+  const grossMarginPct =
+    netRevenue > 0 ? Math.round((estimatedGrossProfit / netRevenue) * 1000) / 10 : 0;
+  const markupOnCostPct =
+    totalCost > 0 ? Math.round((estimatedGrossProfit / totalCost) * 1000) / 10 : 0;
+
+  const reasons: string[] = [];
+  if (estimatedGrossProfit < 0) {
+    if (hasUnderCostUnitPrice) {
+      reasons.push('Đơn giá bán đang thấp hơn giá vốn nhập kho.');
+    }
+    if (totalDiscount > 0 && grossRevenue - productCogs - giftPromoCost >= 0) {
+      reasons.push('Số tiền giảm giá / chiết khấu vượt quá lợi nhuận gộp của đơn.');
+    } else if (totalDiscount > 0 && !hasUnderCostUnitPrice) {
+      reasons.push('Chiết khấu kết hợp quà tặng vượt quá biên lợi nhuận.');
+    }
+    if (giftPromoCost > 0 && netRevenue >= productCogs && netRevenue < totalCost) {
+      reasons.push('Giá vốn hàng quà tặng khuyến mãi vượt quá lãi gộp còn lại.');
+    }
+    if (reasons.length === 0) {
+      reasons.push('Tổng doanh thu thuần thấp hơn tổng giá vốn xuất kho.');
+    }
+  }
+
+  let level: SaleOrderProfitabilityEvaluation['level'] = 'healthy';
+  if (estimatedGrossProfit < 0) {
+    level = 'loss';
+  } else if (options?.isSupplierSale && estimatedGrossProfit === 0) {
+    level = 'break_even_supplier';
+  } else if (totalCost > 0 && (estimatedGrossProfit === 0 || grossMarginPct < 5)) {
+    level = 'thin_margin';
+  }
+
+  return {
+    hasItems: true,
+    grossRevenue,
+    totalDiscount,
+    netRevenue,
+    productCogs,
+    giftPromoCost,
+    totalCost,
+    estimatedGrossProfit,
+    grossMarginPct,
+    markupOnCostPct,
+    maxBreakEvenDiscount,
+    lossAmount,
+    level,
+    losingLines,
+    reasons,
+  };
+}

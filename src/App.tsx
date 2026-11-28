@@ -10,6 +10,7 @@ import {
   Activity,
   Bell,
   Boxes,
+  Building2,
   CloudCheck,
   FileSpreadsheet,
   History,
@@ -105,6 +106,7 @@ import {
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
   computeSmartDashboardAnalytics,
+  computeSupplierOldDebtSummary,
   computeWeightedAverageImportPrice,
   countDistinctImportReceipts,
   countDistinctSalesInvoices,
@@ -258,6 +260,9 @@ import {
 const CustomerModule = lazy(() =>
   import('./components/CustomerModule').then((m) => ({ default: m.CustomerModule }))
 );
+const SupplierModule = lazy(() =>
+  import('./components/SupplierModule').then((m) => ({ default: m.SupplierModule }))
+);
 const DebtModule = lazy(() =>
   import('./components/DebtModule').then((m) => ({ default: m.DebtModule }))
 );
@@ -304,6 +309,7 @@ type ActiveTab =
   | 'imports'
   | 'inventory'
   | 'customers'
+  | 'suppliers'
   | 'debts'
   | 'receipt_vouchers'
   | 'payment_vouchers'
@@ -952,11 +958,13 @@ export default function App() {
   // Cross-module navigation & deep-linked voucher state
   const [preselectedCustomerId, setPreselectedCustomerId] = useState<string | null>(null);
   const [preselectedProductId, setPreselectedProductId] = useState<string | null>(null);
+  const [preselectedSupplierName, setPreselectedSupplierName] = useState<string | null>(null);
   const [focusedDebtRecordId, setFocusedDebtRecordId] = useState<string | null>(null);
   const [focusedProductId, setFocusedProductId] = useState<string | null>(null);
   const [focusedSaleId, setFocusedSaleId] = useState<string | null>(null);
   const [focusedImportId, setFocusedImportId] = useState<string | null>(null);
   const [focusedCustomerId, setFocusedCustomerId] = useState<string | null>(null);
+  const [focusedSupplierKey, setFocusedSupplierKey] = useState<string | null>(null);
   const [focusedReceiptVoucherId, setFocusedReceiptVoucherId] = useState<string | null>(null);
   const [focusedPaymentVoucherId, setFocusedPaymentVoucherId] = useState<string | null>(null);
   const [importNewProductTrigger, setImportNewProductTrigger] = useState<{
@@ -983,6 +991,18 @@ export default function App() {
           ? products.find((p) => p.id === req.recordId || p.code === req.recordId)?.warehouseName
           : req.tab === 'customers'
           ? customers.find((c) => c.id === req.recordId || c.code === req.recordId)?.warehouseName
+          : req.tab === 'suppliers'
+          ? suppliers.find(
+              (sp) =>
+                sp.id === req.recordId ||
+                sp.code === req.recordId ||
+                normalizeVietnameseSearch(sp.name) === normalizeVietnameseSearch(req.recordId || '')
+            )?.warehouseName ||
+            imports.find(
+              (i) =>
+                normalizeVietnameseSearch(i.supplierName) ===
+                normalizeVietnameseSearch(req.recordId || '')
+            )?.warehouseName
           : req.tab === 'receipt_vouchers'
           ? receiptVouchers.find((r) => r.id === req.recordId || r.voucherCode === req.recordId)?.warehouseName
           : req.tab === 'payment_vouchers'
@@ -1008,6 +1028,8 @@ export default function App() {
       setFocusedProductId(req.recordId || req.voucherCode || null);
     } else if (req.tab === 'customers') {
       setFocusedCustomerId(req.recordId || req.voucherCode || null);
+    } else if (req.tab === 'suppliers') {
+      setFocusedSupplierKey(req.recordId || req.voucherCode || null);
     } else if (req.tab === 'debts') {
       setFocusedDebtRecordId(req.recordId || req.voucherCode || null);
     } else if (req.tab === 'receipt_vouchers') {
@@ -4207,6 +4229,7 @@ export default function App() {
     warehouseName: string;
     batchNumber?: string;
     expiryDate?: string;
+    newSellPrice?: number;
   }): ImportTransaction => {
     const nowIso = new Date().toISOString();
     const { updatedProducts: baseUpdatedProducts, updatedProduct: baseUpdatedProduct } =
@@ -4225,8 +4248,13 @@ export default function App() {
       payload.expiryDate,
       prevStock
     );
+    const appliedSellPrice =
+      payload.newSellPrice && Number(payload.newSellPrice) > 0
+        ? Math.round(Number(payload.newSellPrice))
+        : undefined;
     const updatedProduct: ProductItem = {
       ...baseUpdatedProduct,
+      ...(appliedSellPrice ? { sellPrice: appliedSellPrice } : {}),
       batchNumber: fefo.batchNumber,
       expiryDate: fefo.expiryDate,
     };
@@ -4297,15 +4325,17 @@ export default function App() {
     dispatchAtomicProductMutation(
       impOwnerUid,
       updatedProduct,
-      (cur) =>
-        computeAtomicProductImportAddition({
+      (cur) => {
+        const next = computeAtomicProductImportAddition({
           currentProduct: cur,
           importQty: payload.quantity,
           unitCost: payload.unitCost,
           nowIso,
           batchNumber: payload.batchNumber?.trim() || undefined,
           expiryDate: payload.expiryDate?.trim() || undefined,
-        }),
+        });
+        return appliedSellPrice ? { ...next, sellPrice: appliedSellPrice } : next;
+      },
       `imp_${newImportId}`
     );
 
@@ -4385,7 +4415,13 @@ export default function App() {
     const touchedProductsMap = new Map<string, ProductItem>();
     const perProductMutations = new Map<
       string,
-      Array<{ qty: number; unitCost: number; batchNumber?: string; expiryDate?: string }>
+      Array<{
+        qty: number;
+        unitCost: number;
+        batchNumber?: string;
+        expiryDate?: string;
+        newSellPrice?: number;
+      }>
     >();
 
     allocation.items.forEach((line, idx) => {
@@ -4404,8 +4440,13 @@ export default function App() {
         line.expiryDate,
         prevStock
       );
+      const lineNewSell =
+        line.newSellPrice && Number(line.newSellPrice) > 0
+          ? Math.round(Number(line.newSellPrice))
+          : undefined;
       const updatedProd: ProductItem = {
         ...baseProd,
+        ...(lineNewSell ? { sellPrice: lineNewSell } : {}),
         ...(fefo.batchNumber ? { batchNumber: fefo.batchNumber } : {}),
         ...(fefo.expiryDate ? { expiryDate: fefo.expiryDate } : {}),
       };
@@ -4417,6 +4458,7 @@ export default function App() {
         unitCost: line.unitCost,
         batchNumber: line.batchNumber?.trim() || undefined,
         expiryDate: line.expiryDate?.trim() || undefined,
+        newSellPrice: lineNewSell,
       });
       perProductMutations.set(updatedProd.id, ops);
 
@@ -4472,6 +4514,9 @@ export default function App() {
               batchNumber: op.batchNumber,
               expiryDate: op.expiryDate,
             });
+            if (op.newSellPrice && op.newSellPrice > 0) {
+              running = { ...running, sellPrice: op.newSellPrice };
+            }
           }
           return running;
         },
@@ -5169,6 +5214,111 @@ export default function App() {
     stageAndFlushRecords({ suppliers: [created] }, created.ownerId);
     showToast(`Đã thêm Nhà cung cấp mới: ${created.name} [${autoSupplierCode}] (${resolvedWh})`);
     return created;
+  };
+
+  const handleSaveSupplier = (
+    data: Omit<SupplierProfile, 'id' | 'createdAt'>,
+    editingId?: string
+  ): SupplierProfile => {
+    const nowIso = new Date().toISOString();
+    const resolvedWh =
+      lockedWarehouse ||
+      data.warehouseName ||
+      (currentStaff.assignedWarehouse !== 'Tất cả kho'
+        ? currentStaff.assignedWarehouse
+        : warehouses[0] || 'Tâm An Mỹ Ngãi');
+
+    if (editingId) {
+      const existing = suppliersRef.current.find((s) => s.id === editingId);
+      if (!canPerformRoleAction(role, 'edit_record')) {
+        showToast('Chỉ Quản lý mới có quyền chỉnh sửa hồ sơ Nhà cung cấp đã lưu.');
+        return (
+          existing || {
+            ...data,
+            id: editingId,
+            warehouseName: resolvedWh,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          }
+        );
+      }
+      const keepCode =
+        existing?.code &&
+        normalizeVietnameseSearch(existing.name) === normalizeVietnameseSearch(data.name);
+      const resolvedCode = keepCode
+        ? existing!.code!
+        : generateUniqueSupplierCodeFromName(data.name, suppliersRef.current, editingId);
+      const updated: SupplierProfile = {
+        ...(existing || {}),
+        ...data,
+        id: editingId,
+        code: resolvedCode,
+        warehouseName: existing?.warehouseName || resolvedWh,
+        ownerId: existing?.ownerId || resolveOwnerUidForWarehouse(resolvedWh),
+        createdAt: existing?.createdAt || nowIso,
+        updatedAt: nowIso,
+      };
+      const nextList = suppliersRef.current.map((s) => (s.id === editingId ? updated : s));
+      suppliersRef.current = nextList;
+      setSuppliers(nextList);
+      stageAndFlushRecords({ suppliers: [updated] }, updated.ownerId);
+      recordAuditLog({
+        actionCategory: 'update',
+        targetEntity: 'supplier',
+        targetCode: resolvedCode,
+        warehouseName: updated.warehouseName,
+        summary: `Cập nhật hồ sơ Nhà cung cấp ${updated.name} [${resolvedCode}]`,
+        details: `SĐT: ${updated.phone || 'Chưa có'} · Địa chỉ: ${updated.address || 'Chưa có'}`,
+        snapshotData: existing ? JSON.stringify(existing) : undefined,
+      });
+      showToast(`Đã cập nhật Nhà cung cấp: ${updated.name} [${resolvedCode}]`);
+      return updated;
+    }
+
+    const created = handleCreateSupplierInline({ ...data, warehouseName: resolvedWh });
+    recordAuditLog({
+      actionCategory: 'create',
+      targetEntity: 'supplier',
+      targetCode: created.code || 'NCC',
+      warehouseName: created.warehouseName,
+      summary: `Thêm Nhà cung cấp mới ${created.name} [${created.code || ''}]`,
+      details: `SĐT: ${created.phone || 'Chưa có'} · Địa chỉ: ${created.address || 'Chưa có'}`,
+      snapshotData: JSON.stringify(created),
+    });
+    return created;
+  };
+
+  const handleDeleteSupplier = (supplierId: string) => {
+    if (!canPerformRoleAction(role, 'delete_record')) {
+      showToast('Chỉ Quản lý mới có quyền xóa hồ sơ Nhà cung cấp.');
+      return;
+    }
+    const target = suppliersRef.current.find((s) => s.id === supplierId);
+    if (!target) return;
+    const activeDebt = computeSupplierOldDebtSummary(target.name, imports, 0).oldDebtAmount;
+    if (activeDebt > 0) {
+      showToast(
+        `Nhà cung cấp "${target.name}" đang còn nợ phải trả ${formatVND(
+          activeDebt
+        )} — vui lòng tất toán trước khi xóa!`
+      );
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    markRecordsDeleted(supplierId, nowIso);
+    const nextList = suppliersRef.current.filter((s) => s.id !== supplierId);
+    suppliersRef.current = nextList;
+    setSuppliers(nextList);
+    recordAuditLog({
+      actionCategory: 'delete',
+      targetEntity: 'supplier',
+      targetCode: target.code || 'NCC',
+      warehouseName: target.warehouseName,
+      summary: `Xóa hồ sơ Nhà cung cấp ${target.name}`,
+      details: `SĐT: ${target.phone || 'Chưa có'} · Địa chỉ: ${target.address || 'Chưa có'}`,
+      snapshotData: JSON.stringify(target),
+    });
+    showToast(`Đã xóa hồ sơ Nhà cung cấp "${target.name}".`);
   };
 
   const handleSaveProduct = (
@@ -9612,6 +9762,7 @@ export default function App() {
     { id: 'imports', label: 'Nhật ký Nhập hàng', icon: <Truck className="w-4 h-4" /> },
     { id: 'inventory', label: 'Quản lý Tồn kho', icon: <Boxes className="w-4 h-4" /> },
     { id: 'customers', label: 'Quản lý Khách hàng', icon: <Users className="w-4 h-4" /> },
+    { id: 'suppliers', label: 'Sổ Nhà cung cấp', icon: <Building2 className="w-4 h-4" /> },
     { id: 'debts', label: 'Quản lý Công nợ', icon: <Wallet className="w-4 h-4" /> },
     {
       id: 'receipt_vouchers',
@@ -11124,6 +11275,8 @@ export default function App() {
               lockedWarehouse={lockedWarehouse}
               preselectedProductId={preselectedProductId}
               onClearPreselectedProduct={() => setPreselectedProductId(null)}
+              preselectedSupplierName={preselectedSupplierName}
+              onClearPreselectedSupplier={() => setPreselectedSupplierName(null)}
               focusedImportId={focusedImportId}
               onClearFocusedImport={() => setFocusedImportId(null)}
               onNavigateCrossLink={handleNavigateCrossLink}
@@ -11203,6 +11356,40 @@ export default function App() {
               onClearFocusedCustomer={() => setFocusedCustomerId(null)}
               onNavigateCrossLink={handleNavigateCrossLink}
               leadDays={notificationPrefs.leadDays}
+            />
+          )}
+
+          {isSessionLoggedIn && activeTab === 'suppliers' && (
+            <SupplierModule
+              suppliers={visibleSuppliers}
+              imports={visibleImports}
+              products={visibleProducts}
+              sales={visibleSales}
+              paymentVouchers={visiblePaymentVouchers}
+              warehouses={allowedWarehouses}
+              lockedWarehouse={lockedWarehouse}
+              paymentGroups={paymentGroups}
+              role={role}
+              leadDays={notificationPrefs.leadDays}
+              focusedSupplierKey={focusedSupplierKey}
+              onClearFocusedSupplier={() => setFocusedSupplierKey(null)}
+              onSaveSupplier={handleSaveSupplier}
+              onDeleteSupplier={handleDeleteSupplier}
+              onSettleSupplierTotalDebtFifo={handleSettleSupplierTotalDebtFifo}
+              onQuickImportFromSupplier={(supName, prodId) => {
+                setPreselectedSupplierName(supName);
+                if (prodId) setPreselectedProductId(prodId);
+                setActiveTab('imports');
+                scrollToTopOfPage();
+                showToast(`Đã chọn sẵn Nhà cung cấp "${supName}" trong Nhật ký Nhập hàng!`);
+              }}
+              onQuickSellOffsetToSupplier={(supKey) => {
+                setPreselectedCustomerId(`sup::${supKey}`);
+                setActiveTab('sales');
+                scrollToTopOfPage();
+                showToast('Đã chọn sẵn Nhà cung cấp để xuất hàng cấn trừ công nợ!');
+              }}
+              onNavigateCrossLink={handleNavigateCrossLink}
             />
           )}
 
