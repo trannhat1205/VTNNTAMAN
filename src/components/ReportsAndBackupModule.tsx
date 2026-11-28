@@ -49,6 +49,7 @@ import {
   ALL_STAFF_FUNCTIONAL_PERMISSIONS,
   canViewAuditHistory,
   computeCashflowAndFinancialReport,
+  computeProvisionalCashbookProfitSummary,
   computeReceivedItemsAndDebtReport,
   computeTaxAuthorityFinancialStatement,
   evaluateDebtUrgency,
@@ -63,6 +64,7 @@ import {
   getDefaultPermissionsForPosition,
   getPositionRoleLabel,
   getRecentDaysRangeVietnam,
+  getReportCategoryMetaForAccount,
   getTodayVietnamDateStr,
   isDateWithinRange,
   normalizeVietnameseSearch,
@@ -83,6 +85,7 @@ import {
   exportTaxAuthorityFinancialReportPDF,
 } from '../utils/exportReports';
 import { uploadFileToFirebaseStorage } from '../services/firebaseService';
+import { WarehouseCashbookReportPanel } from './WarehouseCashbookReportPanel';
 
 export type ReportsOrBackupViewMode = 'reports' | 'backup_history';
 
@@ -472,6 +475,21 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
     [taxFinancialStatement, activeTaxDrillDownCode]
   );
 
+  // Sổ Quỹ & lợi nhuận tạm tính (tài khoản kho không phải quản lý chính)
+  const provisionalCashbookSummary = useMemo(
+    () =>
+      computeProvisionalCashbookProfitSummary({
+        sales,
+        imports,
+        products,
+        receiptVouchers,
+        paymentVouchers,
+        fromDate,
+        toDate,
+      }),
+    [sales, imports, products, receiptVouchers, paymentVouchers, fromDate, toDate]
+  );
+
   const handleSelectFinancialYear = (yr: number) => {
     const safeYr = Math.max(2020, Math.round(Number(yr) || 2026));
     setSelectedFinancialReportYear(safeYr);
@@ -541,6 +559,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       receiptVouchers: cashflowFinancial.filteredReceiptVouchers,
       paymentVouchers: cashflowFinancial.filteredPaymentVouchers,
       savedVouchers,
+      isPrimaryAdmin,
       recommendations: smartRecommendations,
     });
     onNotifyToast(
@@ -826,12 +845,12 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
           <div className="space-y-2.5">
             <div className="text-xs font-bold text-slate-800 flex flex-wrap items-center justify-end gap-2">
               <span className="text-[11px] font-medium text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-200">
-                Đang xem: {REPORT_CATEGORY_META[activeCategory]?.shortLabel}
+                Đang xem: {getReportCategoryMetaForAccount(activeCategory, isPrimaryAdmin).shortLabel}
               </span>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
               {allowedCategories.map((catKey, index) => {
-                const meta = REPORT_CATEGORY_META[catKey];
+                const meta = getReportCategoryMetaForAccount(catKey, isPrimaryAdmin);
                 const isActive = activeCategory === catKey;
                 const cleanTitle = meta.label.replace(/^\d+\.\s*/, '');
                 return (
@@ -981,6 +1000,39 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   </div>
                   <div className="text-xs text-emerald-700 font-semibold flex items-center gap-1 pt-1">
                     <span>Xem bảng hàng đã nhận & thu nợ →</span>
+                  </div>
+                </div>
+              )}
+
+              {!isPrimaryAdmin && allowedCategories.includes('financial_profit') && (
+                <div
+                  onClick={() => setActiveCategory('financial_profit')}
+                  className="bg-emerald-50/70 p-4 rounded-xl border border-emerald-200 hover:border-emerald-500 cursor-pointer transition-colors space-y-1 sm:col-span-2"
+                >
+                  <div className="flex items-center justify-between text-xs font-semibold text-emerald-900">
+                    <span>Sổ Quỹ &amp; Lợi nhuận tạm tính ({effectiveWarehouseLabel})</span>
+                    <Wallet className="w-4 h-4 text-emerald-700" />
+                  </div>
+                  <div
+                    className={`text-lg font-bold font-mono ${
+                      provisionalCashbookSummary.provisionalNetProfit >= 0
+                        ? 'text-emerald-800'
+                        : 'text-rose-700'
+                    }`}
+                  >
+                    Lợi nhuận tạm tính: {formatVND(provisionalCashbookSummary.provisionalNetProfit)} (Tỷ suất:{' '}
+                    {provisionalCashbookSummary.provisionalMarginPct}%)
+                  </div>
+                  <div className="text-xs text-emerald-800 font-semibold flex flex-wrap items-center gap-1 pt-1">
+                    <span>Doanh thu trước CK: +{formatVND(provisionalCashbookSummary.grossSalesRevenue)}</span>
+                    <span>· Thu khác: +{formatVND(provisionalCashbookSummary.otherIncomeReceipts)}</span>
+                    <span>· Giá vốn: -{formatVND(provisionalCashbookSummary.productCogs)}</span>
+                    <span>
+                      · CK &amp; Quà KM: -
+                      {formatVND(provisionalCashbookSummary.discountCost + provisionalCashbookSummary.giftPromoCost)}
+                    </span>
+                    <span>· Chi phí khác: -{formatVND(provisionalCashbookSummary.otherOperatingExpenses)}</span>
+                    <span>· Mở Sổ Quỹ →</span>
                   </div>
                 </div>
               )}
@@ -3541,6 +3593,27 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                 </div>
               </div>
             </div>
+          )}
+
+        {!isPrimaryAdmin &&
+          activeCategory === 'financial_profit' &&
+          allowedCategories.includes('financial_profit') && (
+            <WarehouseCashbookReportPanel
+              warehouseLabel={effectiveWarehouseLabel}
+              fromDate={fromDate}
+              toDate={toDate}
+              onChangeDateRange={(from, to) => {
+                setFromDate(from);
+                setToDate(to);
+              }}
+              searchQuery={reportSearch}
+              onChangeSearchQuery={setReportSearch}
+              summary={provisionalCashbookSummary}
+              onExportExcel={handleExportComprehensiveExcel}
+              onExportPDF={handleExportComprehensivePDF}
+              onSelectSale={(sale) => setDrillDownItem({ type: 'sale', record: sale })}
+              onNavigateToModule={onNavigateToModule}
+            />
           )}
 
         {/* Section: Tự Động Đề Xuất Các Báo Cáo Phù Hợp & Tốt Nhất */}

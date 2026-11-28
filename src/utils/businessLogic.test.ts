@@ -55,6 +55,8 @@ import {
   generateFiscalYearOptions,
   generateNextUniqueProductCode,
   buildNameAbbreviationBaseCode,
+  computeProvisionalCashbookProfitSummary,
+  getReportCategoryMetaForAccount,
   generateUniqueCustomerCodeFromName,
   generateUniqueProductCodeFromName,
   generateUniqueSupplierCodeFromName,
@@ -4190,4 +4192,113 @@ test('Abbreviation codes: customers, products and suppliers follow the initials 
   );
   assert.equal(generateUniqueSupplierCodeFromName('VTNN Lúa Xanh', []), 'VLXANH');
   assert.equal(generateUniqueSupplierCodeFromName('', [], undefined, true), '');
+});
+
+test('Sổ Quỹ: non-primary accounts see Sổ Quỹ with provisional profit equal to the financial report net profit', () => {
+  assert.equal(getReportCategoryMetaForAccount('financial_profit', false).label, '8. Sổ Quỹ');
+  assert.equal(getReportCategoryMetaForAccount('financial_profit', false).shortLabel, 'Sổ Quỹ');
+  assert.equal(
+    getReportCategoryMetaForAccount('financial_profit', true).label,
+    '8. Báo Cáo Tài Chính & Lợi Nhuận'
+  );
+  assert.equal(getReportCategoryMetaForAccount('sales_log', false).label, '3. Nhật Ký Bán Hàng');
+
+  const WH = 'Tâm An Mỹ Ngãi';
+  const prod: ProductItem = {
+    id: 'pc1', code: 'PC1', name: 'Thuốc Sổ Quỹ', category: 'Thuốc BVTV' as ProductItem['category'], unit: 'chai',
+    importPrice: 100000, sellPrice: 150000, stock: 50, minStock: 1, supplierName: 'NCC', warehouseName: WH,
+    ownerId: 'u1', createdAt: '2026-11-01T03:00:00.000Z', updatedAt: '2026-11-01T03:00:00.000Z',
+  };
+  const gift: ProductItem = { ...prod, id: 'pg1', code: 'QUA', name: 'Nón', importPrice: 20000, sellPrice: 0 };
+  const mkSale = (id: string, day: string, over: Partial<SaleTransaction>): SaleTransaction => ({
+    id, invoiceCode: `HD-${id}`, customerId: 'c1', customerName: 'K', customerPhone: '',
+    productId: 'pc1', productName: prod.name, unit: 'chai', quantity: 2, unitPrice: 150000, unitCost: 100000,
+    totalAmount: 300000, paidAmount: 300000, debtAmount: 0, dueDate: '2026-12-31', status: 'paid',
+    warehouseName: WH, note: '', staffName: 'x', ownerId: 'u1', createdAt: `${day}T03:00:00.000Z`,
+    updatedAt: `${day}T03:00:00.000Z`, ...over,
+  } as SaleTransaction);
+  const sales = [
+    mkSale('s1', '2026-11-10', {}),
+    // discount 30k + 1 gift (cost 20k): total 270k
+    mkSale('s2', '2026-11-12', {
+      totalAmount: 270000, paidAmount: 270000, discountAmount: 30000,
+      giftProductId: 'pg1', giftProductName: 'Nón', giftQuantity: 1, giftUnitCost: 20000,
+    }),
+    mkSale('s3', '2026-12-05', {}), // outside November
+  ];
+  const mkRv = (id: string, day: string, over: Partial<CashReceiptVoucher>): CashReceiptVoucher => ({
+    id, voucherCode: `PT-${id}`, groupName: 'Thu khác', warehouseName: WH, partnerName: 'x', partnerPhone: '',
+    amount: 50000, paymentMethod: 'Tiền mặt', isDebtSettlement: false, note: '', staffName: 'x', ownerId: 'u1',
+    createdAt: `${day}T03:00:00.000Z`, updatedAt: `${day}T03:00:00.000Z`, ...over,
+  });
+  const mkPv = (id: string, day: string, over: Partial<CashPaymentVoucher>): CashPaymentVoucher => ({
+    id, voucherCode: `PC-${id}`, groupName: 'Chi vận hành', warehouseName: WH, partnerName: 'x', partnerPhone: '',
+    amount: 40000, paymentMethod: 'Tiền mặt', isDebtSettlement: false, note: '', staffName: 'x', ownerId: 'u1',
+    createdAt: `${day}T03:00:00.000Z`, updatedAt: `${day}T03:00:00.000Z`, ...over,
+  });
+  const receipts = [
+    mkRv('r1', '2026-11-15', {}),
+    mkRv('r2', '2026-11-16', { isDebtSettlement: true, amount: 999000 }),
+    mkRv('r3', '2026-12-20', { amount: 777000 }),
+  ];
+  const payments = [
+    mkPv('p1', '2026-11-18', {}),
+    mkPv('p2', '2026-11-19', { isDebtSettlement: true, amount: 888000 }),
+  ];
+
+  const args = {
+    sales, imports: [], products: [prod, gift], receiptVouchers: receipts, paymentVouchers: payments,
+    fromDate: '2026-11-01', toDate: '2026-11-30',
+  };
+  const s = computeProvisionalCashbookProfitSummary(args);
+  assert.equal(s.saleRows.length, 2);
+  assert.equal(s.grossSalesRevenue, 300000 + 300000);
+  assert.equal(s.discountCost, 30000);
+  assert.equal(s.productCogs, 400000);
+  assert.equal(s.giftPromoCost, 20000);
+  assert.equal(s.otherIncomeReceipts, 50000);
+  assert.equal(s.otherOperatingExpenses, 40000);
+  assert.equal(
+    s.provisionalNetProfit,
+    s.grossSalesRevenue + s.otherIncomeReceipts - s.productCogs - s.discountCost - s.giftPromoCost - s.otherOperatingExpenses
+  );
+  assert.equal(s.provisionalNetProfit, computeCashflowAndFinancialReport(args).netProfit);
+  assert.equal(s.provisionalNetProfit, 600000 + 50000 - 400000 - 30000 - 20000 - 40000);
+  assert.equal(s.promoOrDiscountRows.length, 1);
+  assert.equal(s.saleRows.reduce((sum, r) => sum + r.rowProvisionalProfit, 0), 600000 - 400000 - 30000 - 20000);
+  assert.equal(s.otherIncomeVouchers.length, 1);
+  assert.equal(s.otherExpenseVouchers.length, 1);
+
+  // whole history includes December sale + voucher
+  const all = computeProvisionalCashbookProfitSummary({ ...args, fromDate: '2020-01-01', toDate: '2035-12-31' });
+  assert.equal(all.saleRows.length, 3);
+  assert.equal(all.otherIncomeReceipts, 50000 + 777000);
+
+  // recommendations: warehouse account sees Sổ Quỹ wording, primary admin keeps financial statement wording
+  const warehouseUser: StaffMember = {
+    uid: 'user_cashbook', username: 'cashbook', password: '1', displayName: 'Kho A', role: 'staff',
+    positionRole: 'warehouse_manager', assignedWarehouse: WH, permissions: getIndependentWarehouseFullPermissions(),
+    phone: '', email: 'khoa@gmail.com', active: true, createdAt: '2026-11-01', updatedAt: '2026-11-01',
+  };
+  const whRecs = generateSmartReportRecommendations({
+    staff: warehouseUser, sales, imports: [], products: [prod, gift], customers: [],
+    receiptVouchers: receipts, paymentVouchers: payments, fromDate: '2026-11-01', toDate: '2026-11-30',
+  });
+  const whFin = whRecs.find((r) => r.category === 'financial_profit');
+  assert.ok(whFin);
+  assert.equal(whFin!.title, 'Sổ Quỹ & Lợi Nhuận Tạm Tính Theo Kỳ');
+  assert.equal(whFin!.badgeLabel, 'Sổ Quỹ Kho');
+
+  const primaryUser: StaffMember = {
+    uid: 'staff_manager_01', username: 'admin', password: '1', displayName: 'Admin', role: 'manager',
+    positionRole: 'primary_manager', assignedWarehouse: 'Tất cả kho',
+    permissions: ['create_staff_accounts', 'manage_all_warehouses', 'view_assigned_reports'],
+    phone: '0393120246', email: 'trannhat1205@gmail.com', active: true, createdAt: '2026-01-01', updatedAt: '2026-11-01',
+  };
+  const adminFin = generateSmartReportRecommendations({
+    staff: primaryUser, sales, imports: [], products: [prod, gift], customers: [],
+    receiptVouchers: receipts, paymentVouchers: payments, fromDate: '2026-11-01', toDate: '2026-11-30',
+  }).find((r) => r.category === 'financial_profit');
+  assert.ok(adminFin);
+  assert.equal(adminFin!.title, 'Báo cáo Tài chính Tổng hợp, Lợi nhuận Gộp & Hiệu quả Kinh doanh Đa Kho');
 });

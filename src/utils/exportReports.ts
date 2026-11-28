@@ -25,6 +25,7 @@ import {
   ProductStockMovementLedger,
   ReceivedItemReportRow,
   resolveSaleGiftUnitCost,
+  computeProvisionalCashbookProfitSummary,
   resolveSaleUnitCost,
   SmartReportRecommendation,
   TaxAuthorityFinancialStatementResult,
@@ -1849,6 +1850,8 @@ export function exportComprehensiveDateRangeReportExcel(params: {
   paymentVouchers?: CashPaymentVoucher[];
   savedVouchers?: SavedVoucherRecord[];
   recommendations?: SmartReportRecommendation[];
+  /** false = warehouse account: export "Sổ Quỹ" (provisional profit) instead of the primary-admin financial sheet */
+  isPrimaryAdmin?: boolean;
 }): string {
   const wb = XLSX.utils.book_new();
   const today = new Date().toISOString().slice(0, 10);
@@ -1923,7 +1926,28 @@ export function exportComprehensiveDateRangeReportExcel(params: {
     overviewRows.push(['Tổng số mặt hàng quản lý trong kho', params.products.length]);
   }
   if (canSeeProfit) {
-    overviewRows.push(['Lợi nhuận gộp ước tính (Chỉ Quản lý chính)', Math.round(estimatedGrossProfit)]);
+    if (params.isPrimaryAdmin === false) {
+      const prov = computeProvisionalCashbookProfitSummary({
+        sales: params.sales,
+        imports: params.imports,
+        products: params.products,
+        receiptVouchers: params.receiptVouchers || [],
+        paymentVouchers: params.paymentVouchers || [],
+      });
+      overviewRows.push(
+        [],
+        ['SỔ QUỸ — LỢI NHUẬN TẠM TÍNH TRONG KỲ', 'GIÁ TRỊ (VNĐ)'],
+        ['Tổng doanh thu bán hàng trước chiết khấu (+)', prov.grossSalesRevenue],
+        ['Phiếu thu khác (+)', prov.otherIncomeReceipts],
+        ['Giá vốn hàng bán (-)', prov.productCogs],
+        ['Chiết khấu / giảm giá bán (-)', prov.discountCost],
+        ['Chi phí quà tặng khuyến mãi (-)', prov.giftPromoCost],
+        ['Chi phí khác / vận hành (-)', prov.otherOperatingExpenses],
+        ['Lợi nhuận tạm tính (=)', prov.provisionalNetProfit]
+      );
+    } else {
+      overviewRows.push(['Lợi nhuận gộp ước tính (Chỉ Quản lý chính)', Math.round(estimatedGrossProfit)]);
+    }
   }
 
   if (params.recommendations && params.recommendations.length > 0) {
@@ -2125,8 +2149,33 @@ export function exportComprehensiveDateRangeReportExcel(params: {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cashRows), 'Thu_Chi_Dong_Tien');
   }
 
+  // Sheet 8 (tài khoản kho): Sổ Quỹ & lợi nhuận tạm tính từng hóa đơn
+  if (canSeeProfit && params.isPrimaryAdmin === false) {
+    const prov = computeProvisionalCashbookProfitSummary({
+      sales: params.sales,
+      imports: params.imports,
+      products: params.products,
+      receiptVouchers: params.receiptVouchers || [],
+      paymentVouchers: params.paymentVouchers || [],
+    });
+    const cashbookRows = prov.saleRows.map((r, idx) => ({
+      STT: idx + 1,
+      'Ngày Bán': (r.sale.createdAt || '').slice(0, 10),
+      'Mã Hóa Đơn': r.sale.invoiceCode,
+      'Khách Hàng': r.sale.customerName,
+      'Mặt Hàng': r.sale.productName,
+      'Số Lượng': `${r.sale.quantity} ${r.sale.unit}`,
+      'Tiền Hàng Trước CK (VNĐ)': r.grossAmount,
+      'Chiết Khấu (VNĐ)': r.discountAmount,
+      'Giá Vốn Hàng (VNĐ)': r.productCogs,
+      'Giá Vốn Quà KM (VNĐ)': r.giftCost,
+      'Lãi Tạm Tính (VNĐ)': r.rowProvisionalProfit,
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cashbookRows), 'So_Quy_Loi_Nhuan');
+  }
+
   // Sheet 8: Báo cáo tài chính & Lợi nhuận (Chỉ Quản lý chính)
-  if (canSeeProfit) {
+  if (canSeeProfit && params.isPrimaryAdmin !== false) {
     const finRows = params.sales.map((s, idx) => {
       const unitCost = resolveSaleUnitCost(s, params.products);
       const giftCost =

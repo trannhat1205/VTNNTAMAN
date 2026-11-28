@@ -1795,7 +1795,12 @@ export function evaluateStaffAccessScope(
     if (canAccessInventory) allowedReportCategories.push('inventory_stock');
     if (canAccessDebts) allowedReportCategories.push('debts_receivable_payable');
     if (canAccessCashflow) allowedReportCategories.push('cashflow_treasury');
-    if (isPrimaryOwner || hasFullSingleWarehouseAdmin) {
+    if (
+      isPrimaryOwner ||
+      hasFullSingleWarehouseAdmin ||
+      perms.includes('manage_single_warehouse') ||
+      perms.includes('warehouse_accounting')
+    ) {
       allowedReportCategories.push('financial_profit');
     }
   }
@@ -2603,6 +2608,33 @@ export function generateSmartReportRecommendations(params: {
       totalSalesRevenue > 0 ? Math.round((estimatedGrossProfit / totalSalesRevenue) * 100) : 0;
     const advice =
       'Đối chiếu tỷ suất lợi nhuận từng mặt hàng phân bón / thuốc BVTV và cân đối giữa tổng phải thu khách hàng với tổng phải trả nhà cung cấp.';
+
+    if (!canAccountCreateStaff(staff)) {
+      const prov = computeProvisionalCashbookProfitSummary({
+        sales,
+        imports,
+        products,
+        receiptVouchers,
+        paymentVouchers,
+        fromDate,
+        toDate,
+      });
+      const cashbookAdvice =
+        'Mở Sổ Quỹ để lọc theo ngày và đối chiếu chi tiết doanh thu, giá vốn, chiết khấu, quà tặng KM và các phiếu thu/chi khác.';
+      recommendations.push({
+        id: 'rec_financial_profit',
+        category: 'financial_profit',
+        targetCategory: 'financial_profit',
+        priority: 'high',
+        badgeLabel: 'Sổ Quỹ Kho',
+        title: 'Sổ Quỹ & Lợi Nhuận Tạm Tính Theo Kỳ',
+        summary: `Lợi nhuận tạm tính trong kỳ đạt ${formatVND(prov.provisionalNetProfit)} (Doanh thu trước CK ${formatVND(prov.grossSalesRevenue)} + Thu khác ${formatVND(prov.otherIncomeReceipts)} − Giá vốn ${formatVND(prov.productCogs)} − Chiết khấu/Quà/Chi phí khác ${formatVND(prov.discountCost + prov.giftPromoCost + prov.otherOperatingExpenses)}).`,
+        suggestedAction: cashbookAdvice,
+        actionAdvice: cashbookAdvice,
+        metricHighlight: `Lợi nhuận tạm tính: ${formatVND(prov.provisionalNetProfit)}`,
+      });
+      return recommendations;
+    }
 
     recommendations.push({
       id: 'rec_financial_profit',
@@ -6029,4 +6061,179 @@ export function generateUniqueSupplierCodeFromName(
       .filter((s) => !excludeSupplierId || s.id !== excludeSupplierId)
       .map((s) => s.code?.trim() || buildNameAbbreviationBaseCode(s.name, { fallbackPrefix: 'NCC' }))
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* Sổ Quỹ & lợi nhuận tạm tính (tài khoản kho không phải quản lý chính) */
+/* ------------------------------------------------------------------ */
+
+export function getReportCategoryMetaForAccount(
+  category: ReportModuleCategory,
+  isPrimaryAdmin: boolean
+): { label: string; shortLabel: string; description: string } {
+  const base: Record<ReportModuleCategory, { label: string; shortLabel: string; description: string }> = {
+    overview: {
+      label: '1. Tổng Hợp Chung',
+      shortLabel: 'Tổng hợp chung',
+      description: 'Bức tranh tổng thể các chỉ số trong khoảng thời gian đã chọn',
+    },
+    customers_items: {
+      label: '2. Hàng Hóa Đã Nhận & Khách Hàng',
+      shortLabel: 'Hàng đã nhận & KH',
+      description: 'Danh sách mặt hàng đã nhận, còn nợ & thu nợ tổng hợp từ ngày ... đến ngày ...',
+    },
+    sales_log: {
+      label: '3. Nhật Ký Bán Hàng',
+      shortLabel: 'Nhật ký Bán hàng',
+      description: 'Chi tiết hóa đơn xuất bán, số lượng, đơn giá, thực thu và công nợ phát sinh',
+    },
+    imports_log: {
+      label: '4. Nhật Ký Nhập Hàng',
+      shortLabel: 'Nhật ký Nhập hàng',
+      description: 'Chi tiết phiếu nhập kho vật tư từ Nhà cung cấp và công nợ phải trả',
+    },
+    inventory_stock: {
+      label: '5. Quản Lý Tồn Kho',
+      shortLabel: 'Quản lý Tồn kho',
+      description: 'Biến động Nhập - Xuất - Tồn trong kỳ và cảnh báo vật tư sắp hết',
+    },
+    debts_receivable_payable: {
+      label: '6. Quản Lý Công Nợ (KH & NCC)',
+      shortLabel: 'Quản lý Công nợ',
+      description: 'Tổng hợp tất cả hàng hóa còn nợ, hạn hẹn thanh toán và thu/trả nợ',
+    },
+    cashflow_treasury: {
+      label: '7. Thu - Chi Dòng Tiền',
+      shortLabel: 'Thu - Chi Dòng tiền',
+      description: 'Sổ quỹ dòng tiền thực thu, thực chi và dòng tiền ròng từ ngày ... đến ngày ...',
+    },
+    financial_profit: isPrimaryAdmin
+      ? {
+          label: '8. Báo Cáo Tài Chính & Lợi Nhuận',
+          shortLabel: 'Báo cáo Tài chính',
+          description: 'Phân tích Doanh thu, Giá vốn, Lợi nhuận gộp và Tỷ suất sinh lời (Quản lý chính)',
+        }
+      : {
+          label: '8. Sổ Quỹ',
+          shortLabel: 'Sổ Quỹ',
+          description:
+            'Sổ quỹ thu - chi và lợi nhuận tạm tính (Doanh thu + Thu khác - Giá vốn - Chiết khấu - Quà tặng - Chi phí khác) theo ngày',
+        },
+  };
+  return base[category];
+}
+
+export interface ProvisionalSaleProfitRow {
+  sale: SaleTransaction;
+  grossAmount: number;
+  discountAmount: number;
+  netAmount: number;
+  productCogs: number;
+  giftCost: number;
+  rowProvisionalProfit: number;
+}
+
+export interface ProvisionalCashbookProfitSummary {
+  grossSalesRevenue: number;
+  netSalesRevenue: number;
+  otherIncomeReceipts: number;
+  productCogs: number;
+  discountCost: number;
+  giftPromoCost: number;
+  otherOperatingExpenses: number;
+  totalProfitInflow: number;
+  totalCostAndExpenses: number;
+  provisionalNetProfit: number;
+  provisionalMarginPct: number;
+  actualCashInflow: number;
+  actualCashOutflow: number;
+  actualNetCashflow: number;
+  saleRows: ProvisionalSaleProfitRow[];
+  promoOrDiscountRows: ProvisionalSaleProfitRow[];
+  otherIncomeVouchers: CashReceiptVoucher[];
+  otherExpenseVouchers: CashPaymentVoucher[];
+}
+
+/**
+ * Provisional profit for the cashbook ("Sổ Quỹ") view:
+ * gross sales + other receipts − COGS − discounts − promo gifts − other expenses.
+ * Always equals computeCashflowAndFinancialReport(...).netProfit for the same filters.
+ */
+export function computeProvisionalCashbookProfitSummary(params: {
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  products: ProductItem[];
+  receiptVouchers?: CashReceiptVoucher[];
+  paymentVouchers?: CashPaymentVoucher[];
+  fromDate?: string;
+  toDate?: string;
+  warehouseName?: string | null;
+}): ProvisionalCashbookProfitSummary {
+  const { sales = [], products = [], fromDate, toDate, warehouseName } = params;
+  const base = computeCashflowAndFinancialReport({
+    sales,
+    imports: params.imports || [],
+    products,
+    receiptVouchers: params.receiptVouchers || [],
+    paymentVouchers: params.paymentVouchers || [],
+    fromDate,
+    toDate,
+    warehouseName,
+  });
+
+  const saleRows: ProvisionalSaleProfitRow[] = sales
+    .filter(
+      (s) =>
+        (!warehouseName || areWarehouseNamesEquivalent(s.warehouseName, warehouseName)) &&
+        isDateWithinRange(s.createdAt, fromDate, toDate)
+    )
+    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+    .map((sale) => {
+      const discountAmount = Math.max(0, Math.round(sale.discountAmount || 0));
+      const netAmount = Math.max(0, Math.round(sale.totalAmount || 0));
+      const grossAmount = netAmount + discountAmount;
+      const productCogs = Math.round(resolveSaleUnitCost(sale, products) * sale.quantity);
+      const giftCost = Math.round(resolveSaleGiftUnitCost(sale, products) * (sale.giftQuantity || 0));
+      return {
+        sale,
+        grossAmount,
+        discountAmount,
+        netAmount,
+        productCogs,
+        giftCost,
+        rowProvisionalProfit: grossAmount - discountAmount - productCogs - giftCost,
+      };
+    });
+
+  const otherIncomeVouchers = base.filteredReceiptVouchers.filter(
+    (rv) => !rv.isDebtSettlement && rv.countsTowardOtherIncome !== false
+  );
+  const otherExpenseVouchers = base.filteredPaymentVouchers.filter(
+    (pv) => !pv.isDebtSettlement && pv.countsTowardOperatingExpense !== false
+  );
+
+  const totalProfitInflow = base.grossSalesRevenueBeforeDiscount + base.otherIncome;
+  const totalCostAndExpenses =
+    base.totalProductCogs + base.totalSalesDiscount + base.totalGiftPromoCost + base.operatingExpenses;
+
+  return {
+    grossSalesRevenue: base.grossSalesRevenueBeforeDiscount,
+    netSalesRevenue: base.netSalesRevenue,
+    otherIncomeReceipts: base.otherIncome,
+    productCogs: base.totalProductCogs,
+    discountCost: base.totalSalesDiscount,
+    giftPromoCost: base.totalGiftPromoCost,
+    otherOperatingExpenses: base.operatingExpenses,
+    totalProfitInflow,
+    totalCostAndExpenses,
+    provisionalNetProfit: totalProfitInflow - totalCostAndExpenses,
+    provisionalMarginPct: base.netMarginPct,
+    actualCashInflow: base.totalCashInflow,
+    actualCashOutflow: base.totalCashOutflow,
+    actualNetCashflow: base.netCashflow,
+    saleRows,
+    promoOrDiscountRows: saleRows.filter((r) => r.discountAmount > 0 || r.giftCost > 0),
+    otherIncomeVouchers,
+    otherExpenseVouchers,
+  };
 }
