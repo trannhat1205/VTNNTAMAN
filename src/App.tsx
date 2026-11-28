@@ -44,6 +44,7 @@ import {
   CrossLinkNavigateRequest,
   CustomerProfile,
   DeletedRecordTombstone,
+  FifoDebtAllocationItem,
   ImportTransaction,
   NotificationPrefs,
   ProductItem,
@@ -123,6 +124,7 @@ import {
   findCollidingProductCodeInWarehouse,
   findLinkedPaymentVouchersForImport,
   findLinkedReceiptVouchersForSale,
+  isContraOffsetVoucher,
   formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
   formatVND,
@@ -2848,6 +2850,282 @@ export default function App() {
   };
 
   // Handlers
+
+  /**
+   * Finalizes goods sold back to a Supplier: directly offsets (non-cash) the supplier's payable debt
+   * FIFO across unpaid PN-... receipts, creates the paired contra PC-/PT- vouchers and, when part of
+   * the order stays unpaid, ensures a receivable customer profile exists.
+   */
+  const finalizeSupplierSaleOrder = (params: {
+    createdSales: SaleTransaction[];
+    offsetSupplierDebt: boolean;
+    ownerUid: string;
+    warehouseName: string;
+  }): SaleTransaction[] => {
+    const { createdSales, ownerUid, warehouseName } = params;
+    if (createdSales.length === 0) return createdSales;
+    const nowIso = new Date().toISOString();
+    const first = createdSales[0];
+    let resultSales = createdSales.map((s) => ({ ...s, isSupplierSale: true }));
+    const totalPaid = createdSales.reduce((sum, s) => sum + (Number(s.paidAmount) || 0), 0);
+
+    if (params.offsetSupplierDebt && totalPaid > 0) {
+      try {
+        const invoiceCode = first.invoiceCode;
+        const fifo = applySupplierFifoDebtSettlement(
+          visibleImports,
+          { supplierName: first.customerName, supplierPhone: first.customerPhone },
+          totalPaid,
+          `Cấn trừ từ HĐ xuất bán ${invoiceCode}`,
+          nowIso
+        );
+        const actualOffset = fifo.totalAllocated;
+        if (actualOffset > 0) {
+          const pvId = generateUniqueRecordId('pv_contra');
+          const rvId = generateUniqueRecordId('rv_contra');
+          const pvCode = allocateAtomicWarehouseVoucherCode({
+            ownerUid,
+            prefix: 'PC',
+            existingCodes: paymentVouchers.map((p) => p.voucherCode),
+            onReassigned: (committedCode) =>
+              setPaymentVouchers((prev) =>
+                prev.map((p) =>
+                  p.id === pvId ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() } : p
+                )
+              ),
+          });
+          const rvCode = allocateAtomicWarehouseVoucherCode({
+            ownerUid,
+            prefix: 'PT',
+            existingCodes: receiptVouchers.map((r) => r.voucherCode),
+            onReassigned: (committedCode) =>
+              setReceiptVouchers((prev) =>
+                prev.map((r) =>
+                  r.id === rvId ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() } : r
+                )
+              ),
+          });
+          const allocCodes = fifo.settledAllocations.map((a) => a.code).join(', ');
+
+          let remainingOffset = actualOffset;
+          const rvAllocations: FifoDebtAllocationItem[] = [];
+          resultSales = resultSales.map((s) => {
+            const lineOffset = Math.min(remainingOffset, Math.max(0, Number(s.paidAmount) || 0));
+            remainingOffset -= lineOffset;
+            if (lineOffset <= 0) return s;
+            rvAllocations.push({
+              recordId: s.id,
+              code: s.invoiceCode,
+              date: (s.createdAt || '').slice(0, 10),
+              dueDate: s.dueDate || '',
+              productName: s.productName,
+              previousDebt: lineOffset,
+              allocatedAmount: lineOffset,
+              remainingDebt: s.debtAmount,
+            });
+            const suffix = `[Cấn trừ nợ NCC: -${formatVND(lineOffset)} vào ${allocCodes} · ${pvCode}]`;
+            return {
+              ...s,
+              supplierOffsetAmount: lineOffset,
+              linkedPaymentVoucherId: pvId,
+              linkedPaymentVoucherCode: pvCode,
+              note: s.note ? `${s.note} | ${suffix}` : suffix,
+              updatedAt: nowIso,
+            };
+          });
+
+          const contraPayment: CashPaymentVoucher = {
+            id: pvId,
+            voucherCode: pvCode,
+            groupName: 'Cấn trừ công nợ Nhà cung cấp',
+            warehouseName,
+            partnerName: first.customerName,
+            partnerPhone: first.customerPhone || '',
+            amount: actualOffset,
+            paymentMethod: 'Cấn trừ công nợ',
+            isDebtSettlement: true,
+            isContraOffset: true,
+            settledAllocations: fifo.settledAllocations,
+            totalPreviousDebt: fifo.totalPreviousDebt,
+            totalRemainingDebt: fifo.totalRemainingDebt,
+            countsTowardOperatingExpense: false,
+            linkedContraVoucherId: rvId,
+            linkedContraVoucherCode: rvCode,
+            linkedSaleInvoiceCode: invoiceCode,
+            linkedSaleIds: createdSales.map((s) => s.id),
+            note: `Cấn trừ trực tiếp từ HĐ xuất bán ${invoiceCode} (${allocCodes})`,
+            staffName: currentStaff.displayName,
+            ownerId: ownerUid,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          };
+          const contraReceipt: CashReceiptVoucher = {
+            id: rvId,
+            voucherCode: rvCode,
+            groupName: 'Cấn trừ công nợ Nhà cung cấp',
+            warehouseName,
+            partnerId: first.customerId,
+            partnerName: first.customerName,
+            partnerPhone: first.customerPhone || '',
+            amount: actualOffset,
+            paymentMethod: 'Cấn trừ công nợ',
+            isDebtSettlement: true,
+            isContraOffset: true,
+            settledAllocations: rvAllocations,
+            totalPreviousDebt: actualOffset,
+            totalRemainingDebt: 0,
+            countsTowardOtherIncome: false,
+            linkedContraVoucherId: pvId,
+            linkedContraVoucherCode: pvCode,
+            note: `Đối ứng cấn trừ công nợ NCC theo phiếu ${pvCode}`,
+            staffName: currentStaff.displayName,
+            ownerId: ownerUid,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          };
+
+          const settledIds = new Set(fifo.settledAllocations.map((a) => a.recordId));
+          const settledImports = fifo.updatedImports.filter((imp) => settledIds.has(imp.id));
+          const settledMap = new Map(settledImports.map((imp) => [imp.id, imp]));
+          const stampedMap = new Map(resultSales.map((s) => [s.id, s]));
+          setImports((prev) => prev.map((imp) => settledMap.get(imp.id) || imp));
+          setSales((prev) => prev.map((s) => stampedMap.get(s.id) || s));
+          setPaymentVouchers((prev) => [contraPayment, ...prev]);
+          setReceiptVouchers((prev) => [contraReceipt, ...prev]);
+          stageAndFlushRecords(
+            {
+              sales: resultSales,
+              imports: settledImports,
+              paymentVouchers: [contraPayment],
+              receiptVouchers: [contraReceipt],
+            },
+            ownerUid
+          );
+          recordAuditLog({
+            actionCategory: 'debt_payment',
+            targetEntity: 'debt',
+            targetCode: invoiceCode,
+            warehouseName,
+            summary: `Xuất bán hàng cho NCC ${first.customerName} (HĐ ${invoiceCode}) cấn trừ công nợ -${formatVND(
+              actualOffset
+            )}`,
+            details: `Cấn trừ vào phiếu nhập: ${allocCodes} · Phiếu đối ứng ${pvCode} / ${rvCode} · Nợ NCC còn lại: ${formatVND(
+              fifo.totalRemainingDebt
+            )}`,
+          });
+        }
+      } catch {
+        /* no payable debt to offset: keep as a normal cash/receivable sale */
+      }
+    } else {
+      const stampedMap = new Map(resultSales.map((s) => [s.id, s]));
+      setSales((prev) => prev.map((s) => stampedMap.get(s.id) || s));
+      stageAndFlushRecords({ sales: resultSales }, ownerUid);
+    }
+
+    const totalDebt = resultSales.reduce((sum, s) => sum + (Number(s.debtAmount) || 0), 0);
+    if (totalDebt > 0 && !customersRef.current.some((c) => c.id === first.customerId)) {
+      const cleanPhone = (first.customerPhone || '').trim();
+      const matched = customersRef.current.find(
+        (c) =>
+          (cleanPhone && (c.phone || '').trim() === cleanPhone) ||
+          normalizeVietnameseSearch(c.name) === normalizeVietnameseSearch(first.customerName)
+      );
+      if (!matched) {
+        const supplierCustomer: CustomerProfile = {
+          id: first.customerId,
+          code: generateUniqueCustomerCodeFromName(first.customerName, customersRef.current),
+          name: first.customerName,
+          phone: first.customerPhone || '',
+          email: '',
+          address: '',
+          group: 'Nhà cung cấp',
+          note: 'Nhà cung cấp mua lại hàng (phải thu phần vượt công nợ)',
+          totalPurchased: resultSales.reduce((sum, s) => sum + s.totalAmount, 0),
+          totalDebt,
+          warehouseName,
+          ownerId: ownerUid,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        customersRef.current = [supplierCustomer, ...customersRef.current];
+        setCustomers((prev) => [supplierCustomer, ...prev]);
+        stageAndFlushRecords({ customers: [supplierCustomer] }, ownerUid);
+      }
+    }
+    return resultSales;
+  };
+
+  /** Contra (cấn trừ) vouchers can only be reversed by cancelling the linked sales invoice. */
+  const blockContraVoucherMutation = (linkedSaleId: string | undefined, voucherCode: string) => {
+    const linkedSale = linkedSaleId ? sales.find((s) => s.id === linkedSaleId) : undefined;
+    const msg = `Phiếu ${voucherCode} là bút toán cấn trừ công nợ NCC. Không thể sửa/xóa riêng — hãy hủy hóa đơn xuất bán liên kết để hoàn lại tồn kho, công nợ NCC và phiếu đối ứng cùng lúc.`;
+    if (linkedSale) {
+      showToast(msg, {
+        label: `Mở ${linkedSale.invoiceCode} →`,
+        isNavigation: true,
+        onUndo: () =>
+          handleNavigateCrossLink({
+            tab: 'sales',
+            recordId: linkedSale.id,
+            voucherCode: linkedSale.invoiceCode,
+            label: `Hóa đơn ${linkedSale.invoiceCode}`,
+          }),
+      });
+    } else {
+      showToast(msg);
+    }
+  };
+
+  /**
+   * Reverses the contra (cấn trừ) vouchers linked to sales that are being cancelled, restoring the
+   * supplier's debt on the original PN-... receipts. Returns false when cancellation must be blocked.
+   */
+  const reverseSupplierContraForSales = (targets: SaleTransaction[]): boolean => {
+    const deletedIds = new Set(targets.map((t) => t.id));
+    const contraPvs = paymentVouchers.filter(
+      (pv) =>
+        isContraOffsetVoucher(pv) &&
+        (targets.some((t) => t.linkedPaymentVoucherId === pv.id) ||
+          (pv.linkedSaleIds || []).some((sid) => deletedIds.has(sid)))
+    );
+    if (contraPvs.length === 0) return true;
+    const stillActiveOthers = contraPvs.some((pv) =>
+      (pv.linkedSaleIds || []).some(
+        (sid) => !deletedIds.has(sid) && sales.some((s) => s.id === sid)
+      )
+    );
+    if (stillActiveOthers) {
+      showToast(
+        'Hóa đơn xuất bán cho NCC có nhiều mặt hàng cùng cấn trừ công nợ. Vui lòng hủy trọn bộ hóa đơn gộp để hoàn lại công nợ NCC.'
+      );
+      return false;
+    }
+    const nowIso = new Date().toISOString();
+    const contraRvs = receiptVouchers.filter(
+      (rv) =>
+        isContraOffsetVoucher(rv) &&
+        (contraPvs.some((pv) => pv.linkedContraVoucherId === rv.id) ||
+          (rv.settledAllocations || []).some((a) => deletedIds.has(a.recordId)))
+    );
+    let workingImports = imports;
+    const restoredIds = new Set<string>();
+    for (const pv of contraPvs) {
+      const reversed = reverseSupplierPaymentVoucherAllocations(workingImports, pv, nowIso);
+      workingImports = reversed.updatedImports;
+      reversed.reversedImportIds.forEach((id) => restoredIds.add(id));
+    }
+    const restoredImports = workingImports.filter((imp) => restoredIds.has(imp.id));
+    const removedIds = [...contraPvs.map((p) => p.id), ...contraRvs.map((r) => r.id)];
+    markRecordsDeleted(removedIds, nowIso);
+    setImports(workingImports);
+    setPaymentVouchers((prev) => prev.filter((p) => !contraPvs.some((c) => c.id === p.id)));
+    setReceiptVouchers((prev) => prev.filter((r) => !contraRvs.some((c) => c.id === r.id)));
+    if (restoredImports.length > 0) {
+      stageAndFlushRecords({ imports: restoredImports }, restoredImports[0].ownerId);
+    }
+    return true;
+  };
   const handleCreateSale = (payload: {
     customerId: string;
     customerName: string;
@@ -2868,6 +3146,8 @@ export default function App() {
     giftQuantity?: number;
     giftUnitCost?: number;
     dosageGuide?: string;
+    isSupplierSale?: boolean;
+    offsetSupplierDebt?: boolean;
   }): SaleTransaction => {
     const nowIso = new Date().toISOString();
     const { updatedProducts, updatedProduct, updatedGiftProduct } = applySaleToInventory(
@@ -3042,6 +3322,14 @@ export default function App() {
       `Hóa đơn ${newSale.invoiceCode} · ${newSale.customerName} (${formatVND(newSale.totalAmount)})`,
       newSale.warehouseName
     );
+    if (payload.isSupplierSale) {
+      return finalizeSupplierSaleOrder({
+        createdSales: [newSale],
+        offsetSupplierDebt: Boolean(payload.offsetSupplierDebt),
+        ownerUid: saleOwnerUid,
+        warehouseName: newSale.warehouseName || resolvedSaleWh,
+      })[0];
+    }
     return newSale;
   };
 
@@ -3122,6 +3410,8 @@ export default function App() {
     note: string;
     totalPaidAmount: number;
     items: PosCartDraftItem[];
+    isSupplierSale?: boolean;
+    offsetSupplierDebt?: boolean;
   }): SaleTransaction[] => {
     const invCheck = validateCartInventory(productsRef.current, payload.items);
     if (!invCheck.valid) {
@@ -3300,6 +3590,14 @@ export default function App() {
       resolvedWh
     );
 
+    if (payload.isSupplierSale) {
+      return finalizeSupplierSaleOrder({
+        createdSales,
+        offsetSupplierDebt: Boolean(payload.offsetSupplierDebt),
+        ownerUid: cartOwnerUid,
+        warehouseName: resolvedWh,
+      });
+    }
     return createdSales;
   };
 
@@ -3335,6 +3633,15 @@ export default function App() {
     const existing = sales.find((s) => s.id === saleId);
     const nowIso = new Date().toISOString();
     if (!existing) return;
+
+    if ((existing.supplierOffsetAmount || 0) > 0 || existing.linkedPaymentVoucherId) {
+      showToast(
+        `Hóa đơn ${existing.invoiceCode} có cấn trừ trực tiếp công nợ NCC (${
+          existing.linkedPaymentVoucherCode || ''
+        }). Vui lòng Hủy hóa đơn để hoàn lại công nợ NCC rồi lập đơn mới!`
+      );
+      return;
+    }
 
     const linkedReceipts = findLinkedReceiptVouchersForSale(existing, receiptVouchers);
     if (linkedReceipts.length > 0) {
@@ -3464,6 +3771,7 @@ export default function App() {
       }
     }
     const nowIso = new Date().toISOString();
+    if (target && !reverseSupplierContraForSales([target])) return;
     markRecordsDeleted(saleId, nowIso);
     setSales((prev) => prev.filter((s) => s.id !== saleId));
     if (target) {
@@ -3578,6 +3886,7 @@ export default function App() {
     }
 
     const nowIso = new Date().toISOString();
+    if (!reverseSupplierContraForSales(targets)) return;
     markRecordsDeleted(uniqueIds, nowIso);
     const idSet = new Set(uniqueIds);
     const nextSales = sales.filter((s) => !idSet.has(s.id));
@@ -3670,6 +3979,15 @@ export default function App() {
     }
     const existing = sales.find((s) => s.id === params.saleId);
     if (!existing) return;
+
+    if ((existing.supplierOffsetAmount || 0) > 0 || existing.linkedPaymentVoucherId) {
+      showToast(
+        `Hóa đơn ${existing.invoiceCode} có cấn trừ trực tiếp công nợ NCC (${
+          existing.linkedPaymentVoucherCode || ''
+        }). Vui lòng Hủy hóa đơn để hoàn lại công nợ NCC rồi lập đơn mới!`
+      );
+      return;
+    }
 
     const calc = computeCustomerSaleReturnCalculation({
       sale: existing,
@@ -6176,6 +6494,10 @@ export default function App() {
     }
     const existingVoucher = receiptVouchers.find((rv) => rv.id === id);
     if (!existingVoucher) return;
+    if (isContraOffsetVoucher(existingVoucher)) {
+      blockContraVoucherMutation(existingVoucher.settledAllocations?.[0]?.recordId, existingVoucher.voucherCode);
+      return;
+    }
     const nowIso = new Date().toISOString();
     const roundedNewAmount = Math.max(0, Math.round(Number(changes.amount) || 0));
 
@@ -6266,6 +6588,10 @@ export default function App() {
   const handleDeleteReceiptVoucher = (id: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = receiptVouchers.find((rv) => rv.id === id);
+    if (target && isContraOffsetVoucher(target)) {
+      blockContraVoucherMutation(target.settledAllocations?.[0]?.recordId, target.voucherCode);
+      return;
+    }
     const nowIso = new Date().toISOString();
     markRecordsDeleted(id, nowIso);
     setReceiptVouchers((prev) => prev.filter((rv) => rv.id !== id));
@@ -6405,6 +6731,10 @@ export default function App() {
     }
     const existingVoucher = paymentVouchers.find((pv) => pv.id === id);
     if (!existingVoucher) return;
+    if (isContraOffsetVoucher(existingVoucher)) {
+      blockContraVoucherMutation(existingVoucher.linkedSaleIds?.[0], existingVoucher.voucherCode);
+      return;
+    }
     const nowIso = new Date().toISOString();
     const roundedNewAmount = Math.max(0, Math.round(Number(changes.amount) || 0));
 
@@ -6487,6 +6817,10 @@ export default function App() {
   const handleDeletePaymentVoucher = (id: string) => {
     if (!canPerformRoleAction(role, 'delete_record')) return;
     const target = paymentVouchers.find((pv) => pv.id === id);
+    if (target && isContraOffsetVoucher(target)) {
+      blockContraVoucherMutation(target.linkedSaleIds?.[0], target.voucherCode);
+      return;
+    }
     const nowIso = new Date().toISOString();
     markRecordsDeleted(id, nowIso);
     setPaymentVouchers((prev) => prev.filter((pv) => pv.id !== id));
@@ -10726,6 +11060,8 @@ export default function App() {
               customers={visibleCustomers}
               sales={visibleSales}
               imports={visibleImports}
+              suppliers={visibleSuppliers}
+              paymentVouchers={visiblePaymentVouchers}
               receiptVouchers={visibleReceiptVouchers}
               role={role}
               resetKey={saleFormResetKey}

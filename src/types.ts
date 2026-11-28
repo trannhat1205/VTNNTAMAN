@@ -104,6 +104,12 @@ export interface SaleTransaction {
   giftQuantity?: number;
   giftUnitCost?: number;
   dosageGuide?: string;
+  /** True when the buyer is a Supplier (goods exported back to NCC to offset payable debt). */
+  isSupplierSale?: boolean;
+  /** Portion of this sale offset directly against the supplier's payable debt (non-cash). */
+  supplierOffsetAmount?: number;
+  linkedPaymentVoucherId?: string;
+  linkedPaymentVoucherCode?: string;
   note: string;
   staffName: string;
   ownerId: string;
@@ -219,6 +225,10 @@ export interface CashReceiptVoucher {
   totalPreviousDebt?: number;
   totalRemainingDebt?: number;
   countsTowardOtherIncome?: boolean;
+  /** Non-cash contra entry (cấn trừ công nợ NCC) — never counted as real cash. */
+  isContraOffset?: boolean;
+  linkedContraVoucherId?: string;
+  linkedContraVoucherCode?: string;
   note: string;
   staffName: string;
   ownerId: string;
@@ -240,6 +250,12 @@ export interface CashPaymentVoucher {
   totalPreviousDebt?: number;
   totalRemainingDebt?: number;
   countsTowardOperatingExpense?: boolean;
+  /** Non-cash contra entry (cấn trừ công nợ NCC) — never counted as real cash. */
+  isContraOffset?: boolean;
+  linkedContraVoucherId?: string;
+  linkedContraVoucherCode?: string;
+  linkedSaleInvoiceCode?: string;
+  linkedSaleIds?: string[];
   note: string;
   staffName: string;
   ownerId: string;

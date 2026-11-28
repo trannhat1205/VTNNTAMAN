@@ -454,6 +454,15 @@ export const CancelSaleConfirmModal: React.FC<CancelSaleConfirmModalProps> = ({
               </span>
             </div>
           )}
+          {(targetSale.supplierOffsetAmount || 0) > 0 && (
+            <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-950 text-xs">
+              Sẽ tự động hoàn lại công nợ phải trả NCC:{' '}
+              <strong>+{formatVND(targetSale.supplierOffsetAmount || 0)}</strong>
+              {targetSale.linkedPaymentVoucherCode
+                ? ` (hủy phiếu cấn trừ ${targetSale.linkedPaymentVoucherCode})`
+                : ''}
+            </div>
+          )}
         </div>
 
         <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-2">

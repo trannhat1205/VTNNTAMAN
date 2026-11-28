@@ -49,6 +49,7 @@ import {
 } from '../types';
 import {
   areWarehouseNamesEquivalent,
+  buildAvailableSupplierDirectory,
   calculateImportSummary,
   calculateSaleSummary,
   canPerformRoleAction,
@@ -56,6 +57,7 @@ import {
   computeCustomerSaleReturnCalculation,
   computeDueDateAfterDays,
   computeSupplierOldDebtSummary,
+  computeSupplierSaleOffsetPreview,
   countDistinctImportReceipts,
   countDistinctSalesInvoices,
   DEBT_TERM_DAY_OPTIONS,
@@ -130,6 +132,8 @@ interface SalesLogViewProps {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports?: ImportTransaction[];
+  suppliers?: SupplierProfile[];
+  paymentVouchers?: CashPaymentVoucher[];
   receiptVouchers?: CashReceiptVoucher[];
   role: UserRole;
   resetKey: number;
@@ -165,6 +169,8 @@ interface SalesLogViewProps {
     giftQuantity?: number;
     giftUnitCost?: number;
     dosageGuide?: string;
+    isSupplierSale?: boolean;
+    offsetSupplierDebt?: boolean;
   }) => SaleTransaction;
   onCreateMultiItemSale?: (payload: {
     customerId: string;
@@ -175,6 +181,8 @@ interface SalesLogViewProps {
     note: string;
     totalPaidAmount: number;
     items: PosCartDraftItem[];
+    isSupplierSale?: boolean;
+    offsetSupplierDebt?: boolean;
   }) => SaleTransaction[];
   bankQrConfig?: VietQrBankConfig | null;
   onSaveBankQrConfig?: (config: VietQrBankConfig) => void;
@@ -232,6 +240,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   customers,
   sales,
   imports = [],
+  suppliers = [],
   receiptVouchers = [],
   role,
   resetKey,
@@ -276,6 +285,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [quantity, setQuantity] = useState<string>('');
   const [unitPrice, setUnitPrice] = useState<string>('');
   const [paymentMode, setPaymentMode] = useState<'full' | 'debt'>('full');
+  // Sell goods back to a supplier: offset the supplier's payable debt directly (non-cash)
+  const [offsetSupplierDebt, setOffsetSupplierDebt] = useState<boolean>(true);
+  const supplierDirectory = buildAvailableSupplierDirectory(suppliers, imports, products);
+  const selectedSupplierObj = selectedCustomerId.startsWith('sup::')
+    ? supplierDirectory.find((s) => `sup::${s.key}` === selectedCustomerId) || null
+    : null;
+  const supplierBuyerOption = (sup: ReturnType<typeof buildAvailableSupplierDirectory>[number]) => ({
+    value: `sup::${sup.key}`,
+    label: `[NCC] ${sup.name}${sup.phone ? ` (${sup.phone})` : ''} — ${
+      sup.oldDebtAmount > 0 ? 'Cấn trừ nợ NCC' : 'Nhà cung cấp'
+    }`,
+    subLabel: `Mã NCC: ${sup.code} · Nợ phải trả NCC hiện tại: ${formatVND(sup.oldDebtAmount)} (${
+      sup.unpaidReceiptCount
+    } phiếu nhập nợ)`,
+    badge: sup.oldDebtAmount > 0 ? `Nợ NCC: ${formatVND(sup.oldDebtAmount)}` : 'Nhà cung cấp',
+    keywords: `${sup.name} ${sup.phone} ${sup.code} ncc nha cung cap can tru cong no`,
+  });
   const [paidAmount, setPaidAmount] = useState<string>('');
   const [dueDate, setDueDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
@@ -430,6 +456,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setNewGiftImportPrice('');
     setNewGiftStock('50');
     setPaymentMode('full');
+    setOffsetSupplierDebt(true);
     setPaidAmount('');
     setDueDate('');
     setNote('');
@@ -505,6 +532,13 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   };
 
   const handleCustomerSelectChange = (val: string) => {
+    if (val.startsWith('sup::')) {
+      setSelectedCustomerId(val);
+      setShowNewCustomerBox(false);
+      const sup = supplierDirectory.find((s) => `sup::${s.key}` === val);
+      setOffsetSupplierDebt(Boolean(sup && sup.oldDebtAmount > 0));
+      return;
+    }
     if (val === '__new_customer__') {
       setSelectedCustomerId('__new_customer__');
       setShowNewCustomerBox(true);
@@ -532,7 +566,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         selectedCustomerId && selectedCustomerId !== '__new_customer__'
           ? customers.find((c) => c.id === selectedCustomerId)
           : undefined;
-      setUnitPrice(String(resolveCustomerGroupPrice(prod, pickedCustomer?.group).price));
+      setUnitPrice(
+        selectedCustomerId.startsWith('sup::')
+          ? String(prod.importPrice > 0 ? prod.importPrice : prod.sellPrice)
+          : String(resolveCustomerGroupPrice(prod, pickedCustomer?.group).price)
+      );
       const remembered = prod.dosageGuide || '';
       setDosageGuide(remembered);
       setNoteTargetProductId(prod.id);
@@ -773,6 +811,21 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         }
       : calculateSaleSummary(qtyNum, priceNum, paidNum, computedDiscountAmount);
 
+  const supplierOffsetPreview = selectedSupplierObj
+    ? computeSupplierSaleOffsetPreview({
+        saleNetTotal: effectiveTotalPayable,
+        supplierOldDebt: selectedSupplierObj.oldDebtAmount,
+        offsetEnabled: offsetSupplierDebt && selectedSupplierObj.oldDebtAmount > 0,
+        extraCashPaidInput: Number(paidAmount) || 0,
+        excessPaymentMode: paymentMode,
+      })
+    : null;
+  const supplierFullyOffset = Boolean(
+    supplierOffsetPreview &&
+      supplierOffsetPreview.offsetAmount > 0 &&
+      supplierOffsetPreview.remainingPayableAfterOffset === 0
+  );
+
   const clearCurrentLineInputsOnly = () => {
     setSelectedProductId('');
     setQuantity('');
@@ -885,7 +938,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
       selectedCustomerId && selectedCustomerId !== '__new_customer__'
         ? customers.find((c) => c.id === selectedCustomerId)
         : undefined;
-    const quickPrice = resolveCustomerGroupPrice(prod, quickCustomer?.group).price;
+    const quickPrice = selectedCustomerId.startsWith('sup::')
+      ? prod.importPrice > 0
+        ? prod.importPrice
+        : prod.sellPrice
+      : resolveCustomerGroupPrice(prod, quickCustomer?.group).price;
     const res = upsertQuickCartProductQuantity(
       posCartItems,
       quickPrice === prod.sellPrice ? prod : { ...prod, sellPrice: quickPrice },
@@ -1158,6 +1215,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
     // Resolve customer (either existing or auto-create if inline customer box has data)
     let resolvedCustomer = customers.find((c) => c.id === selectedCustomerId) || null;
+    const supplierBuyer = selectedSupplierObj;
+    if (supplierBuyer) {
+      resolvedCustomer = {
+        id: `sup_${supplierBuyer.key.replace(/\s+/g, '_')}`,
+        code: supplierBuyer.code,
+        name: supplierBuyer.name,
+        phone: supplierBuyer.phone,
+        email: '',
+        address: supplierBuyer.address,
+        group: 'Nhà cung cấp',
+        note: '',
+        totalPurchased: 0,
+        totalDebt: 0,
+        ownerId: '',
+        createdAt: '',
+        updatedAt: '',
+      };
+    }
     if (showNewCustomerBox || selectedCustomerId === '__new_customer__') {
       const createdCust = handleConfirmInlineCustomer();
       if (!createdCust) return;
@@ -1220,18 +1295,30 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
           finalCartItems,
           paymentMode === 'full' ? Number.MAX_SAFE_INTEGER : Math.max(0, Number(paidAmount) || 0)
         );
+        const supPrevMulti = supplierBuyer
+          ? computeSupplierSaleOffsetPreview({
+              saleNetTotal: alloc.netTotal,
+              supplierOldDebt: supplierBuyer.oldDebtAmount,
+              offsetEnabled: offsetSupplierDebt && supplierBuyer.oldDebtAmount > 0,
+              extraCashPaidInput: Number(paidAmount) || 0,
+              excessPaymentMode: paymentMode,
+            })
+          : null;
+        const multiDebt = supPrevMulti ? supPrevMulti.effectiveCustomerDebtAmount : alloc.totalDebt;
         const createdSales = onCreateMultiItemSale({
           customerId: resolvedCustomer.id,
           customerName: resolvedCustomer.name,
           customerPhone: resolvedCustomer.phone,
           warehouseName: resolvedWarehouse,
           dueDate:
-            alloc.totalDebt > 0
+            multiDebt > 0
               ? dueDate || computeDueDateAfterDays(7)
               : computeDueDateAfterDays(0),
           note: note.trim(),
-          totalPaidAmount: alloc.totalPaid,
+          totalPaidAmount: supPrevMulti ? supPrevMulti.effectivePaidAmount : alloc.totalPaid,
           items: finalCartItems,
+          isSupplierSale: Boolean(supplierBuyer),
+          offsetSupplierDebt: Boolean(supPrevMulti && supPrevMulti.offsetAmount > 0),
         });
 
         const sharedCode = createdSales[0]?.invoiceCode || 'HD';
@@ -1359,6 +1446,18 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         effectiveDiscount
       );
 
+      const supPrevSingle = supplierBuyer
+        ? computeSupplierSaleOffsetPreview({
+            saleNetTotal: effectiveSummary.totalAmount,
+            supplierOldDebt: supplierBuyer.oldDebtAmount,
+            offsetEnabled: offsetSupplierDebt && supplierBuyer.oldDebtAmount > 0,
+            extraCashPaidInput: Number(paidAmount) || 0,
+            excessPaymentMode: paymentMode,
+          })
+        : null;
+      const singlePaid = supPrevSingle ? supPrevSingle.effectivePaidAmount : effectiveSummary.paidAmount;
+      const singleDebt = supPrevSingle ? supPrevSingle.effectiveCustomerDebtAmount : effectiveSummary.debtAmount;
+
       const createdSale = onCreateSale({
         customerId: resolvedCustomer.id,
         customerName: resolvedCustomer.name,
@@ -1366,9 +1465,9 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         productId: resolvedProduct.id,
         quantity: qtyNum,
         unitPrice: effectivePrice,
-        paidAmount: effectiveSummary.paidAmount,
+        paidAmount: singlePaid,
         dueDate:
-          effectiveSummary.debtAmount > 0
+          singleDebt > 0
             ? dueDate || computeDueDateAfterDays(7)
             : computeDueDateAfterDays(0),
         note: note.trim(),
@@ -1382,6 +1481,8 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         giftQuantity: resolvedGiftProduct ? giftQtyNum : 0,
         giftUnitCost: resolvedGiftProduct?.importPrice || 0,
         dosageGuide: dosageGuide.trim() || undefined,
+        isSupplierSale: Boolean(supplierBuyer),
+        offsetSupplierDebt: Boolean(supPrevSingle && supPrevSingle.offsetAmount > 0),
       });
 
       if (dosageGuide.trim() && dosageGuide.trim() !== (resolvedProduct.dosageGuide || '').trim()) {
@@ -1614,7 +1715,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   htmlFor="sale-customer-select"
                   className="block text-xs font-semibold text-slate-700"
                 >
-                  1. Chọn khách hàng *
+                  1. Chọn khách hàng hoặc Nhà cung cấp *
                 </label>
                 <button
                   type="button"
@@ -1634,22 +1735,76 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 id="sale-customer-select"
                 value={selectedCustomerId === '__new_customer__' ? '' : selectedCustomerId}
                 onChange={(val) => handleCustomerSelectChange(val)}
-                placeholder="Gõ tên khách hàng, SĐT (0913...), mã KH hoặc nhóm để tìm nhanh..."
-                emptyOptionLabel="-- Chưa chọn khách hàng --"
+                placeholder="Gõ tên khách hàng / Nhà cung cấp, SĐT, mã KH hoặc nhóm để tìm nhanh..."
+                emptyOptionLabel="-- Chưa chọn khách hàng / NCC --"
                 createActionLabel="+ Tạo khách hàng mới trực tiếp tại đây..."
                 onCreateAction={(kw) => {
                   setSelectedCustomerId('__new_customer__');
                   setShowNewCustomerBox(true);
                   if (kw) setNewCustName(kw);
                 }}
-                options={customers.map((c) => ({
-                  value: c.id,
-                  label: `${c.name} (${c.phone}) — ${c.group}`,
-                  subLabel: `Mã: ${c.code} · Địa chỉ: ${c.address || 'Chưa cập nhật'} · Công nợ cũ: ${formatVND(c.totalDebt)}`,
-                  badge: c.totalDebt > 0 ? `Nợ cũ: ${formatVND(c.totalDebt)}` : c.group,
-                  keywords: `${c.name} ${c.phone} ${c.code} ${c.group} ${c.address}`,
-                }))}
+                options={[
+                  ...supplierDirectory
+                    .filter((sup) => sup.oldDebtAmount > 0)
+                    .map(supplierBuyerOption),
+                  ...customers.map((c) => ({
+                    value: c.id,
+                    label: `${c.name} (${c.phone}) — ${c.group}`,
+                    subLabel: `Mã: ${c.code} · Địa chỉ: ${c.address || 'Chưa cập nhật'} · Công nợ cũ: ${formatVND(c.totalDebt)}`,
+                    badge: c.totalDebt > 0 ? `Nợ cũ: ${formatVND(c.totalDebt)}` : c.group,
+                    keywords: `${c.name} ${c.phone} ${c.code} ${c.group} ${c.address}`,
+                  })),
+                  ...supplierDirectory
+                    .filter((sup) => sup.oldDebtAmount <= 0)
+                    .map(supplierBuyerOption),
+                ]}
               />
+
+              {selectedSupplierObj && (
+                <div className="p-3 rounded-lg border border-indigo-300 bg-indigo-50/70 space-y-2 text-xs text-indigo-950">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold flex items-center gap-1.5">
+                      <Building2 className="w-3.5 h-3.5 text-indigo-700 shrink-0" />
+                      <span>Xuất bán hàng cho Nhà cung cấp: {selectedSupplierObj.name}</span>
+                    </span>
+                    <span
+                      className={`font-mono font-bold text-sm ${
+                        selectedSupplierObj.oldDebtAmount > 0 ? 'text-red-600' : 'text-emerald-700'
+                      }`}
+                    >
+                      Nợ phải trả: {formatVND(selectedSupplierObj.oldDebtAmount)}
+                    </span>
+                  </div>
+                  {selectedSupplierObj.unpaidReceipts.length > 0 && (
+                    <div className="text-[11px] text-indigo-900">
+                      Phiếu nhập còn nợ (cấn trừ theo thứ tự cũ → mới):{' '}
+                      <span className="font-mono font-semibold">
+                        {[...selectedSupplierObj.unpaidReceipts]
+                          .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''))
+                          .map((r) => `${r.receiptCode} (${formatVND(r.debtAmount)})`)
+                          .join(' · ')}
+                      </span>
+                    </div>
+                  )}
+                  <label className="flex items-start gap-2 cursor-pointer font-semibold">
+                    <input
+                      type="checkbox"
+                      checked={offsetSupplierDebt && selectedSupplierObj.oldDebtAmount > 0}
+                      disabled={selectedSupplierObj.oldDebtAmount <= 0}
+                      onChange={(e) => setOffsetSupplierDebt(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 accent-indigo-700"
+                    />
+                    <span>
+                      Cấn trừ trực tiếp tiền hàng này vào Công nợ phải trả Nhà cung cấp
+                      {selectedSupplierObj.oldDebtAmount <= 0 && (
+                        <em className="block font-normal text-slate-600">
+                          NCC này hiện không có công nợ phải trả (0 đ) — đơn sẽ tính như bán thường.
+                        </em>
+                      )}
+                    </span>
+                  </label>
+                </div>
+              )}
 
               {/* Old Customer Debt Reminder Banner right when Customer is selected (Only Total Old Debt) */}
               {customerOldDebt.hasCustomer && (
@@ -2273,6 +2428,24 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     </button>
                   );
                 })()}
+                {selectedSupplierObj && currentProduct && (
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setUnitPrice(String(currentProduct.importPrice))}
+                      className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-indigo-300 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+                    >
+                      Giá nhập: {formatVND(currentProduct.importPrice)}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUnitPrice(String(currentProduct.sellPrice))}
+                      className="px-1.5 py-0.5 text-[10px] font-semibold rounded border border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                    >
+                      Giá bán lẻ: {formatVND(currentProduct.sellPrice)}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -3002,7 +3175,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             )}
 
             {/* Payment Method Toggle */}
-            <div>
+            {supplierFullyOffset && supplierOffsetPreview && (
+              <div className="p-3 rounded-lg border border-indigo-300 bg-indigo-50 text-xs text-indigo-950 space-y-1">
+                <div className="font-bold">
+                  4. Cấn trừ 100% vào Công nợ Nhà cung cấp (-{formatVND(supplierOffsetPreview.offsetAmount)})
+                </div>
+                <div className="text-[11px]">
+                  Trừ trực tiếp vào phiếu nhập nợ cũ nhất (FIFO), không thu/chi tiền mặt.
+                </div>
+              </div>
+            )}
+            <div className={supplierFullyOffset ? 'hidden' : ''}>
               <span className="block text-xs font-semibold text-slate-700 mb-1.5">
                 4. Hình thức thanh toán
               </span>
@@ -3035,7 +3218,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               </div>
             </div>
 
-            {paymentMode === 'debt' && (
+            {paymentMode === 'debt' && !supplierFullyOffset && (
               <div className="space-y-3 p-3.5 bg-amber-50/50 rounded-lg border border-amber-200">
                 <div>
                   <label
@@ -3127,7 +3310,56 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             )}
 
             {/* Live Summary Box with Discount, Promotional Gift, Old Customer Debt & Cumulative Total Debt */}
-            <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 space-y-2 text-xs">
+            {selectedSupplierObj && supplierOffsetPreview && (
+              <div className="p-4 bg-indigo-50/60 rounded-lg border border-indigo-200 space-y-1.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-700">Tổng thành tiền xuất cho NCC:</span>
+                  <span className="font-mono font-bold text-slate-900">{formatVND(effectiveTotalPayable)}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-indigo-900">Cấn trừ trực tiếp nợ phải trả NCC:</span>
+                  <span className="font-mono font-bold text-indigo-800">
+                    -{formatVND(supplierOffsetPreview.offsetAmount)}
+                  </span>
+                </div>
+                {supplierOffsetPreview.remainingPayableAfterOffset > 0 && (
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-700">
+                      Phần vượt công nợ — NCC thanh toán thêm / ghi nợ phải thu:
+                    </span>
+                    <span className="font-mono font-semibold text-emerald-700">
+                      {formatVND(supplierOffsetPreview.extraCashPaid)} /{' '}
+                      <span className="text-red-600">
+                        {formatVND(supplierOffsetPreview.effectiveCustomerDebtAmount)}
+                      </span>
+                    </span>
+                  </div>
+                )}
+                <div className="flex items-center justify-between pt-1.5 border-t border-indigo-200">
+                  <span className="text-slate-700">Nợ phải trả NCC trước đơn:</span>
+                  <span className="font-mono font-semibold">
+                    {formatVND(supplierOffsetPreview.supplierOldDebt)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-900 font-bold">Nợ phải trả NCC còn lại sau cấn trừ:</span>
+                  <span
+                    className={`font-mono font-extrabold ${
+                      supplierOffsetPreview.supplierRemainingDebtAfterOffset > 0
+                        ? 'text-red-600'
+                        : 'text-emerald-700'
+                    }`}
+                  >
+                    {formatVND(supplierOffsetPreview.supplierRemainingDebtAfterOffset)}
+                  </span>
+                </div>
+              </div>
+            )}
+            <div
+              className={`p-4 bg-slate-50 rounded-lg border border-slate-200 space-y-2 text-xs ${
+                selectedSupplierObj ? 'hidden' : ''
+              }`}
+            >
               {(summary.discountAmount > 0 || (hasGiftActive && selectedGiftProductObj)) && (
                 <div className="space-y-1.5 pb-2 border-b border-slate-200">
                   <div className="flex items-center justify-between text-slate-600">
@@ -3535,6 +3767,13 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           }`}
                         >
                           {diag.statusLabel}
+                        </span>
+                      )}
+                      {s.isSupplierSale && (
+                        <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border bg-indigo-50 text-indigo-800 border-indigo-200">
+                          {(s.supplierOffsetAmount || 0) > 0
+                            ? `NCC · Cấn trừ nợ ${formatVND(s.supplierOffsetAmount || 0)}`
+                            : 'NCC'}
                         </span>
                       )}
                       {diag.linkedCustomer && (
@@ -4026,6 +4265,39 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       )}
                       {onNavigateCrossLink && (
                         <div className="flex flex-wrap items-center gap-1 mt-1.5">
+                          {s.isSupplierSale && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border bg-indigo-50 text-indigo-800 border-indigo-200">
+                              {(s.supplierOffsetAmount || 0) > 0 ? 'NCC · Cấn trừ nợ' : 'NCC'}
+                            </span>
+                          )}
+                          {s.linkedPaymentVoucherId && (
+                            <CrossLinkChip
+                              tone="sky"
+                              label={`Cấn trừ: ${s.linkedPaymentVoucherCode || 'phiếu chi'}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'payment_vouchers',
+                                  recordId: s.linkedPaymentVoucherId,
+                                  voucherCode: s.linkedPaymentVoucherCode,
+                                  label: `Phiếu chi ${s.linkedPaymentVoucherCode || ''}`,
+                                })
+                              }
+                            />
+                          )}
+                          {(s.supplierOffsetAmount || 0) > 0 && (
+                            <CrossLinkChip
+                              tone="amber"
+                              label="Công nợ NCC"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'debts',
+                                  recordId: s.id,
+                                  subTab: 'supplier',
+                                  label: `Công nợ NCC ${s.customerName}`,
+                                })
+                              }
+                            />
+                          )}
                           {diag.linkedProduct && (
                             <CrossLinkChip
                               tone="indigo"
@@ -4090,8 +4362,13 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
                       <div className="font-mono tabular-nums text-xs text-emerald-700">
-                        Thu: {formatVND(s.paidAmount)}
+                        Thu: {formatVND(Math.max(0, s.paidAmount - (s.supplierOffsetAmount || 0)))}
                       </div>
+                      {(s.supplierOffsetAmount || 0) > 0 && (
+                        <div className="font-mono tabular-nums text-[11px] font-semibold text-indigo-700">
+                          Cấn trừ NCC: {formatVND(s.supplierOffsetAmount || 0)}
+                        </div>
+                      )}
                       {s.debtAmount > 0 ? (
                         <button
                           type="button"
@@ -5182,8 +5459,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     }
     setSelectedSupplierName(supName);
     setShowNewSupplierBox(false);
-    const matched = suppliers.find((s) => s.name === supName);
-    if (matched) {
+    const matched = buildAvailableSupplierDirectory(suppliers, imports, products).find(
+      (s) => s.name === supName
+    );
+    if (matched && matched.phone) {
       setSupplierPhone(matched.phone);
     }
   };
@@ -6053,8 +6332,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   setShowNewSupplierBox(true);
                   if (kw) setNewSupName(kw);
                 }}
-                options={suppliers.map((sup) => {
-                  const supOld = computeSupplierOldDebtSummary(sup.name, imports, 0);
+                options={buildAvailableSupplierDirectory(suppliers, imports, products).map((sup) => {
+                  const supOld = { oldDebtAmount: sup.oldDebtAmount };
                   return {
                     value: sup.name,
                     label: `${sup.name} (${sup.phone || 'Chưa có SĐT'})`,

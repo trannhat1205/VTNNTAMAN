@@ -3075,7 +3075,7 @@ export function computeCashflowAndFinancialReport(params: {
     return sum + initialPaid;
   }, 0);
   const debtSettlementReceiptTotal = filteredReceiptVouchers
-    .filter((rv) => rv.isDebtSettlement)
+    .filter((rv) => rv.isDebtSettlement && !isContraOffsetVoucher(rv))
     .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
   const salesPaidInflow = salesInitialPaidInflow + debtSettlementReceiptTotal;
   const otherReceiptInflow = filteredReceiptVouchers
@@ -3090,7 +3090,7 @@ export function computeCashflowAndFinancialReport(params: {
     return sum + initialPaid;
   }, 0);
   const debtSettlementPaymentTotal = filteredPaymentVouchers
-    .filter((pv) => pv.isDebtSettlement)
+    .filter((pv) => pv.isDebtSettlement && !isContraOffsetVoucher(pv))
     .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
   const importsPaidOutflow = importsInitialPaidOutflow + debtSettlementPaymentTotal;
   const operatingPaymentOutflow = filteredPaymentVouchers
@@ -4444,11 +4444,13 @@ export function reverseSupplierPaymentVoucherAllocations(
  */
 export function findLinkedReceiptVouchersForSale(
   sale: Pick<SaleTransaction, 'id' | 'invoiceCode'>,
-  receiptVouchers: CashReceiptVoucher[]
+  receiptVouchers: CashReceiptVoucher[],
+  options?: { includeContraOffset?: boolean }
 ): CashReceiptVoucher[] {
   return (receiptVouchers || []).filter(
     (rv) =>
       rv.isDebtSettlement &&
+      (options?.includeContraOffset === true || !isContraOffsetVoucher(rv)) &&
       rv.settledAllocations?.some(
         (a) =>
           (Number(a.allocatedAmount) || 0) > 0 &&
@@ -5572,6 +5574,10 @@ export function diagnoseSaleVoucher(params: {
         ) || null
       : null;
   const linkedReceiptVouchers = findLinkedReceiptVouchersForSale(sale, receiptVouchers);
+  const isSupplierPartnerSale =
+    Boolean(sale.isSupplierSale) ||
+    (sale.customerId || '').startsWith('sup::') ||
+    (sale.customerId || '').startsWith('sup_');
   const relatedImports = imports
     .filter((imp) =>
       linkedProduct
@@ -5589,7 +5595,7 @@ export function diagnoseSaleVoucher(params: {
   } else if (!linkedProduct) {
     statusLevel = 'warning';
     statusLabel = 'Vật tư gốc đã bị xóa';
-  } else if (!linkedCustomer) {
+  } else if (!linkedCustomer && !isSupplierPartnerSale) {
     statusLevel = 'warning';
     statusLabel = 'Hồ sơ KH đã bị xóa';
   }
@@ -6238,5 +6244,164 @@ export function computeProvisionalCashbookProfitSummary(params: {
     promoOrDiscountRows: saleRows.filter((r) => r.discountAmount > 0 || r.giftCost > 0),
     otherIncomeVouchers,
     otherExpenseVouchers,
+  };
+}
+
+
+/* ------------------------------------------------------------------------------------------------
+ * Sell / export goods back to a Supplier with direct (non-cash) offset of the supplier payable debt
+ * ---------------------------------------------------------------------------------------------- */
+
+/** True for non-cash contra vouchers (cấn trừ công nợ NCC) that must never count as real cash. */
+export function isContraOffsetVoucher(
+  v: { isContraOffset?: boolean; paymentMethod?: string } | null | undefined
+): boolean {
+  if (!v) return false;
+  return (
+    Boolean(v.isContraOffset) ||
+    normalizeVietnameseSearch(v.paymentMethod || '') === 'can tru cong no'
+  );
+}
+
+export interface AvailableSupplierPartnerItem {
+  key: string;
+  id?: string;
+  code: string;
+  name: string;
+  phone: string;
+  address: string;
+  warehouseName?: string;
+  oldDebtAmount: number;
+  unpaidReceiptCount: number;
+  unpaidReceipts: ImportTransaction[];
+}
+
+const GENERIC_SUPPLIER_PLACEHOLDERS = new Set([
+  'nha cung cap vtnn',
+  'nha cung cap vtnn tam an',
+  'npp qua',
+  'chua ro',
+]);
+
+/**
+ * Builds the directory of suppliers a warehouse can sell goods back to, from the supplier list,
+ * import receipts and product supplier names. Indebted suppliers are listed first.
+ */
+export function buildAvailableSupplierDirectory(
+  suppliers: SupplierProfile[] = [],
+  imports: ImportTransaction[] = [],
+  products: ProductItem[] = []
+): AvailableSupplierPartnerItem[] {
+  const byKey = new Map<
+    string,
+    { id?: string; code: string; name: string; phone: string; address: string; warehouseName?: string }
+  >();
+  const upsert = (entry: {
+    id?: string;
+    code?: string;
+    name?: string;
+    phone?: string;
+    address?: string;
+    warehouseName?: string;
+  }) => {
+    const name = (entry.name || '').trim();
+    if (!name) return;
+    const key = normalizeVietnameseSearch(name);
+    if (!key || GENERIC_SUPPLIER_PLACEHOLDERS.has(key)) return;
+    const prev = byKey.get(key);
+    byKey.set(key, {
+      id: prev?.id || entry.id,
+      code: prev?.code || (entry.code || '').trim(),
+      name: prev?.name || name,
+      phone: prev?.phone || (entry.phone || '').trim(),
+      address: prev?.address || (entry.address || '').trim(),
+      warehouseName: prev?.warehouseName || entry.warehouseName,
+    });
+  };
+
+  for (const s of suppliers || []) upsert(s);
+  for (const imp of imports || []) {
+    upsert({
+      name: imp.supplierName,
+      phone: imp.supplierPhone,
+      warehouseName: imp.warehouseName,
+    });
+  }
+  for (const p of products || []) {
+    upsert({ name: p.supplierName, warehouseName: p.warehouseName });
+  }
+
+  const items: AvailableSupplierPartnerItem[] = [];
+  byKey.forEach((entry, key) => {
+    const debt = computeSupplierOldDebtSummary(entry.name, imports || [], 0);
+    items.push({
+      key,
+      id: entry.id,
+      code: entry.code || buildNameAbbreviationBaseCode(entry.name, { fallbackPrefix: 'NCC' }),
+      name: entry.name,
+      phone: entry.phone,
+      address: entry.address,
+      warehouseName: entry.warehouseName,
+      oldDebtAmount: debt.oldDebtAmount,
+      unpaidReceiptCount: debt.unpaidReceipts.length,
+      unpaidReceipts: debt.unpaidReceipts,
+    });
+  });
+
+  return items.sort((a, b) => {
+    const aDebt = a.oldDebtAmount > 0 ? 1 : 0;
+    const bDebt = b.oldDebtAmount > 0 ? 1 : 0;
+    if (aDebt !== bDebt) return bDebt - aDebt;
+    if (aDebt && bDebt && a.oldDebtAmount !== b.oldDebtAmount) {
+      return b.oldDebtAmount - a.oldDebtAmount;
+    }
+    return a.name.localeCompare(b.name, 'vi');
+  });
+}
+
+export interface SupplierSaleOffsetPreview {
+  offsetAmount: number;
+  remainingPayableAfterOffset: number;
+  extraCashPaid: number;
+  effectivePaidAmount: number;
+  effectiveCustomerDebtAmount: number;
+  supplierOldDebt: number;
+  supplierRemainingDebtAfterOffset: number;
+  status: PaymentStatus;
+}
+
+/** Previews how a sale to a supplier is split between debt offset, extra cash and receivable debt. */
+export function computeSupplierSaleOffsetPreview(params: {
+  saleNetTotal: number;
+  supplierOldDebt: number;
+  offsetEnabled: boolean;
+  extraCashPaidInput?: number;
+  excessPaymentMode?: 'full' | 'debt';
+}): SupplierSaleOffsetPreview {
+  const safeTotal = Math.max(0, Math.round(Number(params.saleNetTotal) || 0));
+  const safeSupDebt = Math.max(0, Math.round(Number(params.supplierOldDebt) || 0));
+  const offsetAmount = params.offsetEnabled ? Math.min(safeTotal, safeSupDebt) : 0;
+  const remainingPayableAfterOffset = Math.max(0, safeTotal - offsetAmount);
+  const extraCashPaid =
+    (params.excessPaymentMode ?? 'full') === 'full'
+      ? remainingPayableAfterOffset
+      : Math.min(
+          remainingPayableAfterOffset,
+          Math.max(0, Math.round(Number(params.extraCashPaidInput) || 0))
+        );
+  const effectivePaidAmount = Math.min(safeTotal, offsetAmount + extraCashPaid);
+  const effectiveCustomerDebtAmount = Math.max(0, safeTotal - effectivePaidAmount);
+  const supplierRemainingDebtAfterOffset = Math.max(0, safeSupDebt - offsetAmount);
+  const status: PaymentStatus =
+    effectiveCustomerDebtAmount === 0 ? 'paid' : effectivePaidAmount === 0 ? 'unpaid' : 'partial';
+  return {
+    offsetAmount,
+    remainingPayableAfterOffset,
+    extraCashPaid,
+    effectivePaidAmount,
+    effectiveCustomerDebtAmount,
+    supplierOldDebt: safeSupDebt,
+    supplierRemainingDebtAfterOffset,
+    status,
   };
 }

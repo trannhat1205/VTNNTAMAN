@@ -166,9 +166,17 @@ export function computeDataHealthReport(input: DataHealthInput): DataHealthRepor
   // 3. Orphan sale → customer
   const customerIdSet = new Set(customers.map((c) => c.id));
   const customerPhoneSet = new Set(customers.map((c) => (c.phone || '').trim()).filter(Boolean));
+  const supplierNameSet = new Set(
+    imports.map((i) => normalizeVietnameseSearch(i.supplierName)).filter(Boolean)
+  );
   const orphanSaleCustomers: DataHealthItem[] = sales
     .filter((s) => {
       if (!s.customerId) return false;
+      if (s.isSupplierSale) return false;
+      if ((s.customerId || '').startsWith('sup_') || (s.customerId || '').startsWith('sup::')) {
+        return false;
+      }
+      if (supplierNameSet.has(normalizeVietnameseSearch(s.customerName))) return false;
       if (customerIdSet.has(s.customerId)) return false;
       const phone = (s.customerPhone || '').trim();
       return !(phone && customerPhoneSet.has(phone));

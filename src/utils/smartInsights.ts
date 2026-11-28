@@ -282,7 +282,11 @@ export function computeShiftCloseSummary(input: ShiftCloseInput): ShiftCloseSumm
   const byMethodOut: Record<string, number> = {};
   let cashPt = 0;
   let nonCashIn = 0;
+  const isContraMethod = (m: string | undefined | null): boolean =>
+    (m || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase().trim() ===
+    'can tru cong no';
   for (const r of input.receipts) {
+    if (isContraMethod(r.paymentMethod)) continue;
     const amt = Math.max(0, Number(r.amount) || 0);
     const key = (r.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
     byMethodIn[key] = (byMethodIn[key] || 0) + amt;
@@ -292,6 +296,7 @@ export function computeShiftCloseSummary(input: ShiftCloseInput): ShiftCloseSumm
   let cashPc = 0;
   let nonCashOut = 0;
   for (const p of input.payments) {
+    if (isContraMethod(p.paymentMethod)) continue;
     const amt = Math.max(0, Number(p.amount) || 0);
     const key = (p.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
     byMethodOut[key] = (byMethodOut[key] || 0) + amt;

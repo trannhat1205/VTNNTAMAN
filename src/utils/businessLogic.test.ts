@@ -4348,3 +4348,236 @@ test('Smart reorder: no false "Sắp thiếu" when nothing sold in 30 days and s
   } as SaleTransaction;
   assert.equal(computeSmartReorderSuggestions([base], [sold], opts).length, 1);
 });
+/* ---- Sell goods back to a supplier: direct (non-cash) debt offset ---- */
+import {
+  applySupplierFifoDebtSettlement as supApplyFifo,
+  buildAvailableSupplierDirectory as supBuildDirectory,
+  computeCashflowAndFinancialReport as supCashflow,
+  computeProvisionalCashbookProfitSummary as supCashbook,
+  computeSupplierSaleOffsetPreview as supOffsetPreview,
+  findLinkedReceiptVouchersForSale as supFindLinkedReceipts,
+  reverseSupplierPaymentVoucherAllocations as supReverse,
+} from './businessLogic';
+import { computeDataHealthReport as supHealth } from './dataHealth';
+import type {
+  CashPaymentVoucher as SupPv,
+  CashReceiptVoucher as SupRv,
+  ImportTransaction as SupImp,
+  SaleTransaction as SupSale,
+} from '../types';
+
+function supImport(id: string, code: string, qty: number, cost: number, createdAt: string): SupImp {
+  const total = qty * cost;
+  return {
+    id,
+    receiptCode: code,
+    supplierName: 'GAP Nhất',
+    supplierPhone: '0393120246',
+    productId: 'p_bpro',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: qty,
+    unitCost: cost,
+    totalCost: total,
+    paidAmount: 0,
+    debtAmount: total,
+    dueDate: '2026-12-28',
+    status: 'unpaid',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt,
+    updatedAt: createdAt,
+  } as SupImp;
+}
+
+test('Supplier directory lists suppliers from imports with payable debt first (no customers needed)', () => {
+  const imports = [
+    supImport('i3', 'PN-2611-003', 5, 160000, '2026-11-28T01:00:00.000Z'),
+    supImport('i4', 'PN-2611-004', 6, 150000, '2026-11-28T02:00:00.000Z'),
+  ];
+  const dir = supBuildDirectory([], imports, []);
+  assert.equal(dir.length, 1);
+  assert.equal(dir[0].name, 'GAP Nhất');
+  assert.equal(dir[0].phone, '0393120246');
+  assert.equal(dir[0].oldDebtAmount, 1700000);
+  assert.equal(dir[0].unpaidReceiptCount, 2);
+});
+
+test('Supplier sale offset preview covers S <= D, S > D (full / debt) and disabled offset', () => {
+  const small = supOffsetPreview({ saleNetTotal: 320000, supplierOldDebt: 1700000, offsetEnabled: true });
+  assert.equal(small.offsetAmount, 320000);
+  assert.equal(small.effectivePaidAmount, 320000);
+  assert.equal(small.effectiveCustomerDebtAmount, 0);
+  assert.equal(small.supplierRemainingDebtAfterOffset, 1380000);
+  assert.equal(small.status, 'paid');
+
+  const bigFull = supOffsetPreview({
+    saleNetTotal: 2000000,
+    supplierOldDebt: 1700000,
+    offsetEnabled: true,
+    excessPaymentMode: 'full',
+  });
+  assert.equal(bigFull.offsetAmount, 1700000);
+  assert.equal(bigFull.extraCashPaid, 300000);
+  assert.equal(bigFull.effectiveCustomerDebtAmount, 0);
+  assert.equal(bigFull.supplierRemainingDebtAfterOffset, 0);
+
+  const bigDebt = supOffsetPreview({
+    saleNetTotal: 2000000,
+    supplierOldDebt: 1700000,
+    offsetEnabled: true,
+    excessPaymentMode: 'debt',
+    extraCashPaidInput: 100000,
+  });
+  assert.equal(bigDebt.effectivePaidAmount, 1800000);
+  assert.equal(bigDebt.effectiveCustomerDebtAmount, 200000);
+  assert.equal(bigDebt.status, 'partial');
+
+  const off = supOffsetPreview({ saleNetTotal: 320000, supplierOldDebt: 1700000, offsetEnabled: false, excessPaymentMode: 'debt' });
+  assert.equal(off.offsetAmount, 0);
+  assert.equal(off.effectivePaidAmount, 0);
+  assert.equal(off.status, 'unpaid');
+});
+
+test('Supplier contra offset is non-cash, nets to zero profit, does not block the sale and is fully reversible', () => {
+  const nowIso = '2026-11-28T04:00:00.000Z';
+  const imports = [
+    supImport('i3', 'PN-2611-003', 5, 160000, '2026-11-28T01:00:00.000Z'),
+    supImport('i4', 'PN-2611-004', 6, 150000, '2026-11-28T02:00:00.000Z'),
+  ];
+  const sale = {
+    id: 's1',
+    invoiceCode: 'HD-2611-001',
+    customerId: 'sup_gap_nhat',
+    customerName: 'GAP Nhất',
+    customerPhone: '0393120246',
+    productId: 'p_bpro',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: 2,
+    unitPrice: 160000,
+    unitCost: 160000,
+    totalAmount: 320000,
+    paidAmount: 320000,
+    debtAmount: 0,
+    dueDate: '2026-11-28',
+    status: 'paid',
+    isSupplierSale: true,
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  } as SupSale;
+
+  const fifo = supApplyFifo(
+    imports,
+    { supplierName: 'GAP Nhất', supplierPhone: '0393120246' },
+    320000,
+    'Cấn trừ',
+    nowIso
+  );
+  assert.equal(fifo.totalAllocated, 320000);
+  const afterImports = fifo.updatedImports;
+  assert.equal(afterImports.find((i) => i.id === 'i3')?.debtAmount, 480000);
+  assert.equal(afterImports.find((i) => i.id === 'i4')?.debtAmount, 900000);
+
+  const pv = {
+    id: 'pv1',
+    voucherCode: 'PC-2611-001',
+    groupName: 'Cấn trừ công nợ Nhà cung cấp',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    partnerName: 'GAP Nhất',
+    partnerPhone: '0393120246',
+    amount: 320000,
+    paymentMethod: 'Cấn trừ công nợ',
+    isDebtSettlement: true,
+    isContraOffset: true,
+    settledAllocations: fifo.settledAllocations,
+    countsTowardOperatingExpense: false,
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  } as SupPv;
+  const rv = {
+    id: 'rv1',
+    voucherCode: 'PT-2611-001',
+    groupName: 'Cấn trừ công nợ Nhà cung cấp',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    partnerName: 'GAP Nhất',
+    partnerPhone: '0393120246',
+    amount: 320000,
+    paymentMethod: 'Cấn trừ công nợ',
+    isDebtSettlement: true,
+    isContraOffset: true,
+    settledAllocations: [
+      {
+        recordId: 's1',
+        code: 'HD-2611-001',
+        date: '2026-11-28',
+        dueDate: '2026-11-28',
+        productName: 'Búp Pro',
+        previousDebt: 320000,
+        allocatedAmount: 320000,
+        remainingDebt: 0,
+      },
+    ],
+    countsTowardOtherIncome: false,
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  } as SupRv;
+
+  const report = supCashflow({
+    sales: [sale],
+    imports: afterImports,
+    products: [],
+    receiptVouchers: [rv],
+    paymentVouchers: [pv],
+  });
+  assert.equal(report.totalCashInflow, 0);
+  assert.equal(report.totalCashOutflow, 0);
+  assert.equal(report.netCashflow, 0);
+  assert.equal(report.netProfit, 0);
+
+  const cashbook = supCashbook({
+    sales: [sale],
+    imports: afterImports,
+    products: [],
+    receiptVouchers: [rv],
+    paymentVouchers: [pv],
+  });
+  assert.equal(cashbook.provisionalNetProfit, 0);
+  assert.equal(cashbook.actualNetCashflow, 0);
+
+  // Contra voucher must not block cancelling / handling the sale like a manual debt collection does
+  assert.deepEqual(supFindLinkedReceipts(sale, [rv]), []);
+  assert.equal(supFindLinkedReceipts(sale, [rv], { includeContraOffset: true }).length, 1);
+
+  // Supplier-partner sales are never reported as orphan customers
+  const health = supHealth({
+    products: [],
+    customers: [],
+    sales: [sale],
+    imports: afterImports,
+    receiptVouchers: [rv],
+    paymentVouchers: [pv],
+    stockAdjustments: [],
+    warehouses: ['TÂM AN MỸ NGÃI'],
+    staffList: [],
+  });
+  assert.equal(health.byId.orphanSaleCustomers.count, 0);
+
+  // Reversal restores the supplier's exact debt
+  const reversed = supReverse(afterImports, pv, nowIso);
+  assert.equal(reversed.updatedImports.find((i) => i.id === 'i3')?.debtAmount, 800000);
+  const totalDebt = reversed.updatedImports.reduce((s, i) => s + i.debtAmount, 0);
+  assert.equal(totalDebt, 1700000);
+});
