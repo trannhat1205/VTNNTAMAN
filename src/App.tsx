@@ -10305,17 +10305,6 @@ export default function App() {
                 </button>
               )}
 
-              {/* Prominent Logout ("Thoát đăng nhập") Button */}
-              <button
-                type="button"
-                onClick={handleLogoutApp}
-                className="px-2 py-1.5 lg:px-3 lg:py-2 text-[11px] sm:text-xs font-bold text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 rounded-lg transition-colors flex items-center gap-1 sm:gap-1.5 whitespace-nowrap shrink-0"
-              >
-                <LogOut className="w-3.5 h-3.5 shrink-0" />
-                <span className="hidden xl:inline">Thoát đăng nhập</span>
-                <span className="xl:hidden">Thoát</span>
-              </button>
-
               {/* Push Notification Center Trigger */}
               <button
                 type="button"
@@ -10327,24 +10316,6 @@ export default function App() {
                 <span className="hidden lg:inline">Thông báo</span>
                 <span className="font-mono font-bold text-red-600">({unreadNotifCount})</span>
               </button>
-
-              {/* Primary CTA Button — Shown if account has sales permission */}
-              {accessScope.canAccessSales && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPreselectedCustomerId(null);
-                    setSaleFormResetKey((prev) => prev + 1);
-                    setActiveTab('sales');
-                    setMobileMenuOpen(false);
-                    scrollToTopOfPage();
-                  }}
-                  className="px-2.5 py-1.5 lg:px-3.5 lg:py-2 text-[11px] sm:text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors whitespace-nowrap shrink-0 shadow-2xs"
-                >
-                  <span className="sm:hidden">+ Đơn bán</span>
-                  <span className="hidden sm:inline">+ Tạo đơn bán</span>
-                </button>
-              )}
             </div>
           </div>
 
