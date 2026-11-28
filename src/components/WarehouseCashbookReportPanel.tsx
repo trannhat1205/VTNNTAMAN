@@ -8,6 +8,7 @@ import {
   getRecentDaysRangeVietnam,
   getTodayVietnamDateStr,
   normalizeVietnameseSearch,
+  toVietnamDateStr,
   type ProvisionalCashbookProfitSummary,
 } from '../utils/businessLogic';
 
@@ -186,7 +187,7 @@ export const WarehouseCashbookReportPanel: React.FC<WarehouseCashbookReportPanel
               onClick={() => onSelectSale?.(r.sale)}
               className={onSelectSale ? 'hover:bg-emerald-50/40 cursor-pointer' : ''}
             >
-              <td className="py-2.5 px-3 font-mono whitespace-nowrap">{(r.sale.createdAt || '').slice(0, 10)}</td>
+              <td className="py-2.5 px-3 font-mono whitespace-nowrap">{toVietnamDateStr(r.sale.createdAt)}</td>
               <td className="py-2.5 px-3 font-mono font-bold text-emerald-800 whitespace-nowrap">
                 {r.sale.invoiceCode}
               </td>
@@ -279,7 +280,7 @@ export const WarehouseCashbookReportPanel: React.FC<WarehouseCashbookReportPanel
               title={onNavigateToModule ? 'Bấm để mở phiếu gốc trong Nhật ký' : undefined}
               className={onNavigateToModule ? 'cursor-pointer hover:bg-emerald-50/50' : ''}
             >
-              <td className="py-2.5 px-3 font-mono whitespace-nowrap">{(v.createdAt || '').slice(0, 10)}</td>
+              <td className="py-2.5 px-3 font-mono whitespace-nowrap">{toVietnamDateStr(v.createdAt)}</td>
               <td className="py-2.5 px-3 font-mono font-bold whitespace-nowrap">
                 <span className="inline-flex items-center gap-1 text-emerald-800">
                   {v.voucherCode}

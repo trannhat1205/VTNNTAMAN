@@ -18,17 +18,24 @@ import {
   sanitizeVietQrText,
 } from './smartPosFeatures';
 import {
+  computeCashflowAndFinancialReport,
+  computeProvisionalCashbookProfitSummary,
   evaluateDebtUrgency,
   evaluateStockAlert,
+  findDirectPaymentVouchersForImport,
+  findDirectReceiptVouchersForSale,
+  findLinkedPaymentVouchersForImport,
+  findLinkedReceiptVouchersForSale,
   formatVND,
   getTodayVietnamDateStr,
+  isContraOffsetVoucher,
   ProductStockMovementLedger,
   ReceivedItemReportRow,
   resolveSaleGiftUnitCost,
-  computeProvisionalCashbookProfitSummary,
   resolveSaleUnitCost,
   SmartReportRecommendation,
   TaxAuthorityFinancialStatementResult,
+  toVietnamDateStr,
 } from './businessLogic';
 
 const FONT_FAMILY = '"Plus Jakarta Sans", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
@@ -1882,6 +1889,10 @@ export function exportComprehensiveDateRangeReportExcel(params: {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  allSales?: SaleTransaction[];
+  allImports?: ImportTransaction[];
+  allReceiptVouchers?: CashReceiptVoucher[];
+  allPaymentVouchers?: CashPaymentVoucher[];
   receiptVouchers?: CashReceiptVoucher[];
   paymentVouchers?: CashPaymentVoucher[];
   savedVouchers?: SavedVoucherRecord[];
@@ -1890,25 +1901,30 @@ export function exportComprehensiveDateRangeReportExcel(params: {
   isPrimaryAdmin?: boolean;
 }): string {
   const wb = XLSX.utils.book_new();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getTodayVietnamDateStr();
   const periodText = `Từ ngày ${params.fromDate} đến ngày ${params.toDate}`;
 
   const receiptVouchers = params.receiptVouchers || [];
   const paymentVouchers = params.paymentVouchers || [];
+  const cf = computeCashflowAndFinancialReport({
+    sales: params.allSales || params.sales,
+    imports: params.allImports || params.imports,
+    products: params.products,
+    receiptVouchers: params.allReceiptVouchers || receiptVouchers,
+    paymentVouchers: params.allPaymentVouchers || paymentVouchers,
+    fromDate: params.fromDate,
+    toDate: params.toDate,
+  });
   const totalRevenue = params.sales.reduce((sum, s) => sum + s.totalAmount, 0);
-  const totalCollected = params.sales.reduce((sum, s) => sum + s.paidAmount, 0);
-  const otherReceiptInflow = receiptVouchers
-    .filter((rv) => !rv.isDebtSettlement)
-    .reduce((sum, rv) => sum + rv.amount, 0);
-  const totalCashInflow = totalCollected + otherReceiptInflow;
+  const totalCollected = cf.salesPaidInflow;
+  const otherReceiptInflow = cf.otherReceiptInflow;
+  const totalCashInflow = cf.totalCashInflow;
   const totalCustomerDebt = params.sales.reduce((sum, s) => sum + s.debtAmount, 0);
   const totalImportCost = params.imports.reduce((sum, i) => sum + i.totalCost, 0);
-  const totalPaidSupplier = params.imports.reduce((sum, i) => sum + i.paidAmount, 0);
-  const operatingPaymentOutflow = paymentVouchers
-    .filter((pv) => !pv.isDebtSettlement)
-    .reduce((sum, pv) => sum + pv.amount, 0);
-  const totalCashOutflow = totalPaidSupplier + operatingPaymentOutflow;
-  const netCashflow = totalCashInflow - totalCashOutflow;
+  const totalPaidSupplier = cf.importsPaidOutflow;
+  const operatingPaymentOutflow = cf.operatingPaymentOutflow;
+  const totalCashOutflow = cf.totalCashOutflow;
+  const netCashflow = cf.netCashflow;
   const totalSupplierDebt = params.imports.reduce((sum, i) => sum + i.debtAmount, 0);
 
   const canSeeProfit = params.allowedCategories.includes('financial_profit');
@@ -2132,24 +2148,22 @@ export function exportComprehensiveDateRangeReportExcel(params: {
 
   // Sheet 7: Thu - Chi Dòng Tiền
   if (params.allowedCategories.includes('cashflow_treasury')) {
+    const allRvs = params.allReceiptVouchers || receiptVouchers;
+    const allPvs = params.allPaymentVouchers || paymentVouchers;
+    const coveredSaleGroupIds = new Set<string>();
+    for (const rv of allRvs) {
+      if (rv.linkedSaleGroupId) coveredSaleGroupIds.add(rv.linkedSaleGroupId);
+    }
+    const coveredImportGroupIds = new Set<string>();
+    for (const pv of allPvs) {
+      if (pv.linkedImportGroupId) coveredImportGroupIds.add(pv.linkedImportGroupId);
+    }
     const cashRows = [
-      ...params.sales
-        .filter((s) => s.paidAmount > 0)
-        .map((s) => ({
-          'Ngày Giao Dịch': (s.createdAt || '').slice(0, 10),
-          'Loại Dòng Tiền': 'THU TIỀN BÁN HÀNG / THU NỢ KH',
-          'Mã Chứng Từ': s.invoiceCode,
-          'Đối Tác': s.customerName,
-          'Nội Dung': `Thu tiền bán ${s.quantity} ${s.unit} ${s.productName}`,
-          'Số Tiền Thu (+ VNĐ)': s.paidAmount,
-          'Số Tiền Chi (- VNĐ)': 0,
-          'Kho': s.warehouseName || 'Tâm An Mỹ Ngãi',
-        })),
       ...receiptVouchers
-        .filter((rv) => !rv.isDebtSettlement && rv.amount > 0)
+        .filter((rv) => !isContraOffsetVoucher(rv) && rv.amount > 0)
         .map((rv) => ({
-          'Ngày Giao Dịch': (rv.createdAt || '').slice(0, 10),
-          'Loại Dòng Tiền': `PHIẾU THU KHÁC (${rv.groupName})`,
+          'Ngày Giao Dịch': toVietnamDateStr(rv.createdAt),
+          'Loại Dòng Tiền': `PHIẾU THU (${rv.groupName})`,
           'Mã Chứng Từ': rv.voucherCode,
           'Đối Tác': rv.partnerName,
           'Nội Dung': rv.note || rv.groupName,
@@ -2157,29 +2171,86 @@ export function exportComprehensiveDateRangeReportExcel(params: {
           'Số Tiền Chi (- VNĐ)': 0,
           'Kho': rv.warehouseName || 'Tâm An Mỹ Ngãi',
         })),
-      ...params.imports
-        .filter((i) => i.paidAmount > 0)
-        .map((i) => ({
-          'Ngày Giao Dịch': (i.createdAt || '').slice(0, 10),
-          'Loại Dòng Tiền': 'CHI TIỀN NHẬP KHO / TRẢ NỢ NCC',
-          'Mã Chứng Từ': i.receiptCode,
-          'Đối Tác': i.supplierName,
-          'Nội Dung': `Chi trả nhập ${i.quantity} ${i.unit} ${i.productName}`,
-          'Số Tiền Thu (+ VNĐ)': 0,
-          'Số Tiền Chi (- VNĐ)': i.paidAmount,
-          'Kho': i.warehouseName || 'Tâm An Mỹ Ngãi',
+      ...params.sales
+        .map((s) => {
+          if (s.invoiceGroupId && coveredSaleGroupIds.has(s.invoiceGroupId)) {
+            return { s, unvouchered: 0 };
+          }
+          const debtPaid = findLinkedReceiptVouchersForSale(s, allRvs).reduce(
+            (sum, rv) =>
+              sum +
+              (rv.settledAllocations || [])
+                .filter((a) => a.recordId === s.id || a.code === s.invoiceCode)
+                .reduce((ss, a) => ss + (Number(a.allocatedAmount) || 0), 0),
+            0
+          );
+          const directPaid = findDirectReceiptVouchersForSale(s, allRvs).reduce(
+            (sum, rv) => sum + (Number(rv.amount) || 0),
+            0
+          );
+          const contraAmt = Math.max(0, Math.round(Number(s.supplierOffsetAmount) || 0));
+          const unvouchered = Math.max(
+            0,
+            Math.round((Number(s.paidAmount) || 0) - debtPaid - directPaid - contraAmt)
+          );
+          return { s, unvouchered };
+        })
+        .filter(({ unvouchered }) => unvouchered > 0)
+        .map(({ s, unvouchered }) => ({
+          'Ngày Giao Dịch': toVietnamDateStr(s.createdAt),
+          'Loại Dòng Tiền': 'THU TIỀN BÁN HÀNG TẠI ĐƠN (CŨ)',
+          'Mã Chứng Từ': s.invoiceCode,
+          'Đối Tác': s.customerName,
+          'Nội Dung': `Thu tiền bán ${s.quantity} ${s.unit} ${s.productName}`,
+          'Số Tiền Thu (+ VNĐ)': unvouchered,
+          'Số Tiền Chi (- VNĐ)': 0,
+          'Kho': s.warehouseName || 'Tâm An Mỹ Ngãi',
         })),
       ...paymentVouchers
-        .filter((pv) => !pv.isDebtSettlement && pv.amount > 0)
+        .filter((pv) => !isContraOffsetVoucher(pv) && pv.amount > 0)
         .map((pv) => ({
-          'Ngày Giao Dịch': (pv.createdAt || '').slice(0, 10),
-          'Loại Dòng Tiền': `PHIẾU CHI VẬN HÀNH (${pv.groupName})`,
+          'Ngày Giao Dịch': toVietnamDateStr(pv.createdAt),
+          'Loại Dòng Tiền': `PHIẾU CHI (${pv.groupName})`,
           'Mã Chứng Từ': pv.voucherCode,
           'Đối Tác': pv.partnerName,
           'Nội Dung': pv.note || pv.groupName,
           'Số Tiền Thu (+ VNĐ)': 0,
           'Số Tiền Chi (- VNĐ)': pv.amount,
           'Kho': pv.warehouseName || 'Tâm An Mỹ Ngãi',
+        })),
+      ...params.imports
+        .map((i) => {
+          if (i.importGroupId && coveredImportGroupIds.has(i.importGroupId)) {
+            return { i, unvouchered: 0 };
+          }
+          const debtPaid = findLinkedPaymentVouchersForImport(i, allPvs).reduce(
+            (sum, pv) =>
+              sum +
+              (pv.settledAllocations || [])
+                .filter((a) => a.recordId === i.id || a.code === i.receiptCode)
+                .reduce((ss, a) => ss + (Number(a.allocatedAmount) || 0), 0),
+            0
+          );
+          const directPaid = findDirectPaymentVouchersForImport(i, allPvs).reduce(
+            (sum, pv) => sum + (Number(pv.amount) || 0),
+            0
+          );
+          const unvouchered = Math.max(
+            0,
+            Math.round((Number(i.paidAmount) || 0) - debtPaid - directPaid)
+          );
+          return { i, unvouchered };
+        })
+        .filter(({ unvouchered }) => unvouchered > 0)
+        .map(({ i, unvouchered }) => ({
+          'Ngày Giao Dịch': toVietnamDateStr(i.createdAt),
+          'Loại Dòng Tiền': 'CHI TIỀN NHẬP KHO TẠI PHIẾU (CŨ)',
+          'Mã Chứng Từ': i.receiptCode,
+          'Đối Tác': i.supplierName,
+          'Nội Dung': `Chi trả nhập ${i.quantity} ${i.unit} ${i.productName}`,
+          'Số Tiền Thu (+ VNĐ)': 0,
+          'Số Tiền Chi (- VNĐ)': unvouchered,
+          'Kho': i.warehouseName || 'Tâm An Mỹ Ngãi',
         })),
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cashRows), 'Thu_Chi_Dong_Tien');
@@ -2196,7 +2267,7 @@ export function exportComprehensiveDateRangeReportExcel(params: {
     });
     const cashbookRows = prov.saleRows.map((r, idx) => ({
       STT: idx + 1,
-      'Ngày Bán': (r.sale.createdAt || '').slice(0, 10),
+      'Ngày Bán': toVietnamDateStr(r.sale.createdAt),
       'Mã Hóa Đơn': r.sale.invoiceCode,
       'Khách Hàng': r.sale.customerName,
       'Mặt Hàng': r.sale.productName,
@@ -2222,7 +2293,7 @@ export function exportComprehensiveDateRangeReportExcel(params: {
       const profit = s.totalAmount - totalCost;
       return {
         STT: idx + 1,
-        'Ngày Bán': (s.createdAt || '').slice(0, 10),
+        'Ngày Bán': toVietnamDateStr(s.createdAt),
         'Mã Hóa Đơn': s.invoiceCode,
         'Khách Hàng': s.customerName,
         'Mặt Hàng': s.productName,
@@ -2253,29 +2324,38 @@ export function exportComprehensiveDateRangeReportPDF(params: {
   customers: CustomerProfile[];
   sales: SaleTransaction[];
   imports: ImportTransaction[];
+  allSales?: SaleTransaction[];
+  allImports?: ImportTransaction[];
+  allReceiptVouchers?: CashReceiptVoucher[];
+  allPaymentVouchers?: CashPaymentVoucher[];
   receiptVouchers?: CashReceiptVoucher[];
   paymentVouchers?: CashPaymentVoucher[];
 }): string {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getTodayVietnamDateStr();
   const periodLabel = `Từ ${params.fromDate || 'Đầu kỳ'} đến ${params.toDate || today}`;
   const fileName = `BaoCao_TongHop_TamAn_${params.fromDate || 'All'}_den_${params.toDate || today}.pdf`;
 
   const receiptVouchers = params.receiptVouchers || [];
   const paymentVouchers = params.paymentVouchers || [];
+  const cf = computeCashflowAndFinancialReport({
+    sales: params.allSales || params.sales,
+    imports: params.allImports || params.imports,
+    products: params.products,
+    receiptVouchers: params.allReceiptVouchers || receiptVouchers,
+    paymentVouchers: params.allPaymentVouchers || paymentVouchers,
+    fromDate: params.fromDate,
+    toDate: params.toDate,
+  });
   const totalRevenue = params.sales.reduce((sum, s) => sum + s.totalAmount, 0);
-  const totalCollected = params.sales.reduce((sum, s) => sum + s.paidAmount, 0);
-  const otherReceiptInflow = receiptVouchers
-    .filter((rv) => !rv.isDebtSettlement)
-    .reduce((sum, rv) => sum + rv.amount, 0);
-  const totalCashInflow = totalCollected + otherReceiptInflow;
+  const totalCollected = cf.salesPaidInflow;
+  const otherReceiptInflow = cf.otherReceiptInflow;
+  const totalCashInflow = cf.totalCashInflow;
   const totalCustomerDebt = params.sales.reduce((sum, s) => sum + s.debtAmount, 0);
   const totalImportCost = params.imports.reduce((sum, i) => sum + i.totalCost, 0);
-  const totalPaidSupplier = params.imports.reduce((sum, i) => sum + i.paidAmount, 0);
-  const operatingPaymentOutflow = paymentVouchers
-    .filter((pv) => !pv.isDebtSettlement)
-    .reduce((sum, pv) => sum + pv.amount, 0);
-  const totalCashOutflow = totalPaidSupplier + operatingPaymentOutflow;
-  const netCashflow = totalCashInflow - totalCashOutflow;
+  const totalPaidSupplier = cf.importsPaidOutflow;
+  const operatingPaymentOutflow = cf.operatingPaymentOutflow;
+  const totalCashOutflow = cf.totalCashOutflow;
+  const netCashflow = cf.netCashflow;
   const totalSupplierDebt = params.imports.reduce((sum, i) => sum + i.debtAmount, 0);
 
   const estimatedCompHeight =

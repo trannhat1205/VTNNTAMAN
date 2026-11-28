@@ -102,6 +102,9 @@ import {
   computeAtomicProductStockDelta,
   computeCustomerSaleReturnCalculation,
   buildCustomerReturnRefundVouchers,
+  buildDirectImportPaymentVoucher,
+  buildDirectSaleReceiptVoucher,
+  buildMissingDirectVouchersForExistingRecords,
   buildSupplierReturnRefundVouchers,
   computeDueDateAfterDays,
   computeSaleEditStockDeltas,
@@ -112,6 +115,8 @@ import {
   countDistinctSalesInvoices,
   createAuditLogEntry,
   dedupeWarehouseNames,
+  DIRECT_IMPORT_PAYMENT_GROUP,
+  DIRECT_SALE_RECEIPT_GROUP,
   doesRecordMatchProduct,
   evaluateDebtUrgency,
   evaluateImportMutationSafety,
@@ -124,9 +129,13 @@ import {
   buildVoucherCounterMeta,
   filterRecordsBySelectedWarehouses,
   findCollidingProductCodeInWarehouse,
+  findDirectPaymentVouchersForImport,
+  findDirectReceiptVouchersForSale,
   findLinkedPaymentVouchersForImport,
   findLinkedReceiptVouchersForSale,
   isContraOffsetVoucher,
+  isDirectImportPaymentVoucher,
+  isDirectSaleReceiptVoucher,
   formatDefaultWarehouseNameFromGmail,
   formatSelectedWarehousesBadge,
   formatVND,
@@ -157,6 +166,9 @@ import {
   resolveCanonicalSelectWarehouseValue,
   reverseCustomerReceiptVoucherAllocations,
   reverseSupplierPaymentVoucherAllocations,
+  syncImportsOnDirectPaymentVoucherMutation,
+  syncSalesOnDirectReceiptVoucherMutation,
+  toVietnamDateStr,
   updateImportRecord,
   updateSaleRecord,
 } from './utils/businessLogic';
@@ -3000,7 +3012,7 @@ export default function App() {
             rvAllocations.push({
               recordId: s.id,
               code: s.invoiceCode,
-              date: (s.createdAt || '').slice(0, 10),
+              date: toVietnamDateStr(s.createdAt) || (s.createdAt || '').slice(0, 10),
               dueDate: s.dueDate || '',
               productName: s.productName,
               previousDebt: lineOffset,
@@ -3210,6 +3222,112 @@ export default function App() {
     }
     return true;
   };
+  /**
+   * Emits a consolidated `PT-...` (`isDirectSaleReceipt: true`) into `receiptVouchers` whenever
+   * a newly created sale order (single or multi-item cart) collects upfront cash/bank payment > 0.
+   */
+  const emitDirectReceiptForCreatedSales = (
+    salesLines: SaleTransaction[],
+    ownerUid: string,
+    paymentMethod?: string
+  ): CashReceiptVoucher | null => {
+    if (!salesLines || salesLines.length === 0) return null;
+    const rvId = generateUniqueRecordId('rv_sale');
+    const preliminary = buildDirectSaleReceiptVoucher({
+      salesLines,
+      voucherId: rvId,
+      voucherCode: 'PT-TEMP',
+      paymentMethod,
+      staffName: currentStaff.displayName,
+      ownerId: ownerUid,
+      nowIso: salesLines[0].createdAt,
+    });
+    if (!preliminary) return null;
+
+    const allocatedPtCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid,
+      prefix: 'PT',
+      existingCodes: receiptVouchers.map((r) => r.voucherCode),
+      onReassigned: (committedCode) => {
+        const reassignedAt = new Date().toISOString();
+        setReceiptVouchers((prev) =>
+          prev.map((r) =>
+            r.id === rvId ? { ...r, voucherCode: committedCode, updatedAt: reassignedAt } : r
+          )
+        );
+        stageAndFlushRecords(
+          {
+            receiptVouchers: [{ ...createdVoucher, voucherCode: committedCode, updatedAt: reassignedAt }],
+          },
+          ownerUid
+        );
+      },
+    });
+    const createdVoucher: CashReceiptVoucher = {
+      ...preliminary,
+      voucherCode: allocatedPtCode,
+    };
+    setReceiptGroups((prev) =>
+      prev.includes(DIRECT_SALE_RECEIPT_GROUP) ? prev : [...prev, DIRECT_SALE_RECEIPT_GROUP]
+    );
+    setReceiptVouchers((prev) => [createdVoucher, ...prev]);
+    stageAndFlushRecords({ receiptVouchers: [createdVoucher] }, ownerUid);
+    return createdVoucher;
+  };
+
+  /**
+   * Emits a consolidated `PC-...` (`isDirectImportPayment: true`) into `paymentVouchers` whenever
+   * a newly created import receipt (single or multi-item cart) pays upfront cash/bank > 0 to supplier.
+   */
+  const emitDirectPaymentForCreatedImports = (
+    importLines: ImportTransaction[],
+    ownerUid: string,
+    paymentMethod?: string
+  ): CashPaymentVoucher | null => {
+    if (!importLines || importLines.length === 0) return null;
+    const pvId = generateUniqueRecordId('pv_imp');
+    const preliminary = buildDirectImportPaymentVoucher({
+      importLines,
+      voucherId: pvId,
+      voucherCode: 'PC-TEMP',
+      paymentMethod,
+      staffName: currentStaff.displayName,
+      ownerId: ownerUid,
+      nowIso: importLines[0].createdAt,
+    });
+    if (!preliminary) return null;
+
+    const allocatedPcCode = allocateAtomicWarehouseVoucherCode({
+      ownerUid,
+      prefix: 'PC',
+      existingCodes: paymentVouchers.map((p) => p.voucherCode),
+      onReassigned: (committedCode) => {
+        const reassignedAt = new Date().toISOString();
+        setPaymentVouchers((prev) =>
+          prev.map((p) =>
+            p.id === pvId ? { ...p, voucherCode: committedCode, updatedAt: reassignedAt } : p
+          )
+        );
+        stageAndFlushRecords(
+          {
+            paymentVouchers: [{ ...createdVoucher, voucherCode: committedCode, updatedAt: reassignedAt }],
+          },
+          ownerUid
+        );
+      },
+    });
+    const createdVoucher: CashPaymentVoucher = {
+      ...preliminary,
+      voucherCode: allocatedPcCode,
+    };
+    setPaymentGroups((prev) =>
+      prev.includes(DIRECT_IMPORT_PAYMENT_GROUP) ? prev : [...prev, DIRECT_IMPORT_PAYMENT_GROUP]
+    );
+    setPaymentVouchers((prev) => [createdVoucher, ...prev]);
+    stageAndFlushRecords({ paymentVouchers: [createdVoucher] }, ownerUid);
+    return createdVoucher;
+  };
+
   const handleCreateSale = (payload: {
     customerId: string;
     customerName: string;
@@ -3218,6 +3336,7 @@ export default function App() {
     quantity: number;
     unitPrice: number;
     paidAmount: number;
+    paymentMethod?: string;
     dueDate: string;
     note: string;
     warehouseName: string;
@@ -3274,17 +3393,33 @@ export default function App() {
       prefix: 'HD',
       existingCodes: existingInvoiceCodes,
       onReassigned: (committedCode) => {
+        const reassignedAt = new Date().toISOString();
         setSales((prev) =>
           prev.map((s) =>
-            s.id === newSaleId ? { ...s, invoiceCode: committedCode, updatedAt: new Date().toISOString() } : s
+            s.id === newSaleId ? { ...s, invoiceCode: committedCode, updatedAt: reassignedAt } : s
+          )
+        );
+        setReceiptVouchers((prev) =>
+          prev.map((r) =>
+            r.isDirectSaleReceipt && r.linkedSaleIds?.includes(newSaleId)
+              ? {
+                  ...r,
+                  linkedSaleInvoiceCode: committedCode,
+                  settledAllocations: (r.settledAllocations || []).map((a) =>
+                    a.recordId === newSaleId ? { ...a, code: committedCode } : a
+                  ),
+                  updatedAt: reassignedAt,
+                }
+              : r
           )
         );
         stageAndFlushRecords(
-          { sales: [{ ...newSale, invoiceCode: committedCode, updatedAt: new Date().toISOString() }] },
+          { sales: [{ ...newSale, invoiceCode: committedCode, updatedAt: reassignedAt }] },
           saleOwnerUid
         );
       },
     });
+    const resolvedSaleMethod = (payload.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
     const newSale: SaleTransaction = {
       id: newSaleId,
       invoiceCode: allocatedInvoiceCode,
@@ -3303,6 +3438,7 @@ export default function App() {
       debtAmount: summary.debtAmount,
       dueDate: payload.dueDate,
       status: summary.status,
+      paymentMethod: resolvedSaleMethod,
       promotionType: payload.promotionType || 'none',
       discountAmount: summary.discountAmount,
       discountPercent: payload.discountPercent || 0,
@@ -3407,13 +3543,16 @@ export default function App() {
       newSale.warehouseName
     );
     if (payload.isSupplierSale) {
-      return finalizeSupplierSaleOrder({
+      const finalizedSingle = finalizeSupplierSaleOrder({
         createdSales: [newSale],
         offsetSupplierDebt: Boolean(payload.offsetSupplierDebt),
         ownerUid: saleOwnerUid,
         warehouseName: newSale.warehouseName || resolvedSaleWh,
-      })[0];
+      });
+      emitDirectReceiptForCreatedSales(finalizedSingle, saleOwnerUid, resolvedSaleMethod);
+      return finalizedSingle[0];
     }
+    emitDirectReceiptForCreatedSales([newSale], saleOwnerUid, resolvedSaleMethod);
     return newSale;
   };
 
@@ -3493,6 +3632,7 @@ export default function App() {
     dueDate: string;
     note: string;
     totalPaidAmount: number;
+    paymentMethod?: string;
     items: PosCartDraftItem[];
     isSupplierSale?: boolean;
     offsetSupplierDebt?: boolean;
@@ -3506,19 +3646,35 @@ export default function App() {
     const resolvedWh = lockedWarehouse || payload.warehouseName || 'Tâm An Mỹ Ngãi';
     const cartOwnerUid = resolveOwnerUidForWarehouse(resolvedWh);
     const sharedGroupId = generateUniqueRecordId('invgrp');
+    const resolvedCartMethod = (payload.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
     const sharedInvoiceCode = allocateAtomicWarehouseVoucherCode({
       ownerUid: cartOwnerUid,
       prefix: 'HD',
       existingCodes: sales.map((s) => s.invoiceCode),
       onReassigned: (committedCode) => {
+        const reassignedAt = new Date().toISOString();
         setSales((prev) =>
           prev.map((s) =>
             s.invoiceGroupId === sharedGroupId
-              ? { ...s, invoiceCode: committedCode, updatedAt: new Date().toISOString() }
+              ? { ...s, invoiceCode: committedCode, updatedAt: reassignedAt }
               : s
           )
         );
-        const reassignedAt = new Date().toISOString();
+        setReceiptVouchers((prev) =>
+          prev.map((r) =>
+            r.isDirectSaleReceipt && r.linkedSaleGroupId === sharedGroupId
+              ? {
+                  ...r,
+                  linkedSaleInvoiceCode: committedCode,
+                  settledAllocations: (r.settledAllocations || []).map((a) => ({
+                    ...a,
+                    code: committedCode,
+                  })),
+                  updatedAt: reassignedAt,
+                }
+              : r
+          )
+        );
         stageAndFlushRecords(
           {
             sales: createdSales.map((s) => ({
@@ -3579,6 +3735,7 @@ export default function App() {
         debtAmount: line.debtAmount,
         dueDate: payload.dueDate,
         status: line.status,
+        paymentMethod: resolvedCartMethod,
         promotionType: line.promotionType || 'none',
         discountAmount: line.discountAmount,
         discountPercent: line.discountPercent || 0,
@@ -3675,13 +3832,16 @@ export default function App() {
     );
 
     if (payload.isSupplierSale) {
-      return finalizeSupplierSaleOrder({
+      const finalizedCart = finalizeSupplierSaleOrder({
         createdSales,
         offsetSupplierDebt: Boolean(payload.offsetSupplierDebt),
         ownerUid: cartOwnerUid,
         warehouseName: resolvedWh,
       });
+      emitDirectReceiptForCreatedSales(finalizedCart, cartOwnerUid, resolvedCartMethod);
+      return finalizedCart;
     }
+    emitDirectReceiptForCreatedSales(createdSales, cartOwnerUid, resolvedCartMethod);
     return createdSales;
   };
 
@@ -3775,6 +3935,43 @@ export default function App() {
 
     const nextSales = sales.map((s) => (s.id === saleId ? updated : s));
     setSales(nextSales);
+    stageAndFlushRecords(
+      { sales: [updated] },
+      updated.ownerId || resolveOwnerUidForWarehouse(updated.warehouseName)
+    );
+
+    // Sync linked direct order-time receipt voucher (PT-...) so upfront paidAmount & Tab Phiếu Thu never diverge
+    const siblingSales = updated.invoiceGroupId
+      ? nextSales.filter((s) => s.invoiceGroupId === updated.invoiceGroupId)
+      : [updated];
+    const existingDirectPts = findDirectReceiptVouchersForSale(existing, receiptVouchers);
+    const primaryDirectPt = existingDirectPts[0] || null;
+    const saleEditOwnerUid = updated.ownerId || resolveOwnerUidForWarehouse(updated.warehouseName);
+    if (primaryDirectPt) {
+      const rebuilt = buildDirectSaleReceiptVoucher({
+        salesLines: siblingSales,
+        voucherId: primaryDirectPt.id,
+        voucherCode: primaryDirectPt.voucherCode,
+        paymentMethod: primaryDirectPt.paymentMethod,
+        staffName: primaryDirectPt.staffName,
+        ownerId: primaryDirectPt.ownerId || saleEditOwnerUid,
+        nowIso,
+      });
+      if (rebuilt) {
+        const mergedPt: CashReceiptVoucher = {
+          ...rebuilt,
+          createdAt: primaryDirectPt.createdAt,
+          updatedAt: nowIso,
+        };
+        setReceiptVouchers((prev) => prev.map((r) => (r.id === primaryDirectPt.id ? mergedPt : r)));
+        stageAndFlushRecords({ receiptVouchers: [mergedPt] }, mergedPt.ownerId);
+      } else {
+        markRecordsDeleted(primaryDirectPt.id, nowIso);
+        setReceiptVouchers((prev) => prev.filter((r) => r.id !== primaryDirectPt.id));
+      }
+    } else {
+      emitDirectReceiptForCreatedSales(siblingSales, saleEditOwnerUid, updated.paymentMethod);
+    }
 
     // Reconcile inventory stock delta for both main product and promotional gift product
     if (Object.keys(stockDeltas).length > 0) {
@@ -3857,8 +4054,40 @@ export default function App() {
     const nowIso = new Date().toISOString();
     if (target && !reverseSupplierContraForSales([target])) return;
     markRecordsDeleted(saleId, nowIso);
-    setSales((prev) => prev.filter((s) => s.id !== saleId));
+    const nextSalesAfterDelete = sales.filter((s) => s.id !== saleId);
+    setSales(nextSalesAfterDelete);
     if (target) {
+      const directPts = findDirectReceiptVouchersForSale(target, receiptVouchers);
+      if (directPts.length > 0) {
+        const remainingSiblings = target.invoiceGroupId
+          ? nextSalesAfterDelete.filter((s) => s.invoiceGroupId === target.invoiceGroupId)
+          : [];
+        if (remainingSiblings.length > 0) {
+          const primaryPt = directPts[0];
+          const rebuilt = buildDirectSaleReceiptVoucher({
+            salesLines: remainingSiblings,
+            voucherId: primaryPt.id,
+            voucherCode: primaryPt.voucherCode,
+            paymentMethod: primaryPt.paymentMethod,
+            staffName: primaryPt.staffName,
+            ownerId: primaryPt.ownerId,
+            nowIso,
+          });
+          if (rebuilt) {
+            const keptPt = { ...rebuilt, createdAt: primaryPt.createdAt, updatedAt: nowIso };
+            setReceiptVouchers((prev) => prev.map((r) => (r.id === primaryPt.id ? keptPt : r)));
+            stageAndFlushRecords({ receiptVouchers: [keptPt] }, keptPt.ownerId);
+          } else {
+            const ptIds = directPts.map((r) => r.id);
+            markRecordsDeleted(ptIds, nowIso);
+            setReceiptVouchers((prev) => prev.filter((r) => !ptIds.includes(r.id)));
+          }
+        } else {
+          const ptIds = directPts.map((r) => r.id);
+          markRecordsDeleted(ptIds, nowIso);
+          setReceiptVouchers((prev) => prev.filter((r) => !ptIds.includes(r.id)));
+        }
+      }
       // Restore sold & gift inventory stock (supports both exact ID and Excel-imported product match)
       setProducts((prev) => {
         const nextList = prev.map((p) => {
@@ -3971,7 +4200,15 @@ export default function App() {
 
     const nowIso = new Date().toISOString();
     if (!reverseSupplierContraForSales(targets)) return;
-    markRecordsDeleted(uniqueIds, nowIso);
+    const directPtIdSet = new Set<string>();
+    targets.forEach((t) => {
+      findDirectReceiptVouchersForSale(t, receiptVouchers).forEach((rv) => directPtIdSet.add(rv.id));
+    });
+    const directPtIds = Array.from(directPtIdSet);
+    markRecordsDeleted([...uniqueIds, ...directPtIds], nowIso);
+    if (directPtIds.length > 0) {
+      setReceiptVouchers((prev) => prev.filter((r) => !directPtIdSet.has(r.id)));
+    }
     const idSet = new Set(uniqueIds);
     const nextSales = sales.filter((s) => !idSet.has(s.id));
     setSales(nextSales);
@@ -4198,24 +4435,28 @@ export default function App() {
       });
     });
 
-    // 3. Cash refund → mirrored PT (sale date) + PC (today) so each month's cashflow stays exact
+    // 3. Cash refund → if sale already has a direct PT- on sale date, emit ONLY the refund PC- dated today;
+    // otherwise (legacy un-backfilled sale) emit the mirrored PT (sale date) + PC (today).
     if (calc.cashRefundAmount > 0) {
+      const hasDirectSalePt = findDirectReceiptVouchersForSale(existing, receiptVouchers).length > 0;
       const refundRvId = generateUniqueRecordId('rv_ret');
       const refundPvId = generateUniqueRecordId('pv_ret');
-      const refundRvCode = allocateAtomicWarehouseVoucherCode({
-        ownerUid: retOwnerUid,
-        prefix: 'PT',
-        existingCodes: receiptVouchers.map((r) => r.voucherCode),
-        onReassigned: (committedCode) => {
-          setReceiptVouchers((prev) =>
-            prev.map((r) =>
-              r.id === refundRvId
-                ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() }
-                : r
-            )
-          );
-        },
-      });
+      const refundRvCode = hasDirectSalePt
+        ? 'PT-SKIP'
+        : allocateAtomicWarehouseVoucherCode({
+            ownerUid: retOwnerUid,
+            prefix: 'PT',
+            existingCodes: receiptVouchers.map((r) => r.voucherCode),
+            onReassigned: (committedCode) => {
+              setReceiptVouchers((prev) =>
+                prev.map((r) =>
+                  r.id === refundRvId
+                    ? { ...r, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                    : r
+                )
+              );
+            },
+          });
       const refundPvCode = allocateAtomicWarehouseVoucherCode({
         ownerUid: retOwnerUid,
         prefix: 'PC',
@@ -4244,12 +4485,17 @@ export default function App() {
         nowIso,
       });
       if (refundPair) {
-        setReceiptVouchers((prev) => [refundPair.receipt, ...prev]);
-        setPaymentVouchers((prev) => [refundPair.payment, ...prev]);
-        stageAndFlushRecords(
-          { receiptVouchers: [refundPair.receipt], paymentVouchers: [refundPair.payment] },
-          retOwnerUid
-        );
+        if (hasDirectSalePt) {
+          setPaymentVouchers((prev) => [refundPair.payment, ...prev]);
+          stageAndFlushRecords({ paymentVouchers: [refundPair.payment] }, retOwnerUid);
+        } else {
+          setReceiptVouchers((prev) => [refundPair.receipt, ...prev]);
+          setPaymentVouchers((prev) => [refundPair.payment, ...prev]);
+          stageAndFlushRecords(
+            { receiptVouchers: [refundPair.receipt], paymentVouchers: [refundPair.payment] },
+            retOwnerUid
+          );
+        }
       }
     }
 
@@ -4286,6 +4532,7 @@ export default function App() {
     quantity: number;
     unitCost: number;
     paidAmount: number;
+    paymentMethod?: string;
     dueDate: string;
     note: string;
     warehouseName: string;
@@ -4337,18 +4584,34 @@ export default function App() {
     const impOwnerUid =
       updatedProduct.ownerId || resolveOwnerUidForWarehouse(resolvedImpWh);
     const newImportId = generateUniqueRecordId('imp');
+    const resolvedImpMethod = (payload.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
     const allocatedReceiptCode = allocateAtomicWarehouseVoucherCode({
       ownerUid: impOwnerUid,
       prefix: 'PN',
       existingCodes: imports.map((i) => i.receiptCode),
       onReassigned: (committedCode) => {
+        const reassignedAt = new Date().toISOString();
         setImports((prev) =>
           prev.map((i) =>
-            i.id === newImportId ? { ...i, receiptCode: committedCode, updatedAt: new Date().toISOString() } : i
+            i.id === newImportId ? { ...i, receiptCode: committedCode, updatedAt: reassignedAt } : i
+          )
+        );
+        setPaymentVouchers((prev) =>
+          prev.map((p) =>
+            p.isDirectImportPayment && p.linkedImportIds?.includes(newImportId)
+              ? {
+                  ...p,
+                  linkedImportReceiptCode: committedCode,
+                  settledAllocations: (p.settledAllocations || []).map((a) =>
+                    a.recordId === newImportId ? { ...a, code: committedCode } : a
+                  ),
+                  updatedAt: reassignedAt,
+                }
+              : p
           )
         );
         stageAndFlushRecords(
-          { imports: [{ ...newImport, receiptCode: committedCode, updatedAt: new Date().toISOString() }] },
+          { imports: [{ ...newImport, receiptCode: committedCode, updatedAt: reassignedAt }] },
           impOwnerUid
         );
       },
@@ -4368,6 +4631,7 @@ export default function App() {
       debtAmount: summary.debtAmount,
       dueDate: payload.dueDate,
       status: summary.status,
+      paymentMethod: resolvedImpMethod,
       batchNumber: payload.batchNumber?.trim() || undefined,
       expiryDate: payload.expiryDate?.trim() || undefined,
       note: payload.note,
@@ -4425,6 +4689,7 @@ export default function App() {
       void syncProductToFirestore(updatedProduct, false);
       void syncImportToFirestore(newImport, true, updatedProduct);
     }
+    emitDirectPaymentForCreatedImports([newImport], impOwnerUid, resolvedImpMethod);
     return newImport;
   };
 
@@ -4435,6 +4700,7 @@ export default function App() {
     dueDate: string;
     note: string;
     totalPaidAmount: number;
+    paymentMethod?: string;
     items: ImportCartDraftItem[];
   }): ImportTransaction[] => {
     const allocation = allocatePaymentAcrossImportItems(payload.items, payload.totalPaidAmount);
@@ -4446,19 +4712,35 @@ export default function App() {
     const resolvedImpWh = lockedWarehouse || payload.warehouseName || warehouses[0] || 'Tâm An Mỹ Ngãi';
     const impOwnerUid = resolveOwnerUidForWarehouse(resolvedImpWh);
     const sharedImportGroupId = generateUniqueRecordId('impgrp');
+    const resolvedCartMethod = (payload.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
     const sharedReceiptCode = allocateAtomicWarehouseVoucherCode({
       ownerUid: impOwnerUid,
       prefix: 'PN',
       existingCodes: imports.map((i) => i.receiptCode),
       onReassigned: (committedCode) => {
+        const reassignedAt = new Date().toISOString();
         setImports((prev) =>
           prev.map((i) =>
             i.importGroupId === sharedImportGroupId
-              ? { ...i, receiptCode: committedCode, updatedAt: new Date().toISOString() }
+              ? { ...i, receiptCode: committedCode, updatedAt: reassignedAt }
               : i
           )
         );
-        const reassignedAt = new Date().toISOString();
+        setPaymentVouchers((prev) =>
+          prev.map((p) =>
+            p.isDirectImportPayment && p.linkedImportGroupId === sharedImportGroupId
+              ? {
+                  ...p,
+                  linkedImportReceiptCode: committedCode,
+                  settledAllocations: (p.settledAllocations || []).map((a) => ({
+                    ...a,
+                    code: committedCode,
+                  })),
+                  updatedAt: reassignedAt,
+                }
+              : p
+          )
+        );
         stageAndFlushRecords(
           {
             imports: createdImports.map((i) => ({
@@ -4540,6 +4822,7 @@ export default function App() {
         debtAmount: line.debtAmount,
         dueDate: payload.dueDate,
         status: line.status,
+        paymentMethod: resolvedCartMethod,
         ...(line.batchNumber?.trim() ? { batchNumber: line.batchNumber.trim() } : {}),
         ...(line.expiryDate?.trim() ? { expiryDate: line.expiryDate.trim() } : {}),
         note: payload.note,
@@ -4615,6 +4898,7 @@ export default function App() {
         void syncImportToFirestore(imp, true, prod);
       });
     }
+    emitDirectPaymentForCreatedImports(createdImports, impOwnerUid, resolvedCartMethod);
 
     return createdImports;
   };
@@ -4631,9 +4915,11 @@ export default function App() {
       quantity: number;
       unitCost: number;
       paidAmount: number;
+      paymentMethod?: string;
       dueDate: string;
       note: string;
-    }
+    },
+    options?: { preserveDirectVoucherOnReturn?: boolean }
   ) => {
     if (!canPerformRoleAction(role, 'edit_record')) {
       showToast('Chỉ Quản lý mới có quyền chỉnh sửa phiếu nhập kho đã lưu.');
@@ -4693,6 +4979,41 @@ export default function App() {
     const qtyDelta = updated.quantity - existing.quantity;
     const nextImports = imports.map((imp) => (imp.id === importId ? updated : imp));
     setImports(nextImports);
+    const impEditOwnerUid = updated.ownerId || resolveOwnerUidForWarehouse(updated.warehouseName);
+    stageAndFlushRecords({ imports: [updated] }, impEditOwnerUid);
+
+    if (!options?.preserveDirectVoucherOnReturn) {
+      const siblingImports = updated.importGroupId
+        ? nextImports.filter((i) => i.importGroupId === updated.importGroupId)
+        : [updated];
+      const existingDirectPcs = findDirectPaymentVouchersForImport(existing, paymentVouchers);
+      const primaryDirectPc = existingDirectPcs[0] || null;
+      if (primaryDirectPc) {
+        const rebuilt = buildDirectImportPaymentVoucher({
+          importLines: siblingImports,
+          voucherId: primaryDirectPc.id,
+          voucherCode: primaryDirectPc.voucherCode,
+          paymentMethod: primaryDirectPc.paymentMethod,
+          staffName: primaryDirectPc.staffName,
+          ownerId: primaryDirectPc.ownerId || impEditOwnerUid,
+          nowIso,
+        });
+        if (rebuilt) {
+          const mergedPc: CashPaymentVoucher = {
+            ...rebuilt,
+            createdAt: primaryDirectPc.createdAt,
+            updatedAt: nowIso,
+          };
+          setPaymentVouchers((prev) => prev.map((p) => (p.id === primaryDirectPc.id ? mergedPc : p)));
+          stageAndFlushRecords({ paymentVouchers: [mergedPc] }, mergedPc.ownerId);
+        } else {
+          markRecordsDeleted(primaryDirectPc.id, nowIso);
+          setPaymentVouchers((prev) => prev.filter((p) => p.id !== primaryDirectPc.id));
+        }
+      } else {
+        emitDirectPaymentForCreatedImports(siblingImports, impEditOwnerUid, updated.paymentMethod);
+      }
+    }
 
     if (qtyDelta !== 0 || updated.unitCost !== existing.unitCost) {
       setProducts((prev) => {
@@ -4826,29 +5147,38 @@ export default function App() {
       Math.round(returnQty * existing.unitCost)
     )}) - ${cleanReason}]`;
 
-    handleUpdateImport(existing.id, {
-      quantity: newQty,
-      unitCost: existing.unitCost,
-      paidAmount: nextPaid,
-      dueDate: existing.dueDate,
-      note: existing.note ? `${existing.note} | ${tag}` : tag,
-    });
+    const hasDirectImpPc = findDirectPaymentVouchersForImport(existing, paymentVouchers).length > 0;
+    handleUpdateImport(
+      existing.id,
+      {
+        quantity: newQty,
+        unitCost: existing.unitCost,
+        paidAmount: nextPaid,
+        dueDate: existing.dueDate,
+        note: existing.note ? `${existing.note} | ${tag}` : tag,
+      },
+      { preserveDirectVoucherOnReturn: refund > 0 && hasDirectImpPc }
+    );
 
     if (refund > 0) {
       const pvId = generateUniqueRecordId('pv_tn');
       const rvId = generateUniqueRecordId('rv_tn');
-      const pvCode = allocateAtomicWarehouseVoucherCode({
-        ownerUid: retOwnerUid,
-        prefix: 'PC',
-        existingCodes: paymentVouchers.map((p) => p.voucherCode),
-        onReassigned: (committedCode) => {
-          setPaymentVouchers((prev) =>
-            prev.map((p) =>
-              p.id === pvId ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() } : p
-            )
-          );
-        },
-      });
+      const pvCode = hasDirectImpPc
+        ? 'PC-SKIP'
+        : allocateAtomicWarehouseVoucherCode({
+            ownerUid: retOwnerUid,
+            prefix: 'PC',
+            existingCodes: paymentVouchers.map((p) => p.voucherCode),
+            onReassigned: (committedCode) => {
+              setPaymentVouchers((prev) =>
+                prev.map((p) =>
+                  p.id === pvId
+                    ? { ...p, voucherCode: committedCode, updatedAt: new Date().toISOString() }
+                    : p
+                )
+              );
+            },
+          });
       const rvCode = allocateAtomicWarehouseVoucherCode({
         ownerUid: retOwnerUid,
         prefix: 'PT',
@@ -4875,12 +5205,17 @@ export default function App() {
         nowIso,
       });
       if (pair) {
-        setPaymentVouchers((prev) => [pair.payment, ...prev]);
-        setReceiptVouchers((prev) => [pair.receipt, ...prev]);
-        stageAndFlushRecords(
-          { paymentVouchers: [pair.payment], receiptVouchers: [pair.receipt] },
-          retOwnerUid
-        );
+        if (hasDirectImpPc) {
+          setReceiptVouchers((prev) => [pair.receipt, ...prev]);
+          stageAndFlushRecords({ receiptVouchers: [pair.receipt] }, retOwnerUid);
+        } else {
+          setPaymentVouchers((prev) => [pair.payment, ...prev]);
+          setReceiptVouchers((prev) => [pair.receipt, ...prev]);
+          stageAndFlushRecords(
+            { paymentVouchers: [pair.payment], receiptVouchers: [pair.receipt] },
+            retOwnerUid
+          );
+        }
       }
     }
 
@@ -5136,6 +5471,37 @@ export default function App() {
     const nextImports = imports.filter((imp) => imp.id !== importId);
     setImports(nextImports);
     if (target) {
+      const directPcs = findDirectPaymentVouchersForImport(target, paymentVouchers);
+      if (directPcs.length > 0) {
+        const remainingSiblings = target.importGroupId
+          ? nextImports.filter((i) => i.importGroupId === target.importGroupId)
+          : [];
+        if (remainingSiblings.length > 0) {
+          const primaryPc = directPcs[0];
+          const rebuilt = buildDirectImportPaymentVoucher({
+            importLines: remainingSiblings,
+            voucherId: primaryPc.id,
+            voucherCode: primaryPc.voucherCode,
+            paymentMethod: primaryPc.paymentMethod,
+            staffName: primaryPc.staffName,
+            ownerId: primaryPc.ownerId,
+            nowIso,
+          });
+          if (rebuilt) {
+            const keptPc = { ...rebuilt, createdAt: primaryPc.createdAt, updatedAt: nowIso };
+            setPaymentVouchers((prev) => prev.map((p) => (p.id === primaryPc.id ? keptPc : p)));
+            stageAndFlushRecords({ paymentVouchers: [keptPc] }, keptPc.ownerId);
+          } else {
+            const pcIds = directPcs.map((p) => p.id);
+            markRecordsDeleted(pcIds, nowIso);
+            setPaymentVouchers((prev) => prev.filter((p) => !pcIds.includes(p.id)));
+          }
+        } else {
+          const pcIds = directPcs.map((p) => p.id);
+          markRecordsDeleted(pcIds, nowIso);
+          setPaymentVouchers((prev) => prev.filter((p) => !pcIds.includes(p.id)));
+        }
+      }
       setProducts((prev) => {
         const nextList = prev.map((p) => {
           if (
@@ -5205,6 +5571,135 @@ export default function App() {
       driftNotice
         ? `Đã hủy phiếu nhập ${target?.receiptCode || ''} & xóa công nợ NCC thành công (không còn hóa đơn bán liên kết; đã đồng bộ tồn kho an toàn)!`
         : `Đã hủy phiếu nhập ${target?.receiptCode || ''} khỏi hệ thống, cập nhật tồn kho & công nợ NCC!`
+    );
+  };
+
+  const handleDeleteImportGroup = (importIds: string[]) => {
+    if (!canPerformRoleAction(role, 'delete_record')) return;
+    const uniqueIds = Array.from(new Set(importIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return;
+    if (uniqueIds.length === 1) {
+      handleDeleteImport(uniqueIds[0]);
+      return;
+    }
+    const targets = imports.filter((i) => uniqueIds.includes(i.id));
+    if (targets.length === 0) return;
+
+    for (const target of targets) {
+      const targetProd =
+        productsRef.current.find((p) =>
+          doesRecordMatchProduct(p, target.productId, target.productName, target.warehouseName)
+        ) || null;
+      const safety = evaluateImportMutationSafety({
+        targetImport: target,
+        product: targetProd,
+        sales,
+        imports,
+        paymentVouchers,
+        stockAdjustments,
+        newQuantity: 0,
+      });
+      if (!safety.allowed) {
+        if (safety.reasonType === 'linked_payment_voucher' && safety.blockingPaymentVouchers[0]) {
+          const blocker = safety.blockingPaymentVouchers[0];
+          showToast(safety.message, {
+            label: `Mở ${blocker.voucherCode} →`,
+            isNavigation: true,
+            onUndo: () =>
+              handleNavigateCrossLink({
+                tab: 'payment_vouchers',
+                recordId: blocker.id,
+                voucherCode: blocker.voucherCode,
+                label: `Phiếu chi ${blocker.voucherCode}`,
+              }),
+          });
+        } else {
+          showToast(safety.message);
+        }
+        return;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    const directPcIdSet = new Set<string>();
+    targets.forEach((t) => {
+      findDirectPaymentVouchersForImport(t, paymentVouchers).forEach((pv) =>
+        directPcIdSet.add(pv.id)
+      );
+    });
+    markRecordsDeleted([...uniqueIds, ...Array.from(directPcIdSet)], nowIso);
+    if (directPcIdSet.size > 0) {
+      setPaymentVouchers((prev) => prev.filter((p) => !directPcIdSet.has(p.id)));
+    }
+    const idSet = new Set(uniqueIds);
+    const nextImports = imports.filter((i) => !idSet.has(i.id));
+    setImports(nextImports);
+
+    setProducts((prev) => {
+      let runningList = [...prev];
+      for (const target of targets) {
+        runningList = runningList.map((p) => {
+          if (!doesRecordMatchProduct(p, target.productId, target.productName, target.warehouseName)) {
+            return p;
+          }
+          const nextAvgPrice = recalculateImportPriceOnImportMutation({
+            product: p,
+            oldQty: target.quantity,
+            oldUnitCost: target.unitCost,
+            newQty: 0,
+            newUnitCost: 0,
+            remainingImports: nextImports,
+          });
+          const adjusted = {
+            ...p,
+            stock: Math.max(0, p.stock - target.quantity),
+            importPrice: nextAvgPrice,
+            updatedAt: nowIso,
+          };
+          if (isGoogleAuthenticated) void syncProductToFirestore(adjusted, false);
+          dispatchAtomicProductMutation(
+            adjusted.ownerId || resolveOwnerUidForWarehouse(adjusted.warehouseName),
+            adjusted,
+            (cur) => ({
+              ...cur,
+              stock: Math.max(0, (Number(cur.stock) || 0) - target.quantity),
+              importPrice: recalculateImportPriceOnImportMutation({
+                product: cur,
+                oldQty: target.quantity,
+                oldUnitCost: target.unitCost,
+                newQty: 0,
+                newUnitCost: 0,
+                remainingImports: nextImports,
+              }),
+              updatedAt: nowIso,
+            })
+          );
+          return adjusted;
+        });
+      }
+      productsRef.current = runningList;
+      return runningList;
+    });
+
+    if (isGoogleAuthenticated) {
+      uniqueIds.forEach((iid) => void deleteFirestoreDocIfAdmin('imports', iid));
+    }
+
+    const firstTarget = targets[0];
+    const totalVal = targets.reduce((sum, t) => sum + t.totalCost, 0);
+    recordAuditLog({
+      actionCategory: 'delete',
+      targetEntity: 'import',
+      targetCode: firstTarget.receiptCode,
+      warehouseName: firstTarget.warehouseName,
+      summary: `Hủy trọn bộ phiếu nhập gộp ${firstTarget.receiptCode} (${targets.length} mặt hàng · ${formatVND(
+        totalVal
+      )}) của NCC ${firstTarget.supplierName}`,
+      details: targets.map((t) => `${t.quantity} ${t.unit} ${t.productName}`).join(' + '),
+      snapshotData: JSON.stringify(targets),
+    });
+    showToast(
+      `Đã hủy trọn bộ phiếu nhập gộp ${firstTarget.receiptCode} (${targets.length} mặt hàng), cập nhật tồn kho & phiếu chi liên kết!`
     );
   };
 
@@ -6047,7 +6542,7 @@ export default function App() {
         {
           recordId: existing.id,
           code: existing.invoiceCode,
-          date: (existing.createdAt || '').slice(0, 10),
+          date: toVietnamDateStr(existing.createdAt) || (existing.createdAt || '').slice(0, 10),
           dueDate: existing.dueDate || '',
           productName: existing.productName,
           previousDebt: existing.debtAmount,
@@ -6164,7 +6659,7 @@ export default function App() {
           {
             recordId: existing.id,
             code: existing.invoiceCode,
-            date: (existing.createdAt || '').slice(0, 10),
+            date: toVietnamDateStr(existing.createdAt) || (existing.createdAt || '').slice(0, 10),
             dueDate: existing.dueDate || '',
             productName: existing.productName,
             previousDebt: existing.debtAmount,
@@ -6281,7 +6776,7 @@ export default function App() {
         {
           recordId: existing.id,
           code: existing.receiptCode,
-          date: (existing.createdAt || '').slice(0, 10),
+          date: toVietnamDateStr(existing.createdAt) || (existing.createdAt || '').slice(0, 10),
           dueDate: existing.dueDate || '',
           productName: existing.productName,
           previousDebt: existing.debtAmount,
@@ -6713,6 +7208,62 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const roundedNewAmount = Math.max(0, Math.round(Number(changes.amount) || 0));
 
+    // Bidirectional sync when editing a direct order-time receipt voucher (PT-... from HD-...)
+    if (isDirectSaleReceiptVoucher(existingVoucher)) {
+      const synced = syncSalesOnDirectReceiptVoucherMutation({
+        sales,
+        voucher: existingVoucher,
+        allReceiptVouchers: receiptVouchers,
+        newAmount: roundedNewAmount,
+        paymentMethod: changes.paymentMethod,
+        nowIso,
+      });
+      setSales(synced.updatedSales);
+      const changedSet = new Set(synced.changedSaleIds);
+      const changedSalesList = synced.updatedSales.filter((s) => changedSet.has(s.id));
+      if (isGoogleAuthenticated) {
+        changedSalesList.forEach((s) => void syncSaleToFirestore(s, false));
+      }
+      setCustomers((prev) => {
+        const reconciled = reconcileCustomersFromSales(prev, synced.updatedSales, nowIso);
+        if (isGoogleAuthenticated) {
+          reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+        }
+        return reconciled.customers;
+      });
+      if (synced.effectiveAmount <= 0) {
+        markRecordsDeleted(id, nowIso);
+        setReceiptVouchers((prev) => prev.filter((rv) => rv.id !== id));
+        if (changedSalesList.length > 0) {
+          stageAndFlushRecords({ sales: changedSalesList }, existingVoucher.ownerId);
+        }
+        showToast(
+          `Đã chuyển số tiền thu tại đơn về 0 đ, hủy phiếu ${existingVoucher.voucherCode} & cập nhật lại công nợ hóa đơn!`
+        );
+        return;
+      }
+      const updatedDirectRv: CashReceiptVoucher = {
+        ...existingVoucher,
+        ...changes,
+        amount: synced.effectiveAmount,
+        settledAllocations: synced.updatedAllocations,
+        totalPreviousDebt: synced.totalOrderAmount,
+        totalRemainingDebt: synced.totalRemainingDebt,
+        updatedAt: nowIso,
+      };
+      setReceiptVouchers((prev) => prev.map((rv) => (rv.id === id ? updatedDirectRv : rv)));
+      stageAndFlushRecords(
+        { receiptVouchers: [updatedDirectRv], sales: changedSalesList },
+        updatedDirectRv.ownerId
+      );
+      showToast(
+        `Đã cập nhật phiếu thu tại đơn ${changes.voucherCode} (${formatVND(
+          synced.effectiveAmount
+        )}) & đồng bộ ngay công nợ hóa đơn ${existingVoucher.linkedSaleInvoiceCode || ''}!`
+      );
+      return;
+    }
+
     if (
       existingVoucher.isDebtSettlement &&
       existingVoucher.settledAllocations &&
@@ -6808,7 +7359,31 @@ export default function App() {
     markRecordsDeleted(id, nowIso);
     setReceiptVouchers((prev) => prev.filter((rv) => rv.id !== id));
     if (target) {
-      if (target.isDebtSettlement && target.settledAllocations?.length) {
+      if (isDirectSaleReceiptVoucher(target)) {
+        const synced = syncSalesOnDirectReceiptVoucherMutation({
+          sales,
+          voucher: target,
+          allReceiptVouchers: receiptVouchers,
+          newAmount: 0,
+          nowIso,
+        });
+        if (synced.changedSaleIds.length > 0) {
+          setSales(synced.updatedSales);
+          const idSet = new Set(synced.changedSaleIds);
+          const changedSalesList = synced.updatedSales.filter((s) => idSet.has(s.id));
+          if (isGoogleAuthenticated) {
+            changedSalesList.forEach((s) => void syncSaleToFirestore(s, false));
+          }
+          setCustomers((prev) => {
+            const reconciled = reconcileCustomersFromSales(prev, synced.updatedSales, nowIso);
+            if (isGoogleAuthenticated) {
+              reconciled.changedCustomers.forEach((c) => void syncCustomerToFirestore(c, false));
+            }
+            return reconciled.customers;
+          });
+          stageAndFlushRecords({ sales: changedSalesList }, target.ownerId);
+        }
+      } else if (target.isDebtSettlement && target.settledAllocations?.length) {
         const reversed = reverseCustomerReceiptVoucherAllocations(sales, target, nowIso);
         if (reversed.reversedSaleIds.length > 0) {
           setSales(reversed.updatedSales);
@@ -6840,7 +7415,7 @@ export default function App() {
       });
     }
     showToast(
-      target?.isDebtSettlement
+      target?.isDebtSettlement || (target && isDirectSaleReceiptVoucher(target))
         ? 'Đã xóa phiếu thu & tự động hoàn lại công nợ khách hàng trên các hóa đơn liên kết.'
         : 'Đã xóa phiếu thu tiền khỏi nhật ký.'
     );
@@ -6950,6 +7525,55 @@ export default function App() {
     const nowIso = new Date().toISOString();
     const roundedNewAmount = Math.max(0, Math.round(Number(changes.amount) || 0));
 
+    // Bidirectional sync when editing a direct order-time payment voucher (PC-... from PN-...)
+    if (isDirectImportPaymentVoucher(existingVoucher)) {
+      const synced = syncImportsOnDirectPaymentVoucherMutation({
+        imports,
+        voucher: existingVoucher,
+        allPaymentVouchers: paymentVouchers,
+        newAmount: roundedNewAmount,
+        paymentMethod: changes.paymentMethod,
+        nowIso,
+      });
+      setImports(synced.updatedImports);
+      const changedSet = new Set(synced.changedImportIds);
+      const changedImportsList = synced.updatedImports.filter((imp) => changedSet.has(imp.id));
+      if (isGoogleAuthenticated) {
+        changedImportsList.forEach((imp) => void syncImportToFirestore(imp, false));
+      }
+      if (synced.effectiveAmount <= 0) {
+        markRecordsDeleted(id, nowIso);
+        setPaymentVouchers((prev) => prev.filter((pv) => pv.id !== id));
+        if (changedImportsList.length > 0) {
+          stageAndFlushRecords({ imports: changedImportsList }, existingVoucher.ownerId);
+        }
+        showToast(
+          `Đã chuyển số tiền chi tại đơn về 0 đ, hủy phiếu ${existingVoucher.voucherCode} & cập nhật lại công nợ NCC!`
+        );
+        return;
+      }
+      const updatedDirectPv: CashPaymentVoucher = {
+        ...existingVoucher,
+        ...changes,
+        amount: synced.effectiveAmount,
+        settledAllocations: synced.updatedAllocations,
+        totalPreviousDebt: synced.totalImportCost,
+        totalRemainingDebt: synced.totalRemainingDebt,
+        updatedAt: nowIso,
+      };
+      setPaymentVouchers((prev) => prev.map((pv) => (pv.id === id ? updatedDirectPv : pv)));
+      stageAndFlushRecords(
+        { paymentVouchers: [updatedDirectPv], imports: changedImportsList },
+        updatedDirectPv.ownerId
+      );
+      showToast(
+        `Đã cập nhật phiếu chi tại đơn ${changes.voucherCode} (-${formatVND(
+          synced.effectiveAmount
+        )}) & đồng bộ ngay công nợ phiếu nhập ${existingVoucher.linkedImportReceiptCode || ''}!`
+      );
+      return;
+    }
+
     if (
       existingVoucher.isDebtSettlement &&
       existingVoucher.settledAllocations &&
@@ -7037,7 +7661,24 @@ export default function App() {
     markRecordsDeleted(id, nowIso);
     setPaymentVouchers((prev) => prev.filter((pv) => pv.id !== id));
     if (target) {
-      if (target.isDebtSettlement && target.settledAllocations?.length) {
+      if (isDirectImportPaymentVoucher(target)) {
+        const synced = syncImportsOnDirectPaymentVoucherMutation({
+          imports,
+          voucher: target,
+          allPaymentVouchers: paymentVouchers,
+          newAmount: 0,
+          nowIso,
+        });
+        if (synced.changedImportIds.length > 0) {
+          setImports(synced.updatedImports);
+          const idSet = new Set(synced.changedImportIds);
+          const changedImportsList = synced.updatedImports.filter((imp) => idSet.has(imp.id));
+          if (isGoogleAuthenticated) {
+            changedImportsList.forEach((imp) => void syncImportToFirestore(imp, false));
+          }
+          stageAndFlushRecords({ imports: changedImportsList }, target.ownerId);
+        }
+      } else if (target.isDebtSettlement && target.settledAllocations?.length) {
         const reversed = reverseSupplierPaymentVoucherAllocations(imports, target, nowIso);
         if (reversed.reversedImportIds.length > 0) {
           setImports(reversed.updatedImports);
@@ -7062,7 +7703,7 @@ export default function App() {
       });
     }
     showToast(
-      target?.isDebtSettlement
+      target?.isDebtSettlement || (target && isDirectImportPaymentVoucher(target))
         ? 'Đã xóa phiếu chi & tự động hoàn lại công nợ NCC trên các phiếu nhập liên kết.'
         : 'Đã xóa phiếu chi tiền khỏi nhật ký.'
     );
@@ -7311,8 +7952,24 @@ export default function App() {
         });
       }
       setCustomers((prev) => reconcileCustomersFromSales(prev, nextSales, nowIso).customers);
+      const { createdReceipts: excelDirectRvs } = buildMissingDirectVouchersForExistingRecords({
+        sales: addedSales,
+        imports: [],
+        receiptVouchers,
+        paymentVouchers,
+      });
+      if (excelDirectRvs.length > 0) {
+        setReceiptGroups((prev) =>
+          prev.includes(DIRECT_SALE_RECEIPT_GROUP) ? prev : [...prev, DIRECT_SALE_RECEIPT_GROUP]
+        );
+        setReceiptVouchers((prev) => [...excelDirectRvs, ...prev]);
+      }
       stageAndFlushRecords(
-        { sales: addedSales, products: updatedProductsForFlush },
+        {
+          sales: addedSales,
+          products: updatedProductsForFlush,
+          ...(excelDirectRvs.length > 0 ? { receiptVouchers: excelDirectRvs } : {}),
+        },
         activeUid
       );
       showToast(
@@ -7428,8 +8085,24 @@ export default function App() {
           return nextList;
         });
       }
+      const { createdPayments: excelDirectPvs } = buildMissingDirectVouchersForExistingRecords({
+        sales: [],
+        imports: addedImports,
+        receiptVouchers,
+        paymentVouchers,
+      });
+      if (excelDirectPvs.length > 0) {
+        setPaymentGroups((prev) =>
+          prev.includes(DIRECT_IMPORT_PAYMENT_GROUP) ? prev : [...prev, DIRECT_IMPORT_PAYMENT_GROUP]
+        );
+        setPaymentVouchers((prev) => [...excelDirectPvs, ...prev]);
+      }
       stageAndFlushRecords(
-        { imports: addedImports, products: updatedProductsForFlush },
+        {
+          imports: addedImports,
+          products: updatedProductsForFlush,
+          ...(excelDirectPvs.length > 0 ? { paymentVouchers: excelDirectPvs } : {}),
+        },
         activeUid
       );
       showToast(
@@ -7498,7 +8171,7 @@ export default function App() {
               {
                 recordId: s.id,
                 code: s.invoiceCode,
-                date: (s.createdAt || '').slice(0, 10),
+                date: toVietnamDateStr(s.createdAt) || (s.createdAt || '').slice(0, 10),
                 dueDate: s.dueDate,
                 productName: s.productName,
                 previousDebt: s.debtAmount,
@@ -7547,7 +8220,7 @@ export default function App() {
               {
                 recordId: i.id,
                 code: i.receiptCode,
-                date: (i.createdAt || '').slice(0, 10),
+                date: toVietnamDateStr(i.createdAt) || (i.createdAt || '').slice(0, 10),
                 dueDate: i.dueDate,
                 productName: i.productName,
                 previousDebt: i.debtAmount,
@@ -9826,8 +10499,131 @@ export default function App() {
         .filter((id): id is string => Boolean(id));
       driftIds.forEach((id) => handleReconcileProductStock(id));
       showToast(`Đã đối soát tồn kho ${driftIds.length} vật tư theo sổ chứng từ.`);
+      return;
+    }
+    if (action === 'missingDirectVouchers') {
+      const tombSet = new Set(deletedRecords.map((d) => d.id));
+      const { createdReceipts, createdPayments } = buildMissingDirectVouchersForExistingRecords({
+        sales,
+        imports,
+        receiptVouchers,
+        paymentVouchers,
+        deletedRecordIds: tombSet,
+      });
+      if (createdReceipts.length === 0 && createdPayments.length === 0) {
+        showToast('Tất cả đơn bán & phiếu nhập đã có đủ chứng từ Phiếu thu / Phiếu chi.');
+        return;
+      }
+      if (createdReceipts.length > 0) {
+        setReceiptGroups((prev) =>
+          prev.includes(DIRECT_SALE_RECEIPT_GROUP) ? prev : [...prev, DIRECT_SALE_RECEIPT_GROUP]
+        );
+        setReceiptVouchers((prev) => [...createdReceipts, ...prev]);
+      }
+      if (createdPayments.length > 0) {
+        setPaymentGroups((prev) =>
+          prev.includes(DIRECT_IMPORT_PAYMENT_GROUP) ? prev : [...prev, DIRECT_IMPORT_PAYMENT_GROUP]
+        );
+        setPaymentVouchers((prev) => [...createdPayments, ...prev]);
+      }
+      const byOwner = new Map<string, { rvs: CashReceiptVoucher[]; pvs: CashPaymentVoucher[] }>();
+      const fallbackOwner = auth.currentUser?.uid || currentStaff.uid;
+      createdReceipts.forEach((rv) => {
+        const o = rv.ownerId || fallbackOwner;
+        const cur = byOwner.get(o) || { rvs: [], pvs: [] };
+        cur.rvs.push(rv);
+        byOwner.set(o, cur);
+      });
+      createdPayments.forEach((pv) => {
+        const o = pv.ownerId || fallbackOwner;
+        const cur = byOwner.get(o) || { rvs: [], pvs: [] };
+        cur.pvs.push(pv);
+        byOwner.set(o, cur);
+      });
+      byOwner.forEach((bucket, ownerUid) => {
+        stageAndFlushRecords(
+          {
+            ...(bucket.rvs.length > 0 ? { receiptVouchers: bucket.rvs } : {}),
+            ...(bucket.pvs.length > 0 ? { paymentVouchers: bucket.pvs } : {}),
+          },
+          ownerUid
+        );
+      });
+      showToast(
+        `Đã tự động tạo bù ${createdReceipts.length} Phiếu thu & ${createdPayments.length} Phiếu chi cho các đơn trả trước!`
+      );
     }
   };
+
+  // Automatic idempotent backfill of missing direct PT-/PC- vouchers for existing Cloud/local records
+  useEffect(() => {
+    if (isAuthChecking || !isSessionLoggedIn) return;
+    if (isGoogleAuthenticated && !rtdbHydratedKeyRef.current) return;
+    const tombSet = new Set(deletedRecords.map((d) => d.id));
+    const { createdReceipts, createdPayments } = buildMissingDirectVouchersForExistingRecords({
+      sales,
+      imports,
+      receiptVouchers,
+      paymentVouchers,
+      deletedRecordIds: tombSet,
+    });
+    if (createdReceipts.length === 0 && createdPayments.length === 0) return;
+
+    if (createdReceipts.length > 0) {
+      setReceiptGroups((prev) =>
+        prev.includes(DIRECT_SALE_RECEIPT_GROUP) ? prev : [...prev, DIRECT_SALE_RECEIPT_GROUP]
+      );
+      setReceiptVouchers((prev) => {
+        const existIds = new Set(prev.map((r) => r.id));
+        const fresh = createdReceipts.filter((r) => !existIds.has(r.id));
+        return fresh.length > 0 ? [...fresh, ...prev] : prev;
+      });
+    }
+    if (createdPayments.length > 0) {
+      setPaymentGroups((prev) =>
+        prev.includes(DIRECT_IMPORT_PAYMENT_GROUP) ? prev : [...prev, DIRECT_IMPORT_PAYMENT_GROUP]
+      );
+      setPaymentVouchers((prev) => {
+        const existIds = new Set(prev.map((p) => p.id));
+        const fresh = createdPayments.filter((p) => !existIds.has(p.id));
+        return fresh.length > 0 ? [...fresh, ...prev] : prev;
+      });
+    }
+
+    const fallbackOwner = auth.currentUser?.uid || currentStaff.uid;
+    const byOwner = new Map<string, { rvs: CashReceiptVoucher[]; pvs: CashPaymentVoucher[] }>();
+    createdReceipts.forEach((rv) => {
+      const o = rv.ownerId || fallbackOwner;
+      const cur = byOwner.get(o) || { rvs: [], pvs: [] };
+      cur.rvs.push(rv);
+      byOwner.set(o, cur);
+    });
+    createdPayments.forEach((pv) => {
+      const o = pv.ownerId || fallbackOwner;
+      const cur = byOwner.get(o) || { rvs: [], pvs: [] };
+      cur.pvs.push(pv);
+      byOwner.set(o, cur);
+    });
+    byOwner.forEach((bucket, ownerUid) => {
+      stageAndFlushRecords(
+        {
+          ...(bucket.rvs.length > 0 ? { receiptVouchers: bucket.rvs } : {}),
+          ...(bucket.pvs.length > 0 ? { paymentVouchers: bucket.pvs } : {}),
+        },
+        ownerUid
+      );
+    });
+  }, [
+    isAuthChecking,
+    isSessionLoggedIn,
+    isGoogleAuthenticated,
+    sales,
+    imports,
+    receiptVouchers,
+    paymentVouchers,
+    deletedRecords,
+    currentStaff.uid,
+  ]);
 
   // Dashboard Metrics (Scoped to visible warehouse if staff is logged in)
   const totalRevenue = visibleSales.reduce((sum, s) => sum + s.totalAmount, 0);
@@ -11353,6 +12149,7 @@ export default function App() {
               onImportWarehouseFromExcel={handleImportWarehouseFromExcel}
               onUpdateImport={handleUpdateImport}
               onDeleteImport={handleDeleteImport}
+              onDeleteImportGroup={handleDeleteImportGroup}
               onReturnToSupplier={handleReturnToSupplier}
               onOpenDebtRecord={(recId) => {
                 setFocusedDebtRecordId(recId);

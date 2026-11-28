@@ -1,5 +1,5 @@
 // VTNN Tâm An PWA Service Worker (Network-First for App Shell, Bypass API & Firebase)
-const CACHE_NAME = 'vtnn-taman-pwa-v2';
+const CACHE_NAME = 'vtnn-taman-pwa-v3';
 const APP_SHELL_URLS = [
   '/',
   '/manifest.webmanifest',

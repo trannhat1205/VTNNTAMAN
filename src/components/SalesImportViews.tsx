@@ -65,10 +65,15 @@ import {
   diagnoseSaleVoucher,
   evaluateDebtUrgency,
   evaluateProductExpiry,
+  findAllVouchersForImport,
+  findAllVouchersForSale,
   formatVND,
   generateNextUniqueProductCode,
+  isDirectImportPaymentVoucher,
+  isDirectSaleReceiptVoucher,
   matchDebtTermDays,
   normalizeVietnameseSearch,
+  toVietnamDateStr,
 } from '../utils/businessLogic';
 import {
   CancelImportConfirmModal,
@@ -169,6 +174,7 @@ interface SalesLogViewProps {
     quantity: number;
     unitPrice: number;
     paidAmount: number;
+    paymentMethod?: string;
     dueDate: string;
     note: string;
     warehouseName: string;
@@ -192,6 +198,7 @@ interface SalesLogViewProps {
     dueDate: string;
     note: string;
     totalPaidAmount: number;
+    paymentMethod?: string;
     items: PosCartDraftItem[];
     isSupplierSale?: boolean;
     offsetSupplierDebt?: boolean;
@@ -301,6 +308,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   const [quantity, setQuantity] = useState<string>('');
   const [unitPrice, setUnitPrice] = useState<string>('');
   const [paymentMode, setPaymentMode] = useState<'full' | 'debt'>('full');
+  const [salePaymentMethod, setSalePaymentMethod] = useState<string>('Tiền mặt');
   // Sell goods back to a supplier: offset the supplier's payable debt directly (non-cash)
   const [offsetSupplierDebt, setOffsetSupplierDebt] = useState<boolean>(true);
   const supplierDirectory = buildAvailableSupplierDirectory(suppliers, imports, products);
@@ -1384,6 +1392,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
               : computeDueDateAfterDays(0),
           note: note.trim(),
           totalPaidAmount: supPrevMulti ? supPrevMulti.effectivePaidAmount : alloc.totalPaid,
+          paymentMethod: salePaymentMethod,
           items: finalCartItems,
           isSupplierSale: Boolean(supplierBuyer),
           offsetSupplierDebt: Boolean(supPrevMulti && supPrevMulti.offsetAmount > 0),
@@ -1534,6 +1543,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         quantity: qtyNum,
         unitPrice: effectivePrice,
         paidAmount: singlePaid,
+        paymentMethod: salePaymentMethod,
         dueDate:
           singleDebt > 0
             ? dueDate || computeDueDateAfterDays(7)
@@ -2258,63 +2268,67 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         Math.round(item.quantity * item.unitPrice) - (item.discountAmount || 0)
                       );
                       return (
-                        <div key={item.id} className="py-2 flex items-start justify-between gap-2 text-xs">
-                          <div className="min-w-0 flex-1">
-                            <div className="font-semibold text-slate-900 truncate">
+                        <div key={item.id} className="py-2 space-y-1.5 text-xs">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1 font-semibold text-slate-900 leading-snug break-words">
                               {idx + 1}. {item.productName}
                             </div>
-                            <div className="text-[11px] font-mono text-slate-500">
-                              {formatVND(item.unitPrice)} / {item.unit}
-                              {(item.discountAmount || 0) > 0 && (
-                                <span className="text-amber-700 ml-1.5">
-                                  (-{formatVND(item.discountAmount || 0)})
-                                </span>
-                              )}
-                            </div>
-                            {item.giftProductName && (item.giftQuantity || 0) > 0 && (
-                              <div className="text-[10px] text-emerald-700 font-semibold">
-                                + Quà: {item.giftQuantity} {item.giftUnit || ''} {item.giftProductName}
-                              </div>
-                            )}
-                            {item.dosageGuide && (
-                              <div className="text-[10px] text-teal-800 truncate">
-                                Liều lượng: {item.dosageGuide}
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateCartItemQty(item.id, -1)}
-                              aria-label={`Giảm số lượng ${item.productName}`}
-                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
-                            >
-                              -
-                            </button>
-                            <span className="w-7 text-center font-mono font-bold text-slate-900">
-                              {item.quantity}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateCartItemQty(item.id, 1)}
-                              aria-label={`Tăng số lượng ${item.productName}`}
-                              className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
-                            >
-                              +
-                            </button>
-                            <span className="font-mono font-bold text-emerald-800 ml-1 min-w-[68px] text-right">
-                              {formatVND(lineNet)}
-                            </span>
                             <button
                               type="button"
                               onClick={() =>
                                 setPosCartItems((prev) => prev.filter((x) => x.id !== item.id))
                               }
                               aria-label={`Bỏ ${item.productName} khỏi giỏ`}
-                              className="p-1 text-slate-400 hover:text-red-600"
+                              className="p-1 text-slate-400 hover:text-red-600 shrink-0"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
+                          </div>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="min-w-0 text-[11px] font-mono text-slate-500">
+                              <span>
+                                {formatVND(item.unitPrice)} / {item.unit}
+                              </span>
+                              {(item.discountAmount || 0) > 0 && (
+                                <span className="text-amber-700 ml-1.5">
+                                  (-{formatVND(item.discountAmount || 0)})
+                                </span>
+                              )}
+                              {item.giftProductName && (item.giftQuantity || 0) > 0 && (
+                                <div className="text-[10px] font-sans text-emerald-700 font-semibold">
+                                  + Quà: {item.giftQuantity} {item.giftUnit || ''} {item.giftProductName}
+                                </div>
+                              )}
+                              {item.dosageGuide && (
+                                <div className="text-[10px] font-sans text-teal-800 truncate max-w-[200px]">
+                                  Liều lượng: {item.dosageGuide}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1 ml-auto shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateCartItemQty(item.id, -1)}
+                                aria-label={`Giảm số lượng ${item.productName}`}
+                                className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
+                              >
+                                -
+                              </button>
+                              <span className="w-7 text-center font-mono font-bold text-slate-900">
+                                {item.quantity}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateCartItemQty(item.id, 1)}
+                                aria-label={`Tăng số lượng ${item.productName}`}
+                                className="w-6 h-6 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 font-bold text-slate-700"
+                              >
+                                +
+                              </button>
+                              <span className="font-mono font-bold text-emerald-800 ml-1 min-w-[68px] text-right">
+                                {formatVND(lineNet)}
+                              </span>
+                            </div>
                           </div>
                         </div>
                       );
@@ -3437,6 +3451,27 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   Ghi nợ / Trả một phần
                 </button>
               </div>
+              {(paymentMode === 'full' || Number(paidAmount) > 0) && (
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-medium text-slate-600">Phương thức nhận tiền (lập PT-...):</span>
+                  <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5">
+                    {(['Tiền mặt', 'Chuyển khoản ngân hàng'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setSalePaymentMethod(m)}
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors ${
+                          salePaymentMethod === m
+                            ? 'bg-white text-emerald-800 shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {m === 'Tiền mặt' ? 'Tiền mặt' : 'Chuyển khoản'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {paymentMode === 'debt' && !supplierFullyOffset && (
@@ -4060,11 +4095,15 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           }
                         />
                       )}
-                      {diag.linkedReceiptVouchers.map((rv) => (
+                      {findAllVouchersForSale(s, receiptVouchers).map((rv) => (
                         <CrossLinkChip
                           key={rv.id}
-                          tone="rose"
-                          label={rv.voucherCode}
+                          tone={isDirectSaleReceiptVoucher(rv) ? 'emerald' : 'rose'}
+                          label={
+                            isDirectSaleReceiptVoucher(rv)
+                              ? `${rv.voucherCode} (Tại đơn)`
+                              : rv.voucherCode
+                          }
                           onClick={() =>
                             onNavigateCrossLink({
                               tab: 'receipt_vouchers',
@@ -4270,7 +4309,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                               </div>
                             )}
                             <div className="text-[11px] font-mono text-slate-500">
-                              {(grp.createdAt || '').slice(0, 10)}
+                              {toVietnamDateStr(grp.createdAt) || (grp.createdAt || '').slice(0, 10)}
                               {isCompactTable ? ` · ${grp.warehouseName}` : ''}
                             </div>
                           </td>
@@ -4453,7 +4492,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         </div>
                       )}
                       <div className="text-[11px] font-mono text-slate-500">
-                        {s.createdAt.slice(0, 10)}
+                        {toVietnamDateStr(s.createdAt) || s.createdAt.slice(0, 10)}
                         {isCompactTable ? ` · ${s.warehouseName || 'Tâm An Mỹ Ngãi'}` : ''}
                       </div>
                       {diag.statusLevel !== 'ok' && (
@@ -4616,11 +4655,15 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                               }
                             />
                           )}
-                          {diag.linkedReceiptVouchers.map((rv) => (
+                          {findAllVouchersForSale(s, receiptVouchers).map((rv) => (
                             <CrossLinkChip
                               key={rv.id}
-                              tone="rose"
-                              label={rv.voucherCode}
+                              tone={isDirectSaleReceiptVoucher(rv) ? 'emerald' : 'rose'}
+                              label={
+                                isDirectSaleReceiptVoucher(rv)
+                                  ? `${rv.voucherCode} (Tại đơn)`
+                                  : rv.voucherCode
+                              }
                               onClick={() =>
                                 onNavigateCrossLink({
                                   tab: 'receipt_vouchers',
@@ -5522,6 +5565,7 @@ interface ImportLogViewProps {
     quantity: number;
     unitCost: number;
     paidAmount: number;
+    paymentMethod?: string;
     dueDate: string;
     note: string;
     warehouseName: string;
@@ -5536,6 +5580,7 @@ interface ImportLogViewProps {
     dueDate: string;
     note: string;
     totalPaidAmount: number;
+    paymentMethod?: string;
     items: ImportCartDraftItem[];
   }) => ImportTransaction[];
   onCreateProductInline: (
@@ -5560,6 +5605,7 @@ interface ImportLogViewProps {
     }
   ) => void;
   onDeleteImport: (importId: string) => void;
+  onDeleteImportGroup?: (importIds: string[]) => void;
   onReturnToSupplier?: (params: { importId: string; returnQuantity: number; reason: string }) => void;
   onOpenDebtRecord?: (recordId: string) => void;
   syncMeta?: CloudSyncMeta;
@@ -5593,6 +5639,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   onImportWarehouseFromExcel,
   onUpdateImport,
   onDeleteImport,
+  onDeleteImportGroup,
   onReturnToSupplier,
   onOpenDebtRecord,
   syncMeta,
@@ -5669,6 +5716,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [supplierPhone, setSupplierPhone] = useState<string>('');
   const [quantity, setQuantity] = useState<string>('');
   const [unitCost, setUnitCost] = useState<string>('');
+  const [importPaymentMode, setImportPaymentMode] = useState<'full' | 'debt'>('debt');
+  const [importPaymentMethod, setImportPaymentMethod] = useState<string>('Tiền mặt');
   const [paidAmount, setPaidAmount] = useState<string>('');
   const [dueDate, setDueDate] = useState<string>('');
   const [batchNumber, setBatchNumber] = useState<string>('');
@@ -5726,6 +5775,8 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     setSupplierPhone('');
     setQuantity('');
     setUnitCost('');
+    setImportPaymentMode('debt');
+    setImportPaymentMethod('Tiền mặt');
     setPaidAmount('');
     setDueDate('');
     setBatchNumber('');
@@ -5955,7 +6006,12 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
   const qtyNum = Math.max(0, Number(quantity) || 0);
   const costNum = Math.max(0, Number(unitCost) || 0);
-  const paidNum = Math.max(0, Number(paidAmount) || 0);
+  const rawImpPaidNum = Math.max(0, Number(paidAmount) || 0);
+  const singleImportTotalPreview = Math.round(
+    qtyNum * (costNum > 0 ? costNum : currentProduct?.importPrice || 0)
+  );
+  const paidNum =
+    importPaymentMode === 'full' ? Number.MAX_SAFE_INTEGER : rawImpPaidNum;
 
   const sellPriceSuggestion =
     currentProduct && !isFreeSampleImport && (costNum > 0 || currentProduct.importPrice > 0)
@@ -6258,6 +6314,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
               : computeDueDateAfterDays(0),
           note: note.trim(),
           totalPaidAmount: alloc.totalPaid,
+          paymentMethod: importPaymentMethod,
           items: finalCartItems,
         });
         const sharedCode = createdImports[0]?.receiptCode || 'PN';
@@ -6331,7 +6388,11 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       setFeedback({ type: 'error', text: ZERO_COST_IMPORT_ERROR });
       return;
     }
-    const effectiveSummary = calculateImportSummary(qtyNum, effectiveCost, paidNum);
+    const effectiveSummary = calculateImportSummary(
+      qtyNum,
+      effectiveCost,
+      importPaymentMode === 'full' ? Math.round(qtyNum * effectiveCost) : rawImpPaidNum
+    );
 
     const createdImport = onCreateImport({
       supplierName: resolvedSupplierName.trim(),
@@ -6340,6 +6401,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       quantity: qtyNum,
       unitCost: effectiveCost,
       paidAmount: effectiveSummary.paidAmount,
+      paymentMethod: importPaymentMethod,
       dueDate:
         effectiveSummary.debtAmount > 0
           ? dueDate || computeDueDateAfterDays(30)
@@ -6587,14 +6649,38 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                     {importCartItems.map((item, idx) => (
                       <div
                         key={item.id}
-                        className="p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                        className="p-2.5 space-y-2 text-xs"
                       >
-                        <div className="min-w-0 flex-1">
-                          <div className="font-bold text-slate-900 truncate">
-                            {idx + 1}. {item.productName}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1 font-bold text-slate-900 leading-snug break-words">
+                            <span>
+                              {idx + 1}. {item.productName}
+                            </span>
+                            {item.batchNumber && (
+                              <span className="ml-1.5 inline-block px-1.5 py-0.5 bg-slate-100 rounded text-[10px] font-mono font-normal text-slate-600">
+                                Lô: {item.batchNumber}
+                              </span>
+                            )}
+                            {item.newSellPrice && item.newSellPrice > 0 && (
+                              <span className="ml-1.5 inline-block px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">
+                                → Giá bán mới: {formatVND(item.newSellPrice)}
+                              </span>
+                            )}
                           </div>
-                          <div className="flex flex-wrap items-center gap-1.5 mt-0.5 text-[11px] text-slate-600 font-mono">
-                            <span>Giá nhập:</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setImportCartItems((prev) => prev.filter((x) => x.id !== item.id))
+                            }
+                            aria-label={`Xóa ${item.productName} khỏi giỏ nhập`}
+                            className="p-1 text-slate-400 hover:text-rose-600 shrink-0"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 text-[11px] text-slate-600 font-mono">
+                            <span className="whitespace-nowrap">Giá nhập:</span>
                             <input
                               type="number"
                               min={0}
@@ -6608,68 +6694,48 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                                 );
                               }}
                               aria-label={`Đơn giá nhập ${item.productName}`}
-                              className="w-24 px-1.5 py-0.5 text-xs font-mono bg-slate-50 border border-slate-200 rounded"
+                              className="w-24 px-2 py-1 text-xs font-mono font-bold bg-slate-50 border border-slate-200 rounded"
                             />
-                            <span>đ/{item.unit}</span>
-                            {item.batchNumber && (
-                              <span className="px-1.5 py-0.2 bg-slate-100 rounded text-[10px]">
-                                Lô: {item.batchNumber}
-                              </span>
-                            )}
-                            {item.newSellPrice && item.newSellPrice > 0 && (
-                              <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 rounded text-[10px] font-bold">
-                                → Giá bán mới: {formatVND(item.newSellPrice)}
-                              </span>
-                            )}
+                            <span className="whitespace-nowrap">đ/{item.unit}</span>
                           </div>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setImportCartItems((prev) =>
-                                prev
-                                  .map((x) =>
-                                    x.id === item.id
-                                      ? { ...x, quantity: Math.max(0, x.quantity - 1) }
-                                      : x
-                                  )
-                                  .filter((x) => x.quantity > 0)
-                              )
-                            }
-                            className="w-6 h-6 rounded border border-slate-300 bg-white hover:bg-slate-100 font-bold"
-                          >
-                            -
-                          </button>
-                          <span className="w-8 text-center font-mono font-bold text-slate-900">
-                            {item.quantity}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setImportCartItems((prev) =>
-                                prev.map((x) =>
-                                  x.id === item.id ? { ...x, quantity: x.quantity + 1 } : x
+                          <div className="flex items-center gap-1.5 ml-auto shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setImportCartItems((prev) =>
+                                  prev
+                                    .map((x) =>
+                                      x.id === item.id
+                                        ? { ...x, quantity: Math.max(0, x.quantity - 1) }
+                                        : x
+                                    )
+                                    .filter((x) => x.quantity > 0)
                                 )
-                              )
-                            }
-                            className="w-6 h-6 rounded border border-slate-300 bg-white hover:bg-slate-100 font-bold"
-                          >
-                            +
-                          </button>
-                          <span className="font-mono font-bold text-emerald-800 min-w-[82px] text-right">
-                            {formatVND(Math.round(item.quantity * item.unitCost))}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setImportCartItems((prev) => prev.filter((x) => x.id !== item.id))
-                            }
-                            aria-label={`Xóa ${item.productName} khỏi giỏ nhập`}
-                            className="p-1 text-slate-400 hover:text-rose-600"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                              }
+                              className="w-7 h-7 rounded border border-slate-300 bg-white hover:bg-slate-100 font-bold"
+                            >
+                              -
+                            </button>
+                            <span className="w-8 text-center font-mono font-bold text-slate-900">
+                              {item.quantity}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setImportCartItems((prev) =>
+                                  prev.map((x) =>
+                                    x.id === item.id ? { ...x, quantity: x.quantity + 1 } : x
+                                  )
+                                )
+                              }
+                              className="w-7 h-7 rounded border border-slate-300 bg-white hover:bg-slate-100 font-bold"
+                            >
+                              +
+                            </button>
+                            <span className="font-mono font-bold text-emerald-800 min-w-[78px] text-right">
+                              {formatVND(Math.round(item.quantity * item.unitCost))}
+                            </span>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -7273,23 +7339,77 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
 
             <div className="space-y-3 p-3.5 bg-amber-50/40 rounded-lg border border-amber-200/80">
               <div>
-                <label
-                  htmlFor="import-paid-input"
-                  className="block text-xs font-semibold text-slate-700 mb-1"
-                >
-                  Đã thanh toán cho NCC (VNĐ)
-                </label>
-                <input
-                  id="import-paid-input"
-                  type="number"
-                  min={0}
-                  max={summary.totalCost}
-                  value={paidAmount}
-                  onChange={(e) => setPaidAmount(e.target.value)}
-                  placeholder="0"
-                  className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
-                />
+                <span className="block text-xs font-semibold text-slate-700 mb-1.5">
+                  Hình thức thanh toán cho Nhà cung cấp
+                </span>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-white/80 border border-amber-200/80 rounded-lg">
+                  <button
+                    type="button"
+                    onClick={() => setImportPaymentMode('full')}
+                    className={`py-2 px-3 text-xs font-semibold rounded-md transition-colors ${
+                      importPaymentMode === 'full'
+                        ? 'bg-emerald-700 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Thanh toán đủ 100%
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setImportPaymentMode('debt')}
+                    className={`py-2 px-3 text-xs font-semibold rounded-md transition-colors ${
+                      importPaymentMode === 'debt'
+                        ? 'bg-amber-700 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Ghi nợ / Trả một phần
+                  </button>
+                </div>
               </div>
+
+              {importPaymentMode === 'debt' && (
+                <div>
+                  <label
+                    htmlFor="import-paid-input"
+                    className="block text-xs font-semibold text-slate-700 mb-1"
+                  >
+                    Đã thanh toán trước cho NCC (VNĐ)
+                  </label>
+                  <input
+                    id="import-paid-input"
+                    type="number"
+                    min={0}
+                    max={summary.totalCost || singleImportTotalPreview}
+                    value={paidAmount}
+                    onChange={(e) => setPaidAmount(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
+                  />
+                </div>
+              )}
+
+              {(importPaymentMode === 'full' || rawImpPaidNum > 0) && (
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-medium text-slate-700">Phương thức chi tiền (lập PC-...):</span>
+                  <div className="inline-flex rounded-lg border border-amber-200 bg-white p-0.5">
+                    {(['Tiền mặt', 'Chuyển khoản ngân hàng'] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setImportPaymentMethod(m)}
+                        className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors ${
+                          importPaymentMethod === m
+                            ? 'bg-amber-800 text-white shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {m === 'Tiền mặt' ? 'Tiền mặt' : 'Chuyển khoản'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="space-y-2 pt-2 border-t border-amber-200/70">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -7375,9 +7495,13 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-600">Tồn kho sau khi nhập:</span>
+                <span className="text-slate-600">
+                  {importCartItems.length > 0 ? 'Tổng số lượng nhập:' : 'Tồn kho sau khi nhập:'}
+                </span>
                 <span className="font-mono tabular-nums text-emerald-700 font-bold">
-                  {(currentProduct?.stock || 0) + qtyNum} {currentProduct?.unit || ''}
+                  {importCartItems.length > 0
+                    ? `+${combinedImportPreviewItems.reduce((s, x) => s + x.quantity, 0)} đv (${combinedImportPreviewItems.length} mặt hàng)`
+                    : `${(currentProduct?.stock || 0) + qtyNum} ${currentProduct?.unit || ''}`}
                 </span>
               </div>
               <div className="flex items-center justify-between pt-1.5 border-t border-slate-200">
@@ -7623,7 +7747,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           <CloudRecordSyncBadge recordId={imp.id} syncMeta={syncMeta} />
                         </div>
                         <div className="text-[11px] font-mono text-slate-500 mt-0.5">
-                          Ngày: {imp.createdAt.slice(0, 10)}
+                          Ngày: {toVietnamDateStr(imp.createdAt) || imp.createdAt.slice(0, 10)}
                         </div>
                       </div>
                       <span className="px-2 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-md whitespace-nowrap">
@@ -7731,11 +7855,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                               }
                             />
                           )}
-                          {diag.linkedPaymentVouchers.map((pv) => (
+                          {findAllVouchersForImport(imp, paymentVouchers).map((pv) => (
                             <CrossLinkChip
                               key={pv.id}
-                              tone="rose"
-                              label={`Phiếu chi ${pv.voucherCode}`}
+                              tone={isDirectImportPaymentVoucher(pv) ? 'emerald' : 'rose'}
+                              label={
+                                isDirectImportPaymentVoucher(pv)
+                                  ? `Phiếu chi ${pv.voucherCode} (Tại đơn)`
+                                  : `Phiếu chi ${pv.voucherCode}`
+                              }
                               onClick={() =>
                                 onNavigateCrossLink({
                                   tab: 'payment_vouchers',
@@ -7915,7 +8043,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </div>
                         )}
                         <div className="text-[11px] font-mono text-slate-500">
-                          {imp.createdAt.slice(0, 10)}
+                          {toVietnamDateStr(imp.createdAt) || imp.createdAt.slice(0, 10)}
                           {isCompactTable ? ` · ${imp.warehouseName || 'Tâm An Mỹ Ngãi'}` : ''}
                         </div>
                         {diag.statusLevel !== 'ok' && (
@@ -8002,11 +8130,15 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                                 }
                               />
                             )}
-                            {diag.linkedPaymentVouchers.map((pv) => (
+                            {findAllVouchersForImport(imp, paymentVouchers).map((pv) => (
                               <CrossLinkChip
                                 key={pv.id}
-                                tone="rose"
-                                label={pv.voucherCode}
+                                tone={isDirectImportPaymentVoucher(pv) ? 'emerald' : 'rose'}
+                                label={
+                                  isDirectImportPaymentVoucher(pv)
+                                    ? `${pv.voucherCode} (Tại đơn)`
+                                    : pv.voucherCode
+                                }
                                 onClick={() =>
                                   onNavigateCrossLink({
                                     tab: 'payment_vouchers',
@@ -8129,7 +8261,20 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                               )}
                               <button
                                 type="button"
-                                onClick={() => setCancelingImport(imp)}
+                                onClick={() => {
+                                  const grpImps = findImportGroupTransactions(imports, imp);
+                                  if (grpImps.length > 1 && onDeleteImportGroup) {
+                                    if (
+                                      window.confirm(
+                                        `Xác nhận hủy trọn bộ phiếu nhập gộp ${imp.receiptCode} (${grpImps.length} mặt hàng) và trừ lại tồn kho?`
+                                      )
+                                    ) {
+                                      onDeleteImportGroup(grpImps.map((x) => x.id));
+                                    }
+                                  } else {
+                                    setCancelingImport(imp);
+                                  }
+                                }}
                                 aria-label={`Hủy phiếu mua hàng ${imp.receiptCode}`}
                                 className="px-2 py-1 text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md flex items-center gap-1 whitespace-nowrap"
                               >

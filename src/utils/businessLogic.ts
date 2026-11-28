@@ -1451,6 +1451,7 @@ export function updateSaleRecord(
     unitPrice: number;
     unitCost?: number;
     paidAmount: number;
+    paymentMethod?: string;
     dueDate: string;
     note: string;
     promotionType?: SalePromotionType;
@@ -1491,6 +1492,7 @@ export function updateSaleRecord(
     paidAmount: summary.paidAmount,
     debtAmount: summary.debtAmount,
     status: summary.status,
+    paymentMethod: changes.paymentMethod?.trim() || existing.paymentMethod,
     dueDate: changes.dueDate || existing.dueDate,
     promotionType: changes.promotionType ?? existing.promotionType,
     discountAmount: summary.discountAmount,
@@ -1519,6 +1521,7 @@ export function updateImportRecord(
     quantity: number;
     unitCost: number;
     paidAmount: number;
+    paymentMethod?: string;
     dueDate: string;
     note: string;
   },
@@ -1539,6 +1542,7 @@ export function updateImportRecord(
     paidAmount: summary.paidAmount,
     debtAmount: summary.debtAmount,
     status: summary.status,
+    paymentMethod: changes.paymentMethod?.trim() || existing.paymentMethod,
     dueDate: changes.dueDate || existing.dueDate,
     note: changes.note,
     updatedAt: nowIso,
@@ -2953,11 +2957,13 @@ export interface VoucherGroupSummaryItem {
 export interface CashflowAndFinancialReportSummary {
   // Cashflow metrics (7. Thu - Chi Dòng Tiền)
   salesInitialPaidInflow: number;
+  directSaleReceiptTotal: number;
   salesPaidInflow: number;
   otherReceiptInflow: number;
   debtSettlementReceiptTotal: number;
   totalCashInflow: number;
   importsInitialPaidOutflow: number;
+  directImportPaymentTotal: number;
   importsPaidOutflow: number;
   operatingPaymentOutflow: number;
   debtSettlementPaymentTotal: number;
@@ -3026,39 +3032,195 @@ export function computeCashflowAndFinancialReport(params: {
     ? paymentVouchers.filter((pv) => areWarehouseNamesEquivalent(pv.warehouseName, warehouseName))
     : paymentVouchers;
 
-  // Map all debt-settlement allocations across ALL active PT/PC vouchers so we can recover exact initial cash paid on invoice creation date
+  // Map all debt-settlement AND direct-order vouchers across ALL active PT/PC records so we can
+  // separateouchered cash from any unvouchered legacy upfront cash with ZERO double-counting.
   const settledOnSaleById = new Map<string, number>();
   const settledOnSaleByCode = new Map<string, number>();
+  const contraSettledOnSaleById = new Map<string, number>();
+  const directPaidOnSaleById = new Map<string, number>();
+  const directPaidOnSaleByCode = new Map<string, number>();
+  const unallocatedSaleDebtVouchers: CashReceiptVoucher[] = [];
   for (const rv of whReceipts) {
-    if (!rv.isDebtSettlement || !rv.settledAllocations?.length) continue;
-    for (const alloc of rv.settledAllocations) {
-      const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
-      if (amt <= 0) continue;
-      if (alloc.recordId) {
-        settledOnSaleById.set(alloc.recordId, (settledOnSaleById.get(alloc.recordId) || 0) + amt);
-      } else if (alloc.code) {
-        settledOnSaleByCode.set(alloc.code, (settledOnSaleByCode.get(alloc.code) || 0) + amt);
+    if (rv.isDebtSettlement) {
+      const isContra = isContraOffsetVoucher(rv);
+      let allocTotal = 0;
+      for (const alloc of rv.settledAllocations || []) {
+        const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
+        if (amt <= 0) continue;
+        allocTotal += amt;
+        if (alloc.recordId) {
+          settledOnSaleById.set(alloc.recordId, (settledOnSaleById.get(alloc.recordId) || 0) + amt);
+          if (isContra) {
+            contraSettledOnSaleById.set(
+              alloc.recordId,
+              (contraSettledOnSaleById.get(alloc.recordId) || 0) + amt
+            );
+          }
+        } else if (alloc.code) {
+          settledOnSaleByCode.set(alloc.code, (settledOnSaleByCode.get(alloc.code) || 0) + amt);
+        }
+      }
+      if ((Number(rv.amount) || 0) > allocTotal) {
+        unallocatedSaleDebtVouchers.push(rv);
+      }
+    } else if (isDirectSaleReceiptVoucher(rv) && !isContraOffsetVoucher(rv)) {
+      if (rv.settledAllocations?.length) {
+        for (const alloc of rv.settledAllocations) {
+          const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
+          if (amt <= 0) continue;
+          if (alloc.recordId) {
+            directPaidOnSaleById.set(
+              alloc.recordId,
+              (directPaidOnSaleById.get(alloc.recordId) || 0) + amt
+            );
+          } else if (alloc.code) {
+            directPaidOnSaleByCode.set(
+              alloc.code,
+              (directPaidOnSaleByCode.get(alloc.code) || 0) + amt
+            );
+          }
+        }
+      } else if (rv.linkedSaleIds?.length === 1) {
+        const sid = rv.linkedSaleIds[0];
+        directPaidOnSaleById.set(
+          sid,
+          (directPaidOnSaleById.get(sid) || 0) + Math.max(0, Number(rv.amount) || 0)
+        );
+      } else if (rv.linkedSaleInvoiceCode) {
+        directPaidOnSaleByCode.set(
+          rv.linkedSaleInvoiceCode,
+          (directPaidOnSaleByCode.get(rv.linkedSaleInvoiceCode) || 0) +
+            Math.max(0, Number(rv.amount) || 0)
+        );
+      }
+    }
+  }
+
+  // Fallback for legacy debt-settlement PT- vouchers missing settledAllocations: attribute FIFO onto partner sales
+  if (unallocatedSaleDebtVouchers.length > 0 && whSales.length > 0) {
+    const chronoSales = [...whSales].sort((a, b) =>
+      (a.createdAt || '').localeCompare(b.createdAt || '')
+    );
+    for (const rv of unallocatedSaleDebtVouchers) {
+      const allocTotal = (rv.settledAllocations || []).reduce(
+        (s, a) => s + Math.max(0, Number(a.allocatedAmount) || 0),
+        0
+      );
+      let rem = Math.max(0, Math.round((Number(rv.amount) || 0) - allocTotal));
+      if (rem <= 0) continue;
+      const rvName = normalizeVietnameseSearch(rv.partnerName || '');
+      const rvPhone = (rv.partnerPhone || '').trim();
+      const matchesPartner = (s: SaleTransaction) =>
+        (Boolean(rv.partnerId) && s.customerId === rv.partnerId) ||
+        (Boolean(rvPhone) && (s.customerPhone || '').trim() === rvPhone) ||
+        (Boolean(rvName) && normalizeVietnameseSearch(s.customerName || '') === rvName);
+      const partnerCandidates = chronoSales.filter(matchesPartner);
+      const pool = partnerCandidates.length > 0 ? partnerCandidates : chronoSales;
+      const isContra = isContraOffsetVoucher(rv);
+      for (const s of pool) {
+        if (rem <= 0) break;
+        const already =
+          (settledOnSaleById.get(s.id) || 0) + (directPaidOnSaleById.get(s.id) || 0);
+        const cap = Math.max(0, Math.round((Number(s.paidAmount) || 0) - already));
+        if (cap <= 0) continue;
+        const take = Math.min(rem, cap);
+        settledOnSaleById.set(s.id, (settledOnSaleById.get(s.id) || 0) + take);
+        if (isContra) {
+          contraSettledOnSaleById.set(s.id, (contraSettledOnSaleById.get(s.id) || 0) + take);
+        }
+        rem -= take;
       }
     }
   }
 
   const settledOnImportById = new Map<string, number>();
   const settledOnImportByCode = new Map<string, number>();
+  const directPaidOnImportById = new Map<string, number>();
+  const directPaidOnImportByCode = new Map<string, number>();
+  const unallocatedImportDebtVouchers: CashPaymentVoucher[] = [];
   for (const pv of whPayments) {
-    if (!pv.isDebtSettlement || !pv.settledAllocations?.length) continue;
-    for (const alloc of pv.settledAllocations) {
-      const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
-      if (amt <= 0) continue;
-      if (alloc.recordId) {
-        settledOnImportById.set(
-          alloc.recordId,
-          (settledOnImportById.get(alloc.recordId) || 0) + amt
+    if (pv.isDebtSettlement) {
+      let allocTotal = 0;
+      for (const alloc of pv.settledAllocations || []) {
+        const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
+        if (amt <= 0) continue;
+        allocTotal += amt;
+        if (alloc.recordId) {
+          settledOnImportById.set(
+            alloc.recordId,
+            (settledOnImportById.get(alloc.recordId) || 0) + amt
+          );
+        } else if (alloc.code) {
+          settledOnImportByCode.set(
+            alloc.code,
+            (settledOnImportByCode.get(alloc.code) || 0) + amt
+          );
+        }
+      }
+      if ((Number(pv.amount) || 0) > allocTotal) {
+        unallocatedImportDebtVouchers.push(pv);
+      }
+    } else if (isDirectImportPaymentVoucher(pv) && !isContraOffsetVoucher(pv)) {
+      if (pv.settledAllocations?.length) {
+        for (const alloc of pv.settledAllocations) {
+          const amt = Math.max(0, Number(alloc.allocatedAmount) || 0);
+          if (amt <= 0) continue;
+          if (alloc.recordId) {
+            directPaidOnImportById.set(
+              alloc.recordId,
+              (directPaidOnImportById.get(alloc.recordId) || 0) + amt
+            );
+          } else if (alloc.code) {
+            directPaidOnImportByCode.set(
+              alloc.code,
+              (directPaidOnImportByCode.get(alloc.code) || 0) + amt
+            );
+          }
+        }
+      } else if (pv.linkedImportIds?.length === 1) {
+        const iid = pv.linkedImportIds[0];
+        directPaidOnImportById.set(
+          iid,
+          (directPaidOnImportById.get(iid) || 0) + Math.max(0, Number(pv.amount) || 0)
         );
-      } else if (alloc.code) {
-        settledOnImportByCode.set(
-          alloc.code,
-          (settledOnImportByCode.get(alloc.code) || 0) + amt
+      } else if (pv.linkedImportReceiptCode) {
+        directPaidOnImportByCode.set(
+          pv.linkedImportReceiptCode,
+          (directPaidOnImportByCode.get(pv.linkedImportReceiptCode) || 0) +
+            Math.max(0, Number(pv.amount) || 0)
         );
+      }
+    }
+  }
+
+  // Fallback for legacy debt-settlement PC- vouchers missing settledAllocations: attribute FIFO onto supplier imports
+  if (unallocatedImportDebtVouchers.length > 0 && whImports.length > 0) {
+    const chronoImports = [...whImports].sort((a, b) =>
+      (a.createdAt || '').localeCompare(b.createdAt || '')
+    );
+    for (const pv of unallocatedImportDebtVouchers) {
+      const allocTotal = (pv.settledAllocations || []).reduce(
+        (s, a) => s + Math.max(0, Number(a.allocatedAmount) || 0),
+        0
+      );
+      let rem = Math.max(0, Math.round((Number(pv.amount) || 0) - allocTotal));
+      if (rem <= 0) continue;
+      const pvName = normalizeVietnameseSearch(pv.partnerName || '');
+      const pvPhone = (pv.partnerPhone || '').trim();
+      const matchesSupplier = (i: ImportTransaction) =>
+        (Boolean(pvPhone) && (i.supplierPhone || '').trim() === pvPhone) ||
+        (Boolean(pvName) && normalizeVietnameseSearch(i.supplierName || '') === pvName);
+      const supplierCandidates = chronoImports.filter(matchesSupplier);
+      const pool = supplierCandidates.length > 0 ? supplierCandidates : chronoImports;
+      for (const i of pool) {
+        if (rem <= 0) break;
+        const already =
+          (settledOnImportById.get(i.id) || 0) + (directPaidOnImportById.get(i.id) || 0);
+        const cap = Math.max(0, Math.round((Number(i.paidAmount) || 0) - already));
+        if (cap <= 0) continue;
+        const take = Math.min(rem, cap);
+        settledOnImportById.set(i.id, (settledOnImportById.get(i.id) || 0) + take);
+        rem -= take;
       }
     }
   }
@@ -3073,41 +3235,80 @@ export function computeCashflowAndFinancialReport(params: {
   );
 
   // Cashflow calculations (exact cash-timing per period, zero double-count across all time)
+  const remainingDirectBySaleCode = new Map(directPaidOnSaleByCode);
   const salesInitialPaidInflow = filteredSales.reduce((sum, s) => {
     const settledLater =
       settledOnSaleById.get(s.id) ?? settledOnSaleByCode.get(s.invoiceCode) ?? 0;
-    const initialPaid = Math.max(0, (Number(s.paidAmount) || 0) - settledLater);
+    const unvoucheredContra = Math.max(
+      0,
+      (Number(s.supplierOffsetAmount) || 0) - (contraSettledOnSaleById.get(s.id) || 0)
+    );
+    let directCovered = directPaidOnSaleById.get(s.id) || 0;
+    if (directCovered === 0 && remainingDirectBySaleCode.has(s.invoiceCode)) {
+      const avail = remainingDirectBySaleCode.get(s.invoiceCode) || 0;
+      const candidate = Math.max(0, (Number(s.paidAmount) || 0) - settledLater - unvoucheredContra);
+      const used = Math.min(avail, candidate);
+      directCovered = used;
+      remainingDirectBySaleCode.set(s.invoiceCode, avail - used);
+    }
+    const initialPaid = Math.max(
+      0,
+      (Number(s.paidAmount) || 0) - settledLater - unvoucheredContra - directCovered
+    );
     return sum + initialPaid;
   }, 0);
+  const directSaleReceiptTotal = filteredReceiptVouchers
+    .filter((rv) => isDirectSaleReceiptVoucher(rv) && !isContraOffsetVoucher(rv))
+    .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
   const debtSettlementReceiptTotal = filteredReceiptVouchers
     .filter((rv) => rv.isDebtSettlement && !isContraOffsetVoucher(rv))
     .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
-  const salesPaidInflow = salesInitialPaidInflow + debtSettlementReceiptTotal;
+  const salesPaidInflow =
+    salesInitialPaidInflow + directSaleReceiptTotal + debtSettlementReceiptTotal;
   const otherReceiptInflow = filteredReceiptVouchers
-    .filter((rv) => !rv.isDebtSettlement)
+    .filter(
+      (rv) => !rv.isDebtSettlement && !isDirectSaleReceiptVoucher(rv) && !isContraOffsetVoucher(rv)
+    )
     .reduce((sum, rv) => sum + (Number(rv.amount) || 0), 0);
   const totalCashInflow = salesPaidInflow + otherReceiptInflow;
 
+  const remainingDirectByImportCode = new Map(directPaidOnImportByCode);
   const importsInitialPaidOutflow = filteredImports.reduce((sum, i) => {
     const settledLater =
       settledOnImportById.get(i.id) ?? settledOnImportByCode.get(i.receiptCode) ?? 0;
-    const initialPaid = Math.max(0, (Number(i.paidAmount) || 0) - settledLater);
+    let directCovered = directPaidOnImportById.get(i.id) || 0;
+    if (directCovered === 0 && remainingDirectByImportCode.has(i.receiptCode)) {
+      const avail = remainingDirectByImportCode.get(i.receiptCode) || 0;
+      const candidate = Math.max(0, (Number(i.paidAmount) || 0) - settledLater);
+      const used = Math.min(avail, candidate);
+      directCovered = used;
+      remainingDirectByImportCode.set(i.receiptCode, avail - used);
+    }
+    const initialPaid = Math.max(0, (Number(i.paidAmount) || 0) - settledLater - directCovered);
     return sum + initialPaid;
   }, 0);
+  const directImportPaymentTotal = filteredPaymentVouchers
+    .filter((pv) => isDirectImportPaymentVoucher(pv) && !isContraOffsetVoucher(pv))
+    .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
   const debtSettlementPaymentTotal = filteredPaymentVouchers
     .filter((pv) => pv.isDebtSettlement && !isContraOffsetVoucher(pv))
     .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
-  const importsPaidOutflow = importsInitialPaidOutflow + debtSettlementPaymentTotal;
+  const importsPaidOutflow =
+    importsInitialPaidOutflow + directImportPaymentTotal + debtSettlementPaymentTotal;
   const operatingPaymentOutflow = filteredPaymentVouchers
-    .filter((pv) => !pv.isDebtSettlement)
+    .filter(
+      (pv) =>
+        !pv.isDebtSettlement && !isDirectImportPaymentVoucher(pv) && !isContraOffsetVoucher(pv)
+    )
     .reduce((sum, pv) => sum + (Number(pv.amount) || 0), 0);
   const totalCashOutflow = importsPaidOutflow + operatingPaymentOutflow;
 
   const netCashflow = totalCashInflow - totalCashOutflow;
 
-  // Group breakdown for Receipt Vouchers
+  // Group breakdown for Receipt Vouchers (real cash vouchers only — excludes contra offsets)
   const receiptGroupMap = new Map<string, VoucherGroupSummaryItem>();
   for (const rv of filteredReceiptVouchers) {
+    if (isContraOffsetVoucher(rv)) continue;
     const group = (rv.groupName || 'Nhóm phiếu thu khác').trim();
     const existing = receiptGroupMap.get(group) || {
       groupName: group,
@@ -3129,9 +3330,10 @@ export function computeCashflowAndFinancialReport(params: {
     (a, b) => b.totalAmount - a.totalAmount
   );
 
-  // Group breakdown for Payment Vouchers
+  // Group breakdown for Payment Vouchers (real cash vouchers only — excludes contra offsets)
   const paymentGroupMap = new Map<string, VoucherGroupSummaryItem>();
   for (const pv of filteredPaymentVouchers) {
+    if (isContraOffsetVoucher(pv)) continue;
     const group = (pv.groupName || 'Nhóm phiếu chi khác').trim();
     const existing = paymentGroupMap.get(group) || {
       groupName: group,
@@ -3173,11 +3375,23 @@ export function computeCashflowAndFinancialReport(params: {
   const grossProfit = netSalesRevenue - totalCogs;
 
   const otherIncome = filteredReceiptVouchers
-    .filter((rv) => !rv.isDebtSettlement && rv.countsTowardOtherIncome !== false)
+    .filter(
+      (rv) =>
+        !rv.isDebtSettlement &&
+        !isDirectSaleReceiptVoucher(rv) &&
+        !isContraOffsetVoucher(rv) &&
+        rv.countsTowardOtherIncome !== false
+    )
     .reduce((sum, rv) => sum + rv.amount, 0);
 
   const operatingExpenses = filteredPaymentVouchers
-    .filter((pv) => !pv.isDebtSettlement && pv.countsTowardOperatingExpense !== false)
+    .filter(
+      (pv) =>
+        !pv.isDebtSettlement &&
+        !isDirectImportPaymentVoucher(pv) &&
+        !isContraOffsetVoucher(pv) &&
+        pv.countsTowardOperatingExpense !== false
+    )
     .reduce((sum, pv) => sum + pv.amount, 0);
 
   const netProfit = grossProfit + otherIncome - operatingExpenses;
@@ -3194,11 +3408,13 @@ export function computeCashflowAndFinancialReport(params: {
 
   return {
     salesInitialPaidInflow,
+    directSaleReceiptTotal,
     salesPaidInflow,
     otherReceiptInflow,
     debtSettlementReceiptTotal,
     totalCashInflow,
     importsInitialPaidOutflow,
+    directImportPaymentTotal,
     importsPaidOutflow,
     operatingPaymentOutflow,
     debtSettlementPaymentTotal,
@@ -3304,6 +3520,38 @@ export function previewFiscalYearCloseAndCleanup(params: {
   const paymentVouchers = params.paymentVouchers || [];
   const savedVouchers = params.savedVouchers || [];
 
+  const carriedUnpaidSales = sales.filter((s) => s.debtAmount > 0);
+  const carriedSaleIdSet = new Set(carriedUnpaidSales.map((s) => s.id));
+  const carriedSaleCodeSet = new Set(carriedUnpaidSales.map((s) => s.invoiceCode).filter(Boolean));
+  const carriedUnpaidImports = imports.filter((i) => i.debtAmount > 0);
+  const carriedImportIdSet = new Set(carriedUnpaidImports.map((i) => i.id));
+  const carriedImportCodeSet = new Set(carriedUnpaidImports.map((i) => i.receiptCode).filter(Boolean));
+
+  const isReceiptLinkedToOpenSale = (rv: CashReceiptVoucher): boolean => {
+    if (rv.linkedSaleIds?.some((sid) => carriedSaleIdSet.has(sid))) return true;
+    if (rv.linkedSaleInvoiceCode && carriedSaleCodeSet.has(rv.linkedSaleInvoiceCode)) return true;
+    return Boolean(
+      rv.settledAllocations?.some(
+        (a) =>
+          (Number(a.allocatedAmount) || 0) > 0 &&
+          ((a.recordId && carriedSaleIdSet.has(a.recordId)) ||
+            (!a.recordId && a.code && carriedSaleCodeSet.has(a.code)))
+      )
+    );
+  };
+  const isPaymentLinkedToOpenImport = (pv: CashPaymentVoucher): boolean => {
+    if (pv.linkedImportIds?.some((iid) => carriedImportIdSet.has(iid))) return true;
+    if (pv.linkedImportReceiptCode && carriedImportCodeSet.has(pv.linkedImportReceiptCode)) return true;
+    return Boolean(
+      pv.settledAllocations?.some(
+        (a) =>
+          (Number(a.allocatedAmount) || 0) > 0 &&
+          ((a.recordId && carriedImportIdSet.has(a.recordId)) ||
+            (!a.recordId && a.code && carriedImportCodeSet.has(a.code)))
+      )
+    );
+  };
+
   const settledSalesToDelete = sales.filter(
     (s) => extractRecordYear(s.createdAt, fiscalYear) <= fiscalYear && s.debtAmount <= 0
   );
@@ -3311,10 +3559,10 @@ export function previewFiscalYearCloseAndCleanup(params: {
     (i) => extractRecordYear(i.createdAt, fiscalYear) <= fiscalYear && i.debtAmount <= 0
   );
   const receiptVouchersToDelete = receiptVouchers.filter(
-    (rv) => extractRecordYear(rv.createdAt, fiscalYear) <= fiscalYear
+    (rv) => extractRecordYear(rv.createdAt, fiscalYear) <= fiscalYear && !isReceiptLinkedToOpenSale(rv)
   );
   const paymentVouchersToDelete = paymentVouchers.filter(
-    (pv) => extractRecordYear(pv.createdAt, fiscalYear) <= fiscalYear
+    (pv) => extractRecordYear(pv.createdAt, fiscalYear) <= fiscalYear && !isPaymentLinkedToOpenImport(pv)
   );
   const savedVouchersToDelete = savedVouchers.filter(
     (sv) => extractRecordYear(sv.createdAt, fiscalYear) <= fiscalYear
@@ -3345,11 +3593,9 @@ export function previewFiscalYearCloseAndCleanup(params: {
     0
   );
 
-  const carriedUnpaidSales = sales.filter((s) => s.debtAmount > 0);
   const carriedCustomerDebtCount = carriedUnpaidSales.length;
   const carriedCustomerDebtTotal = carriedUnpaidSales.reduce((sum, s) => sum + s.debtAmount, 0);
 
-  const carriedUnpaidImports = imports.filter((i) => i.debtAmount > 0);
   const carriedSupplierDebtCount = carriedUnpaidImports.length;
   const carriedSupplierDebtTotal = carriedUnpaidImports.reduce((sum, i) => sum + i.debtAmount, 0);
 
@@ -3434,11 +3680,13 @@ export function executeFiscalYearCloseAndCleanup(params: {
       return i;
     });
 
+  const deletedReceiptIds = new Set(preview.receiptVouchersToDelete.map((rv) => rv.id));
+  const deletedPaymentIds = new Set(preview.paymentVouchersToDelete.map((pv) => pv.id));
   const remainingReceiptVouchers = (params.receiptVouchers || []).filter(
-    (rv) => extractRecordYear(rv.createdAt, fiscalYear) > fiscalYear
+    (rv) => !deletedReceiptIds.has(rv.id)
   );
   const remainingPaymentVouchers = (params.paymentVouchers || []).filter(
-    (pv) => extractRecordYear(pv.createdAt, fiscalYear) > fiscalYear
+    (pv) => !deletedPaymentIds.has(pv.id)
   );
   const remainingSavedVouchers = (params.savedVouchers || []).filter(
     (sv) => extractRecordYear(sv.createdAt, fiscalYear) > fiscalYear
@@ -3707,11 +3955,19 @@ export function computeTaxAuthorityFinancialStatement(params: {
   const unpaidImportsInPeriod = filteredImports.filter((i) => i.debtAmount > 0);
 
   const operatingPaymentVouchers = baseReport.filteredPaymentVouchers.filter(
-    (pv) => !pv.isDebtSettlement && pv.countsTowardOperatingExpense !== false
+    (pv) =>
+      !pv.isDebtSettlement &&
+      !isDirectImportPaymentVoucher(pv) &&
+      !isContraOffsetVoucher(pv) &&
+      pv.countsTowardOperatingExpense !== false
   );
 
   const otherIncomeReceiptVouchers = baseReport.filteredReceiptVouchers.filter(
-    (rv) => !rv.isDebtSettlement && rv.countsTowardOtherIncome !== false
+    (rv) =>
+      !rv.isDebtSettlement &&
+      !isDirectSaleReceiptVoucher(rv) &&
+      !isContraOffsetVoucher(rv) &&
+      rv.countsTowardOtherIncome !== false
   );
 
   const saleCogsBreakdown: SaleCogsAuditRow[] = filteredSales.map((sale) => {
@@ -6247,10 +6503,18 @@ export function computeProvisionalCashbookProfitSummary(params: {
     });
 
   const otherIncomeVouchers = base.filteredReceiptVouchers.filter(
-    (rv) => !rv.isDebtSettlement && rv.countsTowardOtherIncome !== false
+    (rv) =>
+      !rv.isDebtSettlement &&
+      !isDirectSaleReceiptVoucher(rv) &&
+      !isContraOffsetVoucher(rv) &&
+      rv.countsTowardOtherIncome !== false
   );
   const otherExpenseVouchers = base.filteredPaymentVouchers.filter(
-    (pv) => !pv.isDebtSettlement && pv.countsTowardOperatingExpense !== false
+    (pv) =>
+      !pv.isDebtSettlement &&
+      !isDirectImportPaymentVoucher(pv) &&
+      !isContraOffsetVoucher(pv) &&
+      pv.countsTowardOperatingExpense !== false
   );
 
   const totalProfitInflow = base.grossSalesRevenueBeforeDiscount + base.otherIncome;
@@ -6283,6 +6547,25 @@ export function computeProvisionalCashbookProfitSummary(params: {
 /* ------------------------------------------------------------------------------------------------
  * Sell / export goods back to a Supplier with direct (non-cash) offset of the supplier payable debt
  * ---------------------------------------------------------------------------------------------- */
+
+/* ------------------------------------------------------------------------------------------------
+ * Direct Order-Time Receipt / Payment Vouchers (PT- / PC- for upfront full or partial payment)
+ * ---------------------------------------------------------------------------------------------- */
+
+export const DIRECT_SALE_RECEIPT_GROUP = 'Thu tiền bán hàng trực tiếp';
+export const DIRECT_IMPORT_PAYMENT_GROUP = 'Chi thanh toán nhập hàng trực tiếp';
+
+export function isDirectSaleReceiptVoucher(
+  v: { isDirectSaleReceipt?: boolean } | null | undefined
+): boolean {
+  return Boolean(v?.isDirectSaleReceipt);
+}
+
+export function isDirectImportPaymentVoucher(
+  v: { isDirectImportPayment?: boolean } | null | undefined
+): boolean {
+  return Boolean(v?.isDirectImportPayment);
+}
 
 /** True for non-cash contra vouchers (cấn trừ công nợ NCC) that must never count as real cash. */
 export function isContraOffsetVoucher(
@@ -6694,11 +6977,801 @@ export function computeSupplierDetailLedgers(params: {
       distinctReceiptCount,
       unpaidReceiptCount,
       suppliedProductsCount: productPriceHistory.length,
-      lastImportDate: matchedImports[0] ? (matchedImports[0].createdAt || '').slice(0, 10) : '',
+      lastImportDate: matchedImports[0] ? toVietnamDateStr(matchedImports[0].createdAt) : '',
       productPriceHistory,
       importReceipts: matchedImports,
       paymentHistory: matchedPayments,
       contraSales: matchedContraSales,
     };
   });
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Direct Order-Time PT- / PC- Builders, Bidirectional Sync & Idempotent Cloud Backfill
+ * ---------------------------------------------------------------------------------------------- */
+
+export function sanitizeRtdbSafeIdToken(raw: string): string {
+  const ascii = stripVietnameseToUppercaseAscii(raw || '')
+    .replace(/[^A-Z0-9_-]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  return (ascii || 'REC').slice(0, 96);
+}
+
+export function findDirectReceiptVouchersForSale(
+  sale: Pick<SaleTransaction, 'id' | 'invoiceCode' | 'invoiceGroupId'>,
+  receiptVouchers: CashReceiptVoucher[]
+): CashReceiptVoucher[] {
+  return (receiptVouchers || []).filter((rv) => {
+    if (!isDirectSaleReceiptVoucher(rv)) return false;
+    if (rv.linkedSaleIds && rv.linkedSaleIds.length > 0) {
+      return rv.linkedSaleIds.includes(sale.id);
+    }
+    if (rv.settledAllocations && rv.settledAllocations.length > 0) {
+      return rv.settledAllocations.some((a) =>
+        a.recordId ? a.recordId === sale.id : Boolean(sale.invoiceCode) && a.code === sale.invoiceCode
+      );
+    }
+    if (sale.invoiceGroupId && rv.linkedSaleGroupId) {
+      return rv.linkedSaleGroupId === sale.invoiceGroupId;
+    }
+    return Boolean(sale.invoiceCode && rv.linkedSaleInvoiceCode === sale.invoiceCode);
+  });
+}
+
+export function findDirectPaymentVouchersForImport(
+  imp: Pick<ImportTransaction, 'id' | 'receiptCode' | 'importGroupId'>,
+  paymentVouchers: CashPaymentVoucher[]
+): CashPaymentVoucher[] {
+  return (paymentVouchers || []).filter((pv) => {
+    if (!isDirectImportPaymentVoucher(pv)) return false;
+    if (pv.linkedImportIds && pv.linkedImportIds.length > 0) {
+      return pv.linkedImportIds.includes(imp.id);
+    }
+    if (pv.settledAllocations && pv.settledAllocations.length > 0) {
+      return pv.settledAllocations.some((a) =>
+        a.recordId ? a.recordId === imp.id : Boolean(imp.receiptCode) && a.code === imp.receiptCode
+      );
+    }
+    if (imp.importGroupId && pv.linkedImportGroupId) {
+      return pv.linkedImportGroupId === imp.importGroupId;
+    }
+    return Boolean(imp.receiptCode && pv.linkedImportReceiptCode === imp.receiptCode);
+  });
+}
+
+export function findAllVouchersForSale(
+  sale: Pick<SaleTransaction, 'id' | 'invoiceCode' | 'invoiceGroupId'>,
+  receiptVouchers: CashReceiptVoucher[]
+): CashReceiptVoucher[] {
+  const direct = findDirectReceiptVouchersForSale(sale, receiptVouchers);
+  const debt = findLinkedReceiptVouchersForSale(sale, receiptVouchers, { includeContraOffset: true });
+  const seen = new Set<string>();
+  const out: CashReceiptVoucher[] = [];
+  for (const rv of [...direct, ...debt]) {
+    if (!seen.has(rv.id)) {
+      seen.add(rv.id);
+      out.push(rv);
+    }
+  }
+  return out;
+}
+
+export function findAllVouchersForImport(
+  imp: Pick<ImportTransaction, 'id' | 'receiptCode' | 'importGroupId'>,
+  paymentVouchers: CashPaymentVoucher[]
+): CashPaymentVoucher[] {
+  const direct = findDirectPaymentVouchersForImport(imp, paymentVouchers);
+  const debt = findLinkedPaymentVouchersForImport(imp, paymentVouchers);
+  const seen = new Set<string>();
+  const out: CashPaymentVoucher[] = [];
+  for (const pv of [...direct, ...debt]) {
+    if (!seen.has(pv.id)) {
+      seen.add(pv.id);
+      out.push(pv);
+    }
+  }
+  return out;
+}
+
+export function buildDirectSaleReceiptVoucher(params: {
+  salesLines: SaleTransaction[];
+  voucherId: string;
+  voucherCode: string;
+  paymentMethod?: string;
+  staffName?: string;
+  ownerId?: string;
+  nowIso?: string;
+  /** Optional explicit per-line upfront cash override (used by backfill when later debt settlements exist). */
+  lineCashById?: Map<string, number>;
+}): CashReceiptVoucher | null {
+  const { salesLines } = params;
+  if (!salesLines || salesLines.length === 0) return null;
+  const first = salesLines[0];
+  const allocations: FifoDebtAllocationItem[] = [];
+  let totalCash = 0;
+  let totalOrderAmount = 0;
+  let totalOrderRemainingAtSale = 0;
+
+  for (const s of salesLines) {
+    const lineTotal = Math.max(0, Math.round(Number(s.totalAmount) || 0));
+    const defaultLineCash = Math.max(
+      0,
+      Math.round((Number(s.paidAmount) || 0) - (Number(s.supplierOffsetAmount) || 0))
+    );
+    const lineCash = params.lineCashById
+      ? Math.max(0, Math.round(params.lineCashById.get(s.id) || 0))
+      : defaultLineCash;
+    const remAtSale = Math.max(
+      0,
+      lineTotal - lineCash - Math.max(0, Math.round(Number(s.supplierOffsetAmount) || 0))
+    );
+    totalOrderAmount += lineTotal;
+    totalOrderRemainingAtSale += remAtSale;
+    totalCash += lineCash;
+    if (lineCash > 0) {
+      allocations.push({
+        recordId: s.id,
+        code: s.invoiceCode,
+        date: toVietnamDateStr(s.createdAt) || (s.createdAt || '').slice(0, 10),
+        dueDate: s.dueDate || '',
+        productName: s.productName,
+        previousDebt: lineTotal,
+        allocatedAmount: lineCash,
+        remainingDebt: params.lineCashById ? remAtSale : Math.max(0, Math.round(Number(s.debtAmount) || 0)),
+      });
+    }
+  }
+
+  if (totalCash <= 0) return null;
+
+  const itemDesc =
+    salesLines.length === 1
+      ? `${first.quantity} ${first.unit} ${first.productName}`
+      : `${salesLines.length} mặt hàng`;
+  const note =
+    totalOrderRemainingAtSale > 0
+      ? `Thu tiền khách trả trước 1 phần (${formatVND(totalCash)} / ${formatVND(
+          totalOrderAmount
+        )} · ghi nợ ${formatVND(totalOrderRemainingAtSale)}) đơn hàng ${first.invoiceCode} (${itemDesc})`
+      : `Thu đủ 100% tiền bán hàng đơn ${first.invoiceCode} (${itemDesc})`;
+
+  const createdAt = first.createdAt || params.nowIso || new Date().toISOString();
+  const updatedAt = params.nowIso || first.updatedAt || createdAt;
+  const resolvedMethod = (params.paymentMethod || first.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
+
+  return {
+    id: params.voucherId,
+    voucherCode: params.voucherCode,
+    groupName: DIRECT_SALE_RECEIPT_GROUP,
+    warehouseName: first.warehouseName || 'Tâm An Mỹ Ngãi',
+    partnerId: first.customerId,
+    partnerName: first.customerName,
+    partnerPhone: first.customerPhone || '',
+    amount: totalCash,
+    paymentMethod: resolvedMethod,
+    isDebtSettlement: false,
+    isDirectSaleReceipt: true,
+    linkedSaleInvoiceCode: first.invoiceCode,
+    linkedSaleGroupId: first.invoiceGroupId,
+    linkedSaleIds: salesLines.map((s) => s.id),
+    settledAllocations: allocations,
+    totalPreviousDebt: totalOrderAmount,
+    totalRemainingDebt: totalOrderRemainingAtSale,
+    countsTowardOtherIncome: false,
+    note,
+    staffName: params.staffName || first.staffName || 'Hệ thống',
+    ownerId: params.ownerId || first.ownerId || '',
+    createdAt,
+    updatedAt,
+  };
+}
+
+export function buildDirectImportPaymentVoucher(params: {
+  importLines: ImportTransaction[];
+  voucherId: string;
+  voucherCode: string;
+  paymentMethod?: string;
+  staffName?: string;
+  ownerId?: string;
+  nowIso?: string;
+  /** Optional explicit per-line upfront cash override (used by backfill when later debt settlements exist). */
+  lineCashById?: Map<string, number>;
+}): CashPaymentVoucher | null {
+  const { importLines } = params;
+  if (!importLines || importLines.length === 0) return null;
+  const first = importLines[0];
+  const allocations: FifoDebtAllocationItem[] = [];
+  let totalCash = 0;
+  let totalImportCost = 0;
+  let totalImportRemainingAtOrder = 0;
+
+  for (const imp of importLines) {
+    const lineTotal = Math.max(0, Math.round(Number(imp.totalCost) || 0));
+    const defaultLineCash = Math.max(0, Math.round(Number(imp.paidAmount) || 0));
+    const lineCash = params.lineCashById
+      ? Math.max(0, Math.round(params.lineCashById.get(imp.id) || 0))
+      : defaultLineCash;
+    const remAtImport = Math.max(0, lineTotal - lineCash);
+    totalImportCost += lineTotal;
+    totalImportRemainingAtOrder += remAtImport;
+    totalCash += lineCash;
+    if (lineCash > 0) {
+      allocations.push({
+        recordId: imp.id,
+        code: imp.receiptCode,
+        date: toVietnamDateStr(imp.createdAt) || (imp.createdAt || '').slice(0, 10),
+        dueDate: imp.dueDate || '',
+        productName: imp.productName,
+        previousDebt: lineTotal,
+        allocatedAmount: lineCash,
+        remainingDebt: params.lineCashById ? remAtImport : Math.max(0, Math.round(Number(imp.debtAmount) || 0)),
+      });
+    }
+  }
+
+  if (totalCash <= 0) return null;
+
+  const itemDesc =
+    importLines.length === 1
+      ? `${first.quantity} ${first.unit} ${first.productName}`
+      : `${importLines.length} mặt hàng`;
+  const note =
+    totalImportRemainingAtOrder > 0
+      ? `Chi trả trước 1 phần tiền hàng cho NCC (${formatVND(totalCash)} / ${formatVND(
+          totalImportCost
+        )} · còn nợ NCC ${formatVND(totalImportRemainingAtOrder)}) phiếu nhập ${first.receiptCode} (${itemDesc})`
+      : `Chi thanh toán đủ 100% tiền nhập hàng phiếu ${first.receiptCode} (${itemDesc})`;
+
+  const createdAt = first.createdAt || params.nowIso || new Date().toISOString();
+  const updatedAt = params.nowIso || first.updatedAt || createdAt;
+  const resolvedMethod = (params.paymentMethod || first.paymentMethod || 'Tiền mặt').trim() || 'Tiền mặt';
+
+  return {
+    id: params.voucherId,
+    voucherCode: params.voucherCode,
+    groupName: DIRECT_IMPORT_PAYMENT_GROUP,
+    warehouseName: first.warehouseName || 'Tâm An Mỹ Ngãi',
+    partnerName: first.supplierName,
+    partnerPhone: first.supplierPhone || '',
+    amount: totalCash,
+    paymentMethod: resolvedMethod,
+    isDebtSettlement: false,
+    isDirectImportPayment: true,
+    linkedImportReceiptCode: first.receiptCode,
+    linkedImportGroupId: first.importGroupId,
+    linkedImportIds: importLines.map((i) => i.id),
+    settledAllocations: allocations,
+    totalPreviousDebt: totalImportCost,
+    totalRemainingDebt: totalImportRemainingAtOrder,
+    countsTowardOperatingExpense: false,
+    note,
+    staffName: params.staffName || first.staffName || 'Hệ thống',
+    ownerId: params.ownerId || first.ownerId || '',
+    createdAt,
+    updatedAt,
+  };
+}
+
+/**
+ * Bidirectional sync when an `isDirectSaleReceipt` PT- voucher is edited (`newAmount >= 0`)
+ * or deleted (`newAmount = 0`) from Tab Phiếu Thu: updates `paidAmount`, `debtAmount`, `status`
+ * on the linked `HD-...` lines while preserving any subsequent debt settlements & contra offsets.
+ */
+export function syncSalesOnDirectReceiptVoucherMutation(params: {
+  sales: SaleTransaction[];
+  voucher: CashReceiptVoucher;
+  allReceiptVouchers: CashReceiptVoucher[];
+  newAmount: number;
+  paymentMethod?: string;
+  nowIso: string;
+}): {
+  updatedSales: SaleTransaction[];
+  changedSaleIds: string[];
+  effectiveAmount: number;
+  updatedAllocations: FifoDebtAllocationItem[];
+  totalOrderAmount: number;
+  totalRemainingDebt: number;
+} {
+  const { sales, voucher, allReceiptVouchers, nowIso } = params;
+  const settledLaterById = new Map<string, number>();
+  for (const rv of allReceiptVouchers || []) {
+    if (rv.id === voucher.id || !rv.isDebtSettlement || !rv.settledAllocations?.length) continue;
+    for (const a of rv.settledAllocations) {
+      const amt = Math.max(0, Math.round(Number(a.allocatedAmount) || 0));
+      if (amt > 0 && a.recordId) {
+        settledLaterById.set(a.recordId, (settledLaterById.get(a.recordId) || 0) + amt);
+      }
+    }
+  }
+
+  const isLinkedSale = (s: SaleTransaction): boolean => {
+    if (voucher.linkedSaleIds && voucher.linkedSaleIds.length > 0) {
+      return voucher.linkedSaleIds.includes(s.id);
+    }
+    if (voucher.settledAllocations && voucher.settledAllocations.length > 0) {
+      return voucher.settledAllocations.some((a) =>
+        a.recordId ? a.recordId === s.id : Boolean(s.invoiceCode) && a.code === s.invoiceCode
+      );
+    }
+    if (voucher.linkedSaleGroupId && s.invoiceGroupId) {
+      return voucher.linkedSaleGroupId === s.invoiceGroupId;
+    }
+    return Boolean(voucher.linkedSaleInvoiceCode && s.invoiceCode === voucher.linkedSaleInvoiceCode);
+  };
+
+  const linkedSales = sales.filter(isLinkedSale);
+  const maxDirectTotal = linkedSales.reduce((sum, s) => {
+    const total = Math.max(0, Math.round(Number(s.totalAmount) || 0));
+    const locked = Math.min(
+      total,
+      (settledLaterById.get(s.id) || 0) + Math.max(0, Math.round(Number(s.supplierOffsetAmount) || 0))
+    );
+    return sum + Math.max(0, total - locked);
+  }, 0);
+
+  const effectiveAmount = Math.min(maxDirectTotal, Math.max(0, Math.round(Number(params.newAmount) || 0)));
+  let remainingDirect = effectiveAmount;
+  const changedSaleIds: string[] = [];
+  const updatedAllocations: FifoDebtAllocationItem[] = [];
+  let totalOrderAmount = 0;
+  let totalRemainingDebt = 0;
+
+  const updatedSales = sales.map((s) => {
+    if (!isLinkedSale(s)) return s;
+    const total = Math.max(0, Math.round(Number(s.totalAmount) || 0));
+    const locked = Math.min(
+      total,
+      (settledLaterById.get(s.id) || 0) + Math.max(0, Math.round(Number(s.supplierOffsetAmount) || 0))
+    );
+    const maxDirectLine = Math.max(0, total - locked);
+    const allocDirect = Math.min(maxDirectLine, remainingDirect);
+    remainingDirect -= allocDirect;
+    const nextPaid = locked + allocDirect;
+    const nextDebt = Math.max(0, total - nextPaid);
+    const nextStatus: PaymentStatus =
+      nextDebt === 0 ? 'paid' : nextPaid > 0 ? 'partial' : 'unpaid';
+
+    totalOrderAmount += total;
+    totalRemainingDebt += nextDebt;
+    if (allocDirect > 0) {
+      updatedAllocations.push({
+        recordId: s.id,
+        code: s.invoiceCode,
+        date: toVietnamDateStr(s.createdAt) || (s.createdAt || '').slice(0, 10),
+        dueDate: s.dueDate || '',
+        productName: s.productName,
+        previousDebt: total,
+        allocatedAmount: allocDirect,
+        remainingDebt: nextDebt,
+      });
+    }
+    if (
+      nextPaid !== s.paidAmount ||
+      nextDebt !== s.debtAmount ||
+      nextStatus !== s.status ||
+      (params.paymentMethod && params.paymentMethod !== s.paymentMethod)
+    ) {
+      changedSaleIds.push(s.id);
+      return {
+        ...s,
+        paidAmount: nextPaid,
+        debtAmount: nextDebt,
+        status: nextStatus,
+        ...(params.paymentMethod ? { paymentMethod: params.paymentMethod } : {}),
+        updatedAt: nowIso,
+      };
+    }
+    return s;
+  });
+
+  return {
+    updatedSales,
+    changedSaleIds,
+    effectiveAmount,
+    updatedAllocations,
+    totalOrderAmount,
+    totalRemainingDebt,
+  };
+}
+
+/**
+ * Bidirectional sync when an `isDirectImportPayment` PC- voucher is edited (`newAmount >= 0`)
+ * or deleted (`newAmount = 0`) from Tab Phiếu Chi: updates `paidAmount`, `debtAmount`, `status`
+ * on the linked `PN-...` lines while preserving any subsequent debt settlements.
+ */
+export function syncImportsOnDirectPaymentVoucherMutation(params: {
+  imports: ImportTransaction[];
+  voucher: CashPaymentVoucher;
+  allPaymentVouchers: CashPaymentVoucher[];
+  newAmount: number;
+  paymentMethod?: string;
+  nowIso: string;
+}): {
+  updatedImports: ImportTransaction[];
+  changedImportIds: string[];
+  effectiveAmount: number;
+  updatedAllocations: FifoDebtAllocationItem[];
+  totalImportCost: number;
+  totalRemainingDebt: number;
+} {
+  const { imports, voucher, allPaymentVouchers, nowIso } = params;
+  const settledLaterById = new Map<string, number>();
+  for (const pv of allPaymentVouchers || []) {
+    if (pv.id === voucher.id || !pv.isDebtSettlement || !pv.settledAllocations?.length) continue;
+    for (const a of pv.settledAllocations) {
+      const amt = Math.max(0, Math.round(Number(a.allocatedAmount) || 0));
+      if (amt > 0 && a.recordId) {
+        settledLaterById.set(a.recordId, (settledLaterById.get(a.recordId) || 0) + amt);
+      }
+    }
+  }
+
+  const isLinkedImport = (imp: ImportTransaction): boolean => {
+    if (voucher.linkedImportIds && voucher.linkedImportIds.length > 0) {
+      return voucher.linkedImportIds.includes(imp.id);
+    }
+    if (voucher.settledAllocations && voucher.settledAllocations.length > 0) {
+      return voucher.settledAllocations.some((a) =>
+        a.recordId ? a.recordId === imp.id : Boolean(imp.receiptCode) && a.code === imp.receiptCode
+      );
+    }
+    if (voucher.linkedImportGroupId && imp.importGroupId) {
+      return voucher.linkedImportGroupId === imp.importGroupId;
+    }
+    return Boolean(voucher.linkedImportReceiptCode && imp.receiptCode === voucher.linkedImportReceiptCode);
+  };
+
+  const linkedImports = imports.filter(isLinkedImport);
+  const maxDirectTotal = linkedImports.reduce((sum, imp) => {
+    const total = Math.max(0, Math.round(Number(imp.totalCost) || 0));
+    const locked = Math.min(total, settledLaterById.get(imp.id) || 0);
+    return sum + Math.max(0, total - locked);
+  }, 0);
+
+  const effectiveAmount = Math.min(maxDirectTotal, Math.max(0, Math.round(Number(params.newAmount) || 0)));
+  let remainingDirect = effectiveAmount;
+  const changedImportIds: string[] = [];
+  const updatedAllocations: FifoDebtAllocationItem[] = [];
+  let totalImportCost = 0;
+  let totalRemainingDebt = 0;
+
+  const updatedImports = imports.map((imp) => {
+    if (!isLinkedImport(imp)) return imp;
+    const total = Math.max(0, Math.round(Number(imp.totalCost) || 0));
+    const locked = Math.min(total, settledLaterById.get(imp.id) || 0);
+    const maxDirectLine = Math.max(0, total - locked);
+    const allocDirect = Math.min(maxDirectLine, remainingDirect);
+    remainingDirect -= allocDirect;
+    const nextPaid = locked + allocDirect;
+    const nextDebt = Math.max(0, total - nextPaid);
+    const nextStatus: PaymentStatus =
+      nextDebt === 0 ? 'paid' : nextPaid > 0 ? 'partial' : 'unpaid';
+
+    totalImportCost += total;
+    totalRemainingDebt += nextDebt;
+    if (allocDirect > 0) {
+      updatedAllocations.push({
+        recordId: imp.id,
+        code: imp.receiptCode,
+        date: toVietnamDateStr(imp.createdAt) || (imp.createdAt || '').slice(0, 10),
+        dueDate: imp.dueDate || '',
+        productName: imp.productName,
+        previousDebt: total,
+        allocatedAmount: allocDirect,
+        remainingDebt: nextDebt,
+      });
+    }
+    if (
+      nextPaid !== imp.paidAmount ||
+      nextDebt !== imp.debtAmount ||
+      nextStatus !== imp.status ||
+      (params.paymentMethod && params.paymentMethod !== imp.paymentMethod)
+    ) {
+      changedImportIds.push(imp.id);
+      return {
+        ...imp,
+        paidAmount: nextPaid,
+        debtAmount: nextDebt,
+        status: nextStatus,
+        ...(params.paymentMethod ? { paymentMethod: params.paymentMethod } : {}),
+        updatedAt: nowIso,
+      };
+    }
+    return imp;
+  });
+
+  return {
+    updatedImports,
+    changedImportIds,
+    effectiveAmount,
+    updatedAllocations,
+    totalImportCost,
+    totalRemainingDebt,
+  };
+}
+
+/**
+ * Idempotently detects existing `HD-...` and `PN-...` records whose upfront `paidAmount`
+ * (`paidAmount - settledDebtLater - contraOffset`) is > 0 without a corresponding
+ * `isDirectSaleReceipt` / `isDirectImportPayment` voucher, and constructs deterministic
+ * backfill vouchers (`rv_init_*` / `pv_init_*`) dated at the original invoice timestamp.
+ */
+export function buildMissingDirectVouchersForExistingRecords(params: {
+  sales: SaleTransaction[];
+  imports: ImportTransaction[];
+  receiptVouchers: CashReceiptVoucher[];
+  paymentVouchers: CashPaymentVoucher[];
+  deletedRecordIds?: Set<string>;
+}): {
+  createdReceipts: CashReceiptVoucher[];
+  createdPayments: CashPaymentVoucher[];
+} {
+  const {
+    sales = [],
+    imports = [],
+    receiptVouchers = [],
+    paymentVouchers = [],
+    deletedRecordIds,
+  } = params;
+
+  const existingReceiptIds = new Set(receiptVouchers.map((r) => r.id));
+  const existingPaymentIds = new Set(paymentVouchers.map((p) => p.id));
+
+  // 1. Map debt settlements & contra allocations per sale
+  const settledSaleById = new Map<string, number>();
+  const settledSaleByCode = new Map<string, number>();
+  const contraSaleById = new Map<string, number>();
+  const unallocDebtRvs: CashReceiptVoucher[] = [];
+  for (const rv of receiptVouchers) {
+    if (!rv.isDebtSettlement) continue;
+    const isContra = isContraOffsetVoucher(rv);
+    let allocTotal = 0;
+    for (const a of rv.settledAllocations || []) {
+      const amt = Math.max(0, Math.round(Number(a.allocatedAmount) || 0));
+      if (amt <= 0) continue;
+      allocTotal += amt;
+      if (a.recordId) {
+        settledSaleById.set(a.recordId, (settledSaleById.get(a.recordId) || 0) + amt);
+        if (isContra) {
+          contraSaleById.set(a.recordId, (contraSaleById.get(a.recordId) || 0) + amt);
+        }
+      } else if (a.code) {
+        settledSaleByCode.set(a.code, (settledSaleByCode.get(a.code) || 0) + amt);
+      }
+    }
+    if ((Number(rv.amount) || 0) > allocTotal) {
+      unallocDebtRvs.push(rv);
+    }
+  }
+  if (unallocDebtRvs.length > 0 && sales.length > 0) {
+    const chronoSales = [...sales].sort((a, b) =>
+      (a.createdAt || '').localeCompare(b.createdAt || '')
+    );
+    for (const rv of unallocDebtRvs) {
+      const allocTotal = (rv.settledAllocations || []).reduce(
+        (s, a) => s + Math.max(0, Math.round(Number(a.allocatedAmount) || 0)),
+        0
+      );
+      let rem = Math.max(0, Math.round((Number(rv.amount) || 0) - allocTotal));
+      if (rem <= 0) continue;
+      const rvName = normalizeVietnameseSearch(rv.partnerName || '');
+      const rvPhone = (rv.partnerPhone || '').trim();
+      const pool = chronoSales.filter(
+        (s) =>
+          (!rv.warehouseName || areWarehouseNamesEquivalent(rv.warehouseName, s.warehouseName)) &&
+          ((Boolean(rv.partnerId) && s.customerId === rv.partnerId) ||
+            (Boolean(rvPhone) && (s.customerPhone || '').trim() === rvPhone) ||
+            (Boolean(rvName) && normalizeVietnameseSearch(s.customerName || '') === rvName))
+      );
+      const isContra = isContraOffsetVoucher(rv);
+      for (const s of pool) {
+        if (rem <= 0) break;
+        const cap = Math.max(0, Math.round((Number(s.paidAmount) || 0) - (settledSaleById.get(s.id) || 0)));
+        if (cap <= 0) continue;
+        const take = Math.min(rem, cap);
+        settledSaleById.set(s.id, (settledSaleById.get(s.id) || 0) + take);
+        if (isContra) {
+          contraSaleById.set(s.id, (contraSaleById.get(s.id) || 0) + take);
+        }
+        rem -= take;
+      }
+    }
+  }
+
+  // Group sales by logical invoice
+  const saleGroups = new Map<string, SaleTransaction[]>();
+  for (const s of sales) {
+    if (!s || !s.id) continue;
+    const gKey = s.invoiceGroupId?.trim()
+      ? `grp_${s.invoiceGroupId.trim()}`
+      : s.invoiceCode?.trim()
+      ? `code_${s.invoiceCode.trim()}_${normalizeWarehouseKey(s.warehouseName)}_${toVietnamDateStr(s.createdAt)}`
+      : `id_${s.id}`;
+    const list = saleGroups.get(gKey) || [];
+    list.push(s);
+    saleGroups.set(gKey, list);
+  }
+
+  const orderedSaleGroups = Array.from(saleGroups.entries()).sort((a, b) =>
+    (a[1][0]?.createdAt || '').localeCompare(b[1][0]?.createdAt || '')
+  );
+
+  const runningReceiptCodes = receiptVouchers.map((r) => r.voucherCode);
+  const createdReceipts: CashReceiptVoucher[] = [];
+  const usedCodeFallbackSale = new Map(settledSaleByCode);
+
+  for (const [gKey, lines] of orderedSaleGroups) {
+    const detId = `rv_init_${sanitizeRtdbSafeIdToken(gKey)}`;
+    if (existingReceiptIds.has(detId) || deletedRecordIds?.has(detId)) continue;
+    if (lines.some((s) => findDirectReceiptVouchersForSale(s, receiptVouchers).length > 0)) {
+      continue;
+    }
+
+    const lineCashById = new Map<string, number>();
+    let sumUnvouchered = 0;
+    for (const s of lines) {
+      let settled = settledSaleById.get(s.id) || 0;
+      if (settled === 0 && usedCodeFallbackSale.has(s.invoiceCode)) {
+        const avail = usedCodeFallbackSale.get(s.invoiceCode) || 0;
+        const used = Math.min(avail, Math.max(0, Math.round(Number(s.paidAmount) || 0)));
+        settled = used;
+        usedCodeFallbackSale.set(s.invoiceCode, avail - used);
+      }
+      const unvoucheredContra = Math.max(
+        0,
+        Math.round(Number(s.supplierOffsetAmount) || 0) - (contraSaleById.get(s.id) || 0)
+      );
+      const upfrontCash = Math.max(
+        0,
+        Math.round(Number(s.paidAmount) || 0) - settled - unvoucheredContra
+      );
+      lineCashById.set(s.id, upfrontCash);
+      sumUnvouchered += upfrontCash;
+    }
+    if (sumUnvouchered <= 0) continue;
+
+    const first = lines[0];
+    const parsedMs = Date.parse(first.createdAt || '');
+    const refDate = Number.isFinite(parsedMs) ? new Date(parsedMs) : new Date();
+    const nextCode = generateSequentialVoucherCode('PT', runningReceiptCodes, refDate);
+    runningReceiptCodes.push(nextCode);
+
+    const built = buildDirectSaleReceiptVoucher({
+      salesLines: lines,
+      voucherId: detId,
+      voucherCode: nextCode,
+      paymentMethod: first.paymentMethod || 'Tiền mặt',
+      staffName: first.staffName,
+      ownerId: first.ownerId,
+      nowIso: first.updatedAt || first.createdAt,
+      lineCashById,
+    });
+    if (built) {
+      createdReceipts.push(built);
+      existingReceiptIds.add(detId);
+    }
+  }
+
+  // 2. Map debt settlements per import
+  const settledImportById = new Map<string, number>();
+  const settledImportByCode = new Map<string, number>();
+  const unallocDebtPvs: CashPaymentVoucher[] = [];
+  for (const pv of paymentVouchers) {
+    if (!pv.isDebtSettlement) continue;
+    let allocTotal = 0;
+    for (const a of pv.settledAllocations || []) {
+      const amt = Math.max(0, Math.round(Number(a.allocatedAmount) || 0));
+      if (amt <= 0) continue;
+      allocTotal += amt;
+      if (a.recordId) {
+        settledImportById.set(a.recordId, (settledImportById.get(a.recordId) || 0) + amt);
+      } else if (a.code) {
+        settledImportByCode.set(a.code, (settledImportByCode.get(a.code) || 0) + amt);
+      }
+    }
+    if ((Number(pv.amount) || 0) > allocTotal) {
+      unallocDebtPvs.push(pv);
+    }
+  }
+  if (unallocDebtPvs.length > 0 && imports.length > 0) {
+    const chronoImports = [...imports].sort((a, b) =>
+      (a.createdAt || '').localeCompare(b.createdAt || '')
+    );
+    for (const pv of unallocDebtPvs) {
+      const allocTotal = (pv.settledAllocations || []).reduce(
+        (s, a) => s + Math.max(0, Math.round(Number(a.allocatedAmount) || 0)),
+        0
+      );
+      let rem = Math.max(0, Math.round((Number(pv.amount) || 0) - allocTotal));
+      if (rem <= 0) continue;
+      const pvName = normalizeVietnameseSearch(pv.partnerName || '');
+      const pvPhone = (pv.partnerPhone || '').trim();
+      const pool = chronoImports.filter(
+        (i) =>
+          (!pv.warehouseName || areWarehouseNamesEquivalent(pv.warehouseName, i.warehouseName)) &&
+          ((Boolean(pvPhone) && (i.supplierPhone || '').trim() === pvPhone) ||
+            (Boolean(pvName) && normalizeVietnameseSearch(i.supplierName || '') === pvName))
+      );
+      for (const i of pool) {
+        if (rem <= 0) break;
+        const cap = Math.max(
+          0,
+          Math.round((Number(i.paidAmount) || 0) - (settledImportById.get(i.id) || 0))
+        );
+        if (cap <= 0) continue;
+        const take = Math.min(rem, cap);
+        settledImportById.set(i.id, (settledImportById.get(i.id) || 0) + take);
+        rem -= take;
+      }
+    }
+  }
+
+  const importGroups = new Map<string, ImportTransaction[]>();
+  for (const imp of imports) {
+    if (!imp || !imp.id) continue;
+    const gKey = imp.importGroupId?.trim()
+      ? `grp_${imp.importGroupId.trim()}`
+      : imp.receiptCode?.trim()
+      ? `code_${imp.receiptCode.trim()}_${normalizeWarehouseKey(imp.warehouseName)}_${toVietnamDateStr(imp.createdAt)}`
+      : `id_${imp.id}`;
+    const list = importGroups.get(gKey) || [];
+    list.push(imp);
+    importGroups.set(gKey, list);
+  }
+
+  const orderedImportGroups = Array.from(importGroups.entries()).sort((a, b) =>
+    (a[1][0]?.createdAt || '').localeCompare(b[1][0]?.createdAt || '')
+  );
+
+  const runningPaymentCodes = paymentVouchers.map((p) => p.voucherCode);
+  const createdPayments: CashPaymentVoucher[] = [];
+  const usedCodeFallbackImp = new Map(settledImportByCode);
+
+  for (const [gKey, lines] of orderedImportGroups) {
+    const detId = `pv_init_${sanitizeRtdbSafeIdToken(gKey)}`;
+    if (existingPaymentIds.has(detId) || deletedRecordIds?.has(detId)) continue;
+    if (lines.some((i) => findDirectPaymentVouchersForImport(i, paymentVouchers).length > 0)) {
+      continue;
+    }
+
+    const lineCashById = new Map<string, number>();
+    let sumUnvouchered = 0;
+    for (const imp of lines) {
+      let settled = settledImportById.get(imp.id) || 0;
+      if (settled === 0 && usedCodeFallbackImp.has(imp.receiptCode)) {
+        const avail = usedCodeFallbackImp.get(imp.receiptCode) || 0;
+        const used = Math.min(avail, Math.max(0, Math.round(Number(imp.paidAmount) || 0)));
+        settled = used;
+        usedCodeFallbackImp.set(imp.receiptCode, avail - used);
+      }
+      const upfrontCash = Math.max(0, Math.round(Number(imp.paidAmount) || 0) - settled);
+      lineCashById.set(imp.id, upfrontCash);
+      sumUnvouchered += upfrontCash;
+    }
+    if (sumUnvouchered <= 0) continue;
+
+    const first = lines[0];
+    const parsedMs = Date.parse(first.createdAt || '');
+    const refDate = Number.isFinite(parsedMs) ? new Date(parsedMs) : new Date();
+    const nextCode = generateSequentialVoucherCode('PC', runningPaymentCodes, refDate);
+    runningPaymentCodes.push(nextCode);
+
+    const built = buildDirectImportPaymentVoucher({
+      importLines: lines,
+      voucherId: detId,
+      voucherCode: nextCode,
+      paymentMethod: first.paymentMethod || 'Tiền mặt',
+      staffName: first.staffName,
+      ownerId: first.ownerId,
+      nowIso: first.updatedAt || first.createdAt,
+      lineCashById,
+    });
+    if (built) {
+      createdPayments.push(built);
+      existingPaymentIds.add(detId);
+    }
+  }
+
+  return { createdReceipts, createdPayments };
 }

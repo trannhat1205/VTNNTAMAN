@@ -30,10 +30,14 @@ import {
 } from '../types';
 import {
   formatVND,
+  isContraOffsetVoucher,
+  isDirectImportPaymentVoucher,
+  isDirectSaleReceiptVoucher,
   normalizeVietnameseSearch,
   previewCustomerFifoDebtSettlement,
   previewSupplierFifoDebtSettlement,
   SearchableOptionItem,
+  toVietnamDateStr,
 } from '../utils/businessLogic';
 import {
   exportCustomerReceiptPDF,
@@ -424,6 +428,16 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
     }
   };
 
+  const effectiveReceiptGroups = useMemo(() => {
+    const set = new Set<string>(receiptGroups);
+    for (const rv of receiptVouchers) {
+      if (rv.groupName && rv.groupName.trim()) {
+        set.add(rv.groupName.trim());
+      }
+    }
+    return Array.from(set);
+  }, [receiptGroups, receiptVouchers]);
+
   const filteredVouchers = useMemo(() => {
     const q = normalizeVietnameseSearch(searchQuery);
     return receiptVouchers.filter((rv) => {
@@ -431,7 +445,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
       if (!q) return true;
       const allocCodes = (rv.settledAllocations || []).map((a) => a.code).join(' ');
       const haystack = normalizeVietnameseSearch(
-        `${rv.voucherCode} ${rv.groupName} ${rv.partnerName} ${rv.partnerPhone} ${rv.warehouseName} ${rv.note} ${allocCodes}`
+        `${rv.voucherCode} ${rv.groupName} ${rv.partnerName} ${rv.partnerPhone} ${rv.warehouseName} ${rv.note} ${allocCodes} ${rv.linkedSaleInvoiceCode || ''}`
       );
       return haystack.includes(q);
     });
@@ -440,6 +454,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
   const groupSummaries = useMemo(() => {
     const map = new Map<string, { count: number; total: number }>();
     for (const rv of filteredVouchers) {
+      if (isContraOffsetVoucher(rv)) continue;
       const curr = map.get(rv.groupName) || { count: 0, total: 0 };
       curr.count += 1;
       curr.total += rv.amount;
@@ -453,7 +468,10 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
   }, [filteredVouchers]);
 
   const totalReceiptAmount = useMemo(
-    () => filteredVouchers.reduce((sum, rv) => sum + rv.amount, 0),
+    () =>
+      filteredVouchers
+        .filter((rv) => !isContraOffsetVoucher(rv))
+        .reduce((sum, rv) => sum + rv.amount, 0),
     [filteredVouchers]
   );
 
@@ -1010,8 +1028,8 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                 onChange={(e) => setGroupFilter(e.target.value)}
                 className="px-2.5 py-1.5 text-xs bg-stone-50 border border-stone-200 rounded-lg text-stone-700"
               >
-                <option value="all">Tất cả nhóm phiếu thu ({receiptGroups.length})</option>
-                {receiptGroups.map((g) => (
+                <option value="all">Tất cả nhóm phiếu thu ({effectiveReceiptGroups.length})</option>
+                {effectiveReceiptGroups.map((g) => (
                   <option key={g} value={g}>
                     {g}
                   </option>
@@ -1087,7 +1105,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                           {rv.warehouseName}
                         </span>
                         <span className="text-[11px] text-stone-500 font-mono">
-                          Ngày: {(rv.createdAt || '').slice(0, 10)}
+                          Ngày: {toVietnamDateStr(rv.createdAt)}
                         </span>
                       </div>
                       <div className="flex flex-wrap items-center gap-2 mt-1.5">
@@ -1196,6 +1214,73 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                       </div>
                     )}
 
+                  {/* Direct upfront order receipt breakdown with clickable cross-link */}
+                  {isDirectSaleReceiptVoucher(rv) && (() => {
+                    const linkedSales = sales.filter(
+                      (s) =>
+                        (rv.linkedSaleIds && rv.linkedSaleIds.includes(s.id)) ||
+                        (rv.linkedSaleGroupId && s.invoiceGroupId === rv.linkedSaleGroupId) ||
+                        (rv.linkedSaleInvoiceCode && s.invoiceCode === rv.linkedSaleInvoiceCode)
+                    );
+                    const primarySale = linkedSales[0];
+                    const codeLabel =
+                      primarySale?.invoiceCode || rv.linkedSaleInvoiceCode || 'HĐ gốc';
+                    const orderTotal = linkedSales.reduce((sum, s) => sum + s.totalAmount, 0);
+                    const orderDebt = linkedSales.reduce((sum, s) => sum + s.debtAmount, 0);
+                    return (
+                      <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200/80 space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-emerald-950">
+                          <span>Thu trực tiếp ngay trên hóa đơn bán (bấm mã HĐ để mở):</span>
+                          {linkedSales.length > 0 && (
+                            <span className="font-mono">
+                              Tổng HĐ: <strong>{formatVND(orderTotal)}</strong> · Còn nợ:{' '}
+                              <strong className={orderDebt > 0 ? 'text-red-700' : 'text-emerald-700'}>
+                                {formatVND(orderDebt)}
+                              </strong>
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+                          {onNavigateCrossLink && primarySale ? (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label={codeLabel}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'sales',
+                                  recordId: primarySale.id,
+                                  voucherCode: primarySale.invoiceCode,
+                                  label: `Hóa đơn ${primarySale.invoiceCode}`,
+                                })
+                              }
+                            />
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-white border border-emerald-300 font-bold text-emerald-900">
+                              {codeLabel}
+                            </span>
+                          )}
+                          <span className="text-stone-700">
+                            Thu tại đơn: <strong className="text-emerald-700">+{formatVND(rv.amount)}</strong>
+                          </span>
+                          {onNavigateCrossLink && primarySale && orderDebt > 0 && (
+                            <CrossLinkChip
+                              tone="amber"
+                              label="Công nợ KH"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'debts',
+                                  recordId: primarySale.id,
+                                  subTab: 'customer',
+                                  label: `Công nợ ${primarySale.invoiceCode}`,
+                                })
+                              }
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <p className="text-xs text-stone-600">
                       {rv.note || 'Phiếu thu tiền'} ·{' '}
@@ -1212,7 +1297,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                             invoiceCode:
                               rv.settledAllocations && rv.settledAllocations.length > 0
                                 ? rv.settledAllocations.map((a) => a.code).join(', ')
-                                : rv.groupName,
+                                : rv.linkedSaleInvoiceCode || rv.groupName,
                             previousDebt: rv.totalPreviousDebt ?? rv.amount,
                             collectedAmount: rv.amount,
                             remainingDebt: rv.totalRemainingDebt ?? 0,
@@ -1263,11 +1348,26 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
               </span>
               <div className="flex flex-wrap items-center gap-3 font-mono">
                 <span className="text-stone-600">
+                  Thu tại đơn:{' '}
+                  <strong className="text-emerald-700">
+                    +{formatVND(
+                      filteredVouchers
+                        .filter((v) => isDirectSaleReceiptVoucher(v) && !isContraOffsetVoucher(v))
+                        .reduce((s, v) => s + v.amount, 0)
+                    )}
+                  </strong>
+                </span>
+                <span className="text-stone-600">
                   Thu nợ KH:{' '}
                   <strong className="text-emerald-800">
                     +{formatVND(
                       filteredVouchers
-                        .filter((v) => v.isDebtSettlement)
+                        .filter(
+                          (v) =>
+                            v.isDebtSettlement &&
+                            !isDirectSaleReceiptVoucher(v) &&
+                            !isContraOffsetVoucher(v)
+                        )
                         .reduce((s, v) => s + v.amount, 0)
                     )}
                   </strong>
@@ -1277,13 +1377,23 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                   <strong className="text-teal-800">
                     +{formatVND(
                       filteredVouchers
-                        .filter((v) => !v.isDebtSettlement)
+                        .filter(
+                          (v) =>
+                            !v.isDebtSettlement &&
+                            !isDirectSaleReceiptVoucher(v) &&
+                            !isContraOffsetVoucher(v)
+                        )
                         .reduce((s, v) => s + v.amount, 0)
                     )}
                   </strong>
                 </span>
                 <span className="font-bold text-emerald-900 bg-white px-2.5 py-1 rounded border border-emerald-200">
-                  ∑ Tổng thực thu: +{formatVND(filteredVouchers.reduce((s, v) => s + v.amount, 0))}
+                  ∑ Tổng thực thu: +
+                  {formatVND(
+                    filteredVouchers
+                      .filter((v) => !isContraOffsetVoucher(v))
+                      .reduce((s, v) => s + v.amount, 0)
+                  )}
                 </span>
               </div>
             </div>
@@ -1808,6 +1918,16 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
     }
   };
 
+  const effectivePaymentGroups = useMemo(() => {
+    const set = new Set<string>(paymentGroups);
+    for (const pv of paymentVouchers) {
+      if (pv.groupName && pv.groupName.trim()) {
+        set.add(pv.groupName.trim());
+      }
+    }
+    return Array.from(set);
+  }, [paymentGroups, paymentVouchers]);
+
   const filteredVouchers = useMemo(() => {
     const q = normalizeVietnameseSearch(searchQuery);
     return paymentVouchers.filter((pv) => {
@@ -1815,7 +1935,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
       if (!q) return true;
       const allocCodes = (pv.settledAllocations || []).map((a) => a.code).join(' ');
       const haystack = normalizeVietnameseSearch(
-        `${pv.voucherCode} ${pv.groupName} ${pv.partnerName} ${pv.partnerPhone} ${pv.warehouseName} ${pv.note} ${allocCodes}`
+        `${pv.voucherCode} ${pv.groupName} ${pv.partnerName} ${pv.partnerPhone} ${pv.warehouseName} ${pv.note} ${allocCodes} ${pv.linkedImportReceiptCode || ''} ${pv.linkedSaleInvoiceCode || ''}`
       );
       return haystack.includes(q);
     });
@@ -1824,6 +1944,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
   const groupSummaries = useMemo(() => {
     const map = new Map<string, { count: number; total: number }>();
     for (const pv of filteredVouchers) {
+      if (isContraOffsetVoucher(pv)) continue;
       const curr = map.get(pv.groupName) || { count: 0, total: 0 };
       curr.count += 1;
       curr.total += pv.amount;
@@ -1837,7 +1958,10 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
   }, [filteredVouchers]);
 
   const totalPaymentAmount = useMemo(
-    () => filteredVouchers.reduce((sum, pv) => sum + pv.amount, 0),
+    () =>
+      filteredVouchers
+        .filter((pv) => !isContraOffsetVoucher(pv))
+        .reduce((sum, pv) => sum + pv.amount, 0),
     [filteredVouchers]
   );
 
@@ -2381,8 +2505,8 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                 onChange={(e) => setGroupFilter(e.target.value)}
                 className="px-2.5 py-1.5 text-xs bg-stone-50 border border-stone-200 rounded-lg text-stone-700"
               >
-                <option value="all">Tất cả nhóm phiếu chi ({paymentGroups.length})</option>
-                {paymentGroups.map((g) => (
+                <option value="all">Tất cả nhóm phiếu chi ({effectivePaymentGroups.length})</option>
+                {effectivePaymentGroups.map((g) => (
                   <option key={g} value={g}>
                     {g}
                   </option>
@@ -2452,7 +2576,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                           {pv.warehouseName}
                         </span>
                         <span className="text-[11px] text-stone-500 font-mono">
-                          Ngày: {(pv.createdAt || '').slice(0, 10)}
+                          Ngày: {toVietnamDateStr(pv.createdAt)}
                         </span>
                       </div>
                       <p className="text-sm font-bold text-stone-900 mt-1.5">
@@ -2468,7 +2592,11 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                       <p className="text-base font-bold font-mono tabular-nums text-amber-800">
                         -{formatVND(pv.amount)}
                       </p>
-                      <p className="text-[11px] text-stone-500">{pv.paymentMethod}</p>
+                      <p className="text-[11px] text-stone-500">
+                        {isContraOffsetVoucher(pv)
+                          ? 'Cấn trừ công nợ (không qua quỹ)'
+                          : pv.paymentMethod}
+                      </p>
                     </div>
                   </div>
 
@@ -2546,6 +2674,74 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                       </div>
                     )}
 
+                  {/* Direct upfront import payment breakdown with clickable cross-link */}
+                  {isDirectImportPaymentVoucher(pv) && (() => {
+                    const linkedImps = imports.filter(
+                      (i) =>
+                        (pv.linkedImportIds && pv.linkedImportIds.includes(i.id)) ||
+                        (pv.linkedImportGroupId && i.importGroupId === pv.linkedImportGroupId) ||
+                        (pv.linkedImportReceiptCode && i.receiptCode === pv.linkedImportReceiptCode)
+                    );
+                    const primaryImp = linkedImps[0];
+                    const codeLabel =
+                      primaryImp?.receiptCode || pv.linkedImportReceiptCode || 'PN gốc';
+                    const impTotal = linkedImps.reduce((sum, i) => sum + i.totalCost, 0);
+                    const impDebt = linkedImps.reduce((sum, i) => sum + i.debtAmount, 0);
+                    return (
+                      <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200/80 space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-semibold text-emerald-950">
+                          <span>Chi trả trực tiếp ngay trên phiếu nhập kho (bấm mã PN để mở):</span>
+                          {linkedImps.length > 0 && (
+                            <span className="font-mono">
+                              Tổng lô nhập: <strong>{formatVND(impTotal)}</strong> · Còn nợ NCC:{' '}
+                              <strong className={impDebt > 0 ? 'text-red-700' : 'text-emerald-700'}>
+                                {formatVND(impDebt)}
+                              </strong>
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+                          {onNavigateCrossLink && primaryImp ? (
+                            <CrossLinkChip
+                              tone="emerald"
+                              label={codeLabel}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'imports',
+                                  recordId: primaryImp.id,
+                                  voucherCode: primaryImp.receiptCode,
+                                  label: `Phiếu nhập ${primaryImp.receiptCode}`,
+                                })
+                              }
+                            />
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-white border border-emerald-300 font-bold text-emerald-900">
+                              {codeLabel}
+                            </span>
+                          )}
+                          <span className="text-stone-700">
+                            Đã chi tại phiếu nhập:{' '}
+                            <strong className="text-amber-800">-{formatVND(pv.amount)}</strong>
+                          </span>
+                          {onNavigateCrossLink && primaryImp && impDebt > 0 && (
+                            <CrossLinkChip
+                              tone="amber"
+                              label="Công nợ NCC"
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'debts',
+                                  recordId: primaryImp.id,
+                                  subTab: 'supplier',
+                                  label: `Công nợ ${primaryImp.receiptCode}`,
+                                })
+                              }
+                            />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                     <p className="text-xs text-stone-600">
                       {pv.note || 'Phiếu chi tiền'} ·{' '}
@@ -2562,7 +2758,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                             receiptCode:
                               pv.settledAllocations && pv.settledAllocations.length > 0
                                 ? pv.settledAllocations.map((a) => a.code).join(', ')
-                                : pv.groupName,
+                                : pv.linkedImportReceiptCode || pv.groupName,
                             previousDebt: pv.totalPreviousDebt ?? pv.amount,
                             paidAmount: pv.amount,
                             remainingDebt: pv.totalRemainingDebt ?? 0,
@@ -2613,11 +2809,26 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
               </span>
               <div className="flex flex-wrap items-center gap-3 font-mono">
                 <span className="text-stone-600">
+                  Chi tại phiếu nhập:{' '}
+                  <strong className="text-emerald-800">
+                    -{formatVND(
+                      filteredVouchers
+                        .filter((v) => isDirectImportPaymentVoucher(v) && !isContraOffsetVoucher(v))
+                        .reduce((s, v) => s + v.amount, 0)
+                    )}
+                  </strong>
+                </span>
+                <span className="text-stone-600">
                   Trả nợ NCC:{' '}
                   <strong className="text-amber-800">
                     -{formatVND(
                       filteredVouchers
-                        .filter((v) => v.isDebtSettlement)
+                        .filter(
+                          (v) =>
+                            v.isDebtSettlement &&
+                            !isDirectImportPaymentVoucher(v) &&
+                            !isContraOffsetVoucher(v)
+                        )
                         .reduce((s, v) => s + v.amount, 0)
                     )}
                   </strong>
@@ -2627,13 +2838,23 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                   <strong className="text-rose-700">
                     -{formatVND(
                       filteredVouchers
-                        .filter((v) => !v.isDebtSettlement)
+                        .filter(
+                          (v) =>
+                            !v.isDebtSettlement &&
+                            !isDirectImportPaymentVoucher(v) &&
+                            !isContraOffsetVoucher(v)
+                        )
                         .reduce((s, v) => s + v.amount, 0)
                     )}
                   </strong>
                 </span>
                 <span className="font-bold text-amber-950 bg-white px-2.5 py-1 rounded border border-amber-200">
-                  ∑ Tổng thực chi: -{formatVND(filteredVouchers.reduce((s, v) => s + v.amount, 0))}
+                  ∑ Tổng thực chi: -
+                  {formatVND(
+                    filteredVouchers
+                      .filter((v) => !isContraOffsetVoucher(v))
+                      .reduce((s, v) => s + v.amount, 0)
+                  )}
                 </span>
               </div>
             </div>

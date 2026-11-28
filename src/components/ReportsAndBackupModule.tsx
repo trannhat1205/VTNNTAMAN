@@ -52,10 +52,16 @@ import {
   computeProvisionalCashbookProfitSummary,
   computeReceivedItemsAndDebtReport,
   computeTaxAuthorityFinancialStatement,
+  countDistinctImportReceipts,
+  countDistinctSalesInvoices,
   evaluateDebtUrgency,
   evaluateStaffAccessScope,
   evaluateStockAlert,
   extractRecordYear,
+  findDirectPaymentVouchersForImport,
+  findDirectReceiptVouchersForSale,
+  findLinkedPaymentVouchersForImport,
+  findLinkedReceiptVouchersForSale,
   formatVND,
   generateFiscalYearOptions,
   generateSmartReportRecommendations,
@@ -66,6 +72,7 @@ import {
   getRecentDaysRangeVietnam,
   getReportCategoryMetaForAccount,
   getTodayVietnamDateStr,
+  isContraOffsetVoucher,
   isDateWithinRange,
   normalizeVietnameseSearch,
   parseAndValidateBackupPayload,
@@ -73,6 +80,7 @@ import {
   resolveSaleGiftUnitCost,
   resolveSaleUnitCost,
   TaxFinancialDrillDownCode,
+  toVietnamDateStr,
 } from '../utils/businessLogic';
 import {
   exportCombinedReceivedItemsAndDebtExcel,
@@ -556,6 +564,10 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       customers: filteredCustomers,
       sales: salesInRange,
       imports: importsInRange,
+      allSales: sales,
+      allImports: imports,
+      allReceiptVouchers: receiptVouchers,
+      allPaymentVouchers: paymentVouchers,
       receiptVouchers: cashflowFinancial.filteredReceiptVouchers,
       paymentVouchers: cashflowFinancial.filteredPaymentVouchers,
       savedVouchers,
@@ -579,6 +591,10 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
       customers: filteredCustomers,
       sales: salesInRange,
       imports: importsInRange,
+      allSales: sales,
+      allImports: imports,
+      allReceiptVouchers: receiptVouchers,
+      allPaymentVouchers: paymentVouchers,
       receiptVouchers: cashflowFinancial.filteredReceiptVouchers,
       paymentVouchers: cashflowFinancial.filteredPaymentVouchers,
     });
@@ -889,7 +905,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   className="bg-white p-4 rounded-xl border border-slate-200 hover:border-emerald-400 cursor-pointer transition-colors space-y-1"
                 >
                   <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span>Doanh thu Bán hàng ({salesInRange.length} đơn)</span>
+                    <span>Doanh thu Bán hàng ({countDistinctSalesInvoices(salesInRange)} đơn)</span>
                     <ShoppingCart className="w-4 h-4 text-emerald-700" />
                   </div>
                   <div className="text-lg font-bold font-mono text-slate-900">
@@ -913,7 +929,7 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                   className="bg-white p-4 rounded-xl border border-slate-200 hover:border-emerald-400 cursor-pointer transition-colors space-y-1"
                 >
                   <div className="flex items-center justify-between text-xs text-slate-500">
-                    <span>Giá trị Nhập hàng ({importsInRange.length} phiếu)</span>
+                    <span>Giá trị Nhập hàng ({countDistinctImportReceipts(importsInRange)} phiếu)</span>
                     <Truck className="w-4 h-4 text-amber-700" />
                   </div>
                   <div className="text-lg font-bold font-mono text-slate-900">
@@ -1904,8 +1920,8 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       +{formatVND(totalCashInflow)}
                     </div>
                     <div className="text-[11px] text-emerald-800 mt-1 space-y-0.5">
-                      <div>Thu bán hàng & nợ KH: +{formatVND(totalCollected)}</div>
-                      <div>Phiếu thu khác/chiết khấu: +{formatVND(otherIncome)}</div>
+                      <div>Thu bán hàng & thu nợ KH: +{formatVND(cashflowFinancial.salesPaidInflow)}</div>
+                      <div>Phiếu thu khác: +{formatVND(cashflowFinancial.otherReceiptInflow)}</div>
                     </div>
                   </div>
                   <div className="p-3.5 bg-amber-50/60 border border-amber-200 rounded-xl">
@@ -1916,8 +1932,8 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       -{formatVND(totalCashOutflow)}
                     </div>
                     <div className="text-[11px] text-amber-900 mt-1 space-y-0.5">
-                      <div>Chi nhập hàng & nợ NCC: -{formatVND(totalPaidSupplier)}</div>
-                      <div>Phiếu chi vận hành: -{formatVND(operatingExpenses)}</div>
+                      <div>Chi nhập hàng & trả nợ NCC: -{formatVND(cashflowFinancial.importsPaidOutflow)}</div>
+                      <div>Phiếu chi vận hành/khác: -{formatVND(cashflowFinancial.operatingPaymentOutflow)}</div>
                     </div>
                   </div>
                   <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl">
@@ -1925,8 +1941,10 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                       Phiếu Thu & Phiếu Chi Lập Trong Kỳ
                     </div>
                     <div className="text-base font-bold font-mono text-slate-900 mt-1">
-                      {cashflowFinancial.filteredReceiptVouchers.length} Phiếu thu ·{' '}
-                      {cashflowFinancial.filteredPaymentVouchers.length} Phiếu chi
+                      {cashflowFinancial.filteredReceiptVouchers.filter((v) => !isContraOffsetVoucher(v)).length}{' '}
+                      Phiếu thu ·{' '}
+                      {cashflowFinancial.filteredPaymentVouchers.filter((v) => !isContraOffsetVoucher(v)).length}{' '}
+                      Phiếu chi
                     </div>
                     <div className="text-[11px] text-slate-500 mt-1">
                       Phân loại theo nhóm phiếu thu & nhóm phiếu chi
@@ -2028,192 +2046,253 @@ export const ReportsAndBackupModule: React.FC<ReportsAndBackupModuleProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {cashflowFinancial.filteredReceiptVouchers.map((rv) => (
-                      <tr key={`cf_rv_${rv.id}`} className="bg-emerald-50/20 hover:bg-emerald-50/50">
-                        <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
-                          {rv.createdAt.slice(0, 10)}
-                        </td>
-                        <td className="py-3 px-3.5 whitespace-nowrap align-middle">
-                          <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 rounded whitespace-nowrap">
-                            PHIẾU THU · {rv.groupName}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 whitespace-nowrap align-middle">
-                          {rv.voucherCode}
-                        </td>
-                        <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[175px] leading-snug align-middle">
-                          {rv.partnerName}
-                        </td>
-                        <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
-                          <div>{rv.note}</div>
-                          {rv.isDebtSettlement && (rv.settledAllocations || []).length > 0 && (
-                            <div className="text-[11px] text-emerald-700 font-semibold mt-0.5">
-                              Đã trừ quyết toán theo thứ tự ngày nợ:{' '}
-                              {(rv.settledAllocations || [])
-                                .map((a) => `${a.code} (-${formatVND(a.allocatedAmount)})`)
-                                .join(', ')}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-emerald-700 whitespace-nowrap align-middle">
-                          +{formatVND(rv.amount)}
-                          {rv.isDebtSettlement && (
-                            <div className="text-[10px] font-normal text-slate-500">
-                              (Đã cộng vào HĐ)
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">
-                          0 đ
-                        </td>
-                        <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
-                          {onNavigateToModule && (
-                            <button
-                              type="button"
-                              onClick={() => onNavigateToModule('receipt_vouchers')}
-                              className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md whitespace-nowrap"
-                            >
-                              Phiếu thu →
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-
-                    {cashflowFinancial.filteredPaymentVouchers.map((pv) => (
-                      <tr key={`cf_pv_${pv.id}`} className="bg-amber-50/20 hover:bg-amber-50/50">
-                        <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
-                          {pv.createdAt.slice(0, 10)}
-                        </td>
-                        <td className="py-3 px-3.5 whitespace-nowrap align-middle">
-                          <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded whitespace-nowrap">
-                            PHIẾU CHI · {pv.groupName}
-                          </span>
-                        </td>
-                        <td className="py-3 px-3.5 font-mono font-bold text-amber-900 whitespace-nowrap align-middle">
-                          {pv.voucherCode}
-                        </td>
-                        <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[175px] leading-snug align-middle">
-                          {pv.partnerName}
-                        </td>
-                        <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
-                          <div>{pv.note}</div>
-                          {pv.isDebtSettlement && (pv.settledAllocations || []).length > 0 && (
-                            <div className="text-[11px] text-amber-800 font-semibold mt-0.5">
-                              Đã trừ quyết toán theo thứ tự ngày nợ:{' '}
-                              {(pv.settledAllocations || [])
-                                .map((a) => `${a.code} (-${formatVND(a.allocatedAmount)})`)
-                                .join(', ')}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">
-                          0 đ
-                        </td>
-                        <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-amber-800 whitespace-nowrap align-middle">
-                          -{formatVND(pv.amount)}
-                          {pv.isDebtSettlement && (
-                            <div className="text-[10px] font-normal text-slate-500">
-                              (Đã cộng vào PN)
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
-                          {onNavigateToModule && (
-                            <button
-                              type="button"
-                              onClick={() => onNavigateToModule('payment_vouchers')}
-                              className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-md whitespace-nowrap"
-                            >
-                              Phiếu chi →
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-
-                    {salesInRange
-                      .filter((s) => s.paidAmount > 0)
-                      .map((s) => (
-                        <tr
-                          key={`cf_in_${s.id}`}
-                          onClick={() => setDrillDownItem({ type: 'sale', record: s })}
-                          className="hover:bg-emerald-50/40 cursor-pointer"
-                        >
-                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">{s.createdAt.slice(0, 10)}</td>
+                    {cashflowFinancial.filteredReceiptVouchers
+                      .filter((rv) => !isContraOffsetVoucher(rv))
+                      .map((rv) => (
+                        <tr key={`cf_rv_${rv.id}`} className="bg-emerald-50/20 hover:bg-emerald-50/50">
+                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
+                            {toVietnamDateStr(rv.createdAt)}
+                          </td>
                           <td className="py-3 px-3.5 whitespace-nowrap align-middle">
-                            <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded whitespace-nowrap">
-                              THU BÁN HÀNG & NỢ KH
+                            <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300 rounded whitespace-nowrap">
+                              PHIẾU THU · {rv.groupName}
                             </span>
                           </td>
-                          <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
-                            {s.invoiceCode}
+                          <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 whitespace-nowrap align-middle">
+                            {rv.voucherCode}
                           </td>
                           <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[175px] leading-snug align-middle">
-                            {s.customerName}
+                            {rv.partnerName}
                           </td>
                           <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
-                            Thu tiền bán {s.quantity} {s.unit} {s.productName}
+                            <div>{rv.note}</div>
+                            {rv.isDebtSettlement && (rv.settledAllocations || []).length > 0 && (
+                              <div className="text-[11px] text-emerald-700 font-semibold mt-0.5">
+                                Đã trừ quyết toán theo thứ tự ngày nợ:{' '}
+                                {(rv.settledAllocations || [])
+                                  .map((a) => `${a.code} (-${formatVND(a.allocatedAmount)})`)
+                                  .join(', ')}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-emerald-700 whitespace-nowrap align-middle">
-                            +{formatVND(s.paidAmount)}
+                            +{formatVND(rv.amount)}
                           </td>
-                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">0 đ</td>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">
+                            0 đ
+                          </td>
                           <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDrillDownItem({ type: 'sale', record: s });
-                              }}
-                              className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 rounded-md whitespace-nowrap"
-                            >
-                              Chi tiết →
-                            </button>
+                            {onNavigateToModule && (
+                              <button
+                                type="button"
+                                onClick={() => onNavigateToModule('receipt_vouchers')}
+                                className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md whitespace-nowrap"
+                              >
+                                Phiếu thu →
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
-                    {importsInRange
-                      .filter((i) => i.paidAmount > 0)
-                      .map((i) => (
-                        <tr
-                          key={`cf_out_${i.id}`}
-                          onClick={() => setDrillDownItem({ type: 'import', record: i })}
-                          className="hover:bg-amber-50/40 cursor-pointer"
-                        >
-                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">{i.createdAt.slice(0, 10)}</td>
+
+                    {cashflowFinancial.filteredPaymentVouchers
+                      .filter((pv) => !isContraOffsetVoucher(pv))
+                      .map((pv) => (
+                        <tr key={`cf_pv_${pv.id}`} className="bg-amber-50/20 hover:bg-amber-50/50">
+                          <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
+                            {toVietnamDateStr(pv.createdAt)}
+                          </td>
                           <td className="py-3 px-3.5 whitespace-nowrap align-middle">
-                            <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 rounded whitespace-nowrap">
-                              CHI NHẬP HÀNG & NỢ NCC
+                            <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded whitespace-nowrap">
+                              PHIẾU CHI · {pv.groupName}
                             </span>
                           </td>
-                          <td className="py-3 px-3.5 font-mono font-bold text-amber-900 underline whitespace-nowrap align-middle">
-                            {i.receiptCode}
+                          <td className="py-3 px-3.5 font-mono font-bold text-amber-900 whitespace-nowrap align-middle">
+                            {pv.voucherCode}
                           </td>
                           <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[175px] leading-snug align-middle">
-                            {i.supplierName}
+                            {pv.partnerName}
                           </td>
                           <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
-                            Chi thanh toán nhập {i.quantity} {i.unit} {i.productName}
+                            <div>{pv.note}</div>
+                            {pv.isDebtSettlement && (pv.settledAllocations || []).length > 0 && (
+                              <div className="text-[11px] text-amber-800 font-semibold mt-0.5">
+                                Đã trừ quyết toán theo thứ tự ngày nợ:{' '}
+                                {(pv.settledAllocations || [])
+                                  .map((a) => `${a.code} (-${formatVND(a.allocatedAmount)})`)
+                                  .join(', ')}
+                              </div>
+                            )}
                           </td>
-                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">0 đ</td>
+                          <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">
+                            0 đ
+                          </td>
                           <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-amber-800 whitespace-nowrap align-middle">
-                            -{formatVND(i.paidAmount)}
+                            -{formatVND(pv.amount)}
                           </td>
                           <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setDrillDownItem({ type: 'import', record: i });
-                              }}
-                              className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 rounded-md whitespace-nowrap"
-                            >
-                              Chi tiết →
-                            </button>
+                            {onNavigateToModule && (
+                              <button
+                                type="button"
+                                onClick={() => onNavigateToModule('payment_vouchers')}
+                                className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-md whitespace-nowrap"
+                              >
+                                Phiếu chi →
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
+
+                    {(() => {
+                      const allRvs = receiptVouchers || [];
+                      const coveredSaleGroupIds = new Set<string>();
+                      for (const rv of allRvs) {
+                        if (rv.linkedSaleGroupId) coveredSaleGroupIds.add(rv.linkedSaleGroupId);
+                      }
+                      return salesInRange
+                        .map((s) => {
+                          if (s.invoiceGroupId && coveredSaleGroupIds.has(s.invoiceGroupId)) {
+                            return { s, unvouchered: 0 };
+                          }
+                          const debtPaid = findLinkedReceiptVouchersForSale(s, allRvs).reduce(
+                            (sum, rv) =>
+                              sum +
+                              (rv.settledAllocations || [])
+                                .filter((a) => a.recordId === s.id || a.code === s.invoiceCode)
+                                .reduce((ss, a) => ss + (Number(a.allocatedAmount) || 0), 0),
+                            0
+                          );
+                          const directPaid = findDirectReceiptVouchersForSale(s, allRvs).reduce(
+                            (sum, rv) => sum + (Number(rv.amount) || 0),
+                            0
+                          );
+                          const contraAmt = Math.max(0, Math.round(Number(s.supplierOffsetAmount) || 0));
+                          const unvouchered = Math.max(
+                            0,
+                            Math.round((Number(s.paidAmount) || 0) - debtPaid - directPaid - contraAmt)
+                          );
+                          return { s, unvouchered };
+                        })
+                        .filter(({ unvouchered }) => unvouchered > 0)
+                        .map(({ s, unvouchered }) => (
+                          <tr
+                            key={`cf_in_${s.id}`}
+                            onClick={() => setDrillDownItem({ type: 'sale', record: s })}
+                            className="hover:bg-emerald-50/40 cursor-pointer"
+                          >
+                            <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
+                              {toVietnamDateStr(s.createdAt)}
+                            </td>
+                            <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                              <span className="px-2 py-0.5 text-[11px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 rounded whitespace-nowrap">
+                                THU TẠI ĐƠN BÁN (CŨ)
+                              </span>
+                            </td>
+                            <td className="py-3 px-3.5 font-mono font-bold text-emerald-800 underline whitespace-nowrap align-middle">
+                              {s.invoiceCode}
+                            </td>
+                            <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[175px] leading-snug align-middle">
+                              {s.customerName}
+                            </td>
+                            <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
+                              Thu tiền bán {s.quantity} {s.unit} {s.productName}
+                            </td>
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-emerald-700 whitespace-nowrap align-middle">
+                              +{formatVND(unvouchered)}
+                            </td>
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">
+                              0 đ
+                            </td>
+                            <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDrillDownItem({ type: 'sale', record: s });
+                                }}
+                                className="px-2.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50 rounded-md whitespace-nowrap"
+                              >
+                                Chi tiết →
+                              </button>
+                            </td>
+                          </tr>
+                        ));
+                    })()}
+                    {(() => {
+                      const allPvs = paymentVouchers || [];
+                      const coveredImportGroupIds = new Set<string>();
+                      for (const pv of allPvs) {
+                        if (pv.linkedImportGroupId) coveredImportGroupIds.add(pv.linkedImportGroupId);
+                      }
+                      return importsInRange
+                        .map((i) => {
+                          if (i.importGroupId && coveredImportGroupIds.has(i.importGroupId)) {
+                            return { i, unvouchered: 0 };
+                          }
+                          const debtPaid = findLinkedPaymentVouchersForImport(i, allPvs).reduce(
+                            (sum, pv) =>
+                              sum +
+                              (pv.settledAllocations || [])
+                                .filter((a) => a.recordId === i.id || a.code === i.receiptCode)
+                                .reduce((ss, a) => ss + (Number(a.allocatedAmount) || 0), 0),
+                            0
+                          );
+                          const directPaid = findDirectPaymentVouchersForImport(i, allPvs).reduce(
+                            (sum, pv) => sum + (Number(pv.amount) || 0),
+                            0
+                          );
+                          const unvouchered = Math.max(
+                            0,
+                            Math.round((Number(i.paidAmount) || 0) - debtPaid - directPaid)
+                          );
+                          return { i, unvouchered };
+                        })
+                        .filter(({ unvouchered }) => unvouchered > 0)
+                        .map(({ i, unvouchered }) => (
+                          <tr
+                            key={`cf_out_${i.id}`}
+                            onClick={() => setDrillDownItem({ type: 'import', record: i })}
+                            className="hover:bg-amber-50/40 cursor-pointer"
+                          >
+                            <td className="py-3 px-3.5 font-mono whitespace-nowrap align-middle">
+                              {toVietnamDateStr(i.createdAt)}
+                            </td>
+                            <td className="py-3 px-3.5 whitespace-nowrap align-middle">
+                              <span className="px-2 py-0.5 text-[11px] font-bold bg-amber-50 text-amber-800 border border-amber-200 rounded whitespace-nowrap">
+                                CHI TẠI PHIẾU NHẬP (CŨ)
+                              </span>
+                            </td>
+                            <td className="py-3 px-3.5 font-mono font-bold text-amber-900 underline whitespace-nowrap align-middle">
+                              {i.receiptCode}
+                            </td>
+                            <td className="py-3 px-3.5 font-semibold text-slate-900 min-w-[175px] leading-snug align-middle">
+                              {i.supplierName}
+                            </td>
+                            <td className="py-3 px-3.5 min-w-[240px] leading-snug align-middle">
+                              Chi thanh toán nhập {i.quantity} {i.unit} {i.productName}
+                            </td>
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums text-slate-400 whitespace-nowrap align-middle">
+                              0 đ
+                            </td>
+                            <td className="py-3 px-3.5 text-right font-mono tabular-nums font-bold text-amber-800 whitespace-nowrap align-middle">
+                              -{formatVND(unvouchered)}
+                            </td>
+                            <td className="py-3 px-3.5 text-right whitespace-nowrap align-middle">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setDrillDownItem({ type: 'import', record: i });
+                                }}
+                                className="px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-50 rounded-md whitespace-nowrap"
+                              >
+                                Chi tiết →
+                              </button>
+                            </td>
+                          </tr>
+                        ));
+                    })()}
                   </tbody>
                 </table>
               </div>

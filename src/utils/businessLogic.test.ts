@@ -8,6 +8,9 @@ import {
   applySupplierFifoDebtSettlement,
   authenticateStaffByGoogleEmail,
   buildBackupSnapshotPayload,
+  buildDirectImportPaymentVoucher,
+  buildDirectSaleReceiptVoucher,
+  buildMissingDirectVouchersForExistingRecords,
   buildZaloDebtReminderMessage,
   calculateImportSummary,
   calculateSaleSummary,
@@ -33,6 +36,8 @@ import {
   countDistinctSalesInvoices,
   createAuditLogEntry,
   DEBT_TERM_DAY_OPTIONS,
+  DIRECT_IMPORT_PAYMENT_GROUP,
+  DIRECT_SALE_RECEIPT_GROUP,
   diagnoseImportVoucher,
   diagnoseSaleVoucher,
   doesRecordMatchProduct,
@@ -48,6 +53,8 @@ import {
   filterCustomers,
   filterRecordsBySelectedWarehouses,
   filterSearchableOptions,
+  findAllVouchersForImport,
+  findAllVouchersForSale,
   findCollidingProductCodeInWarehouse,
   findLinkedPaymentVouchersForImport,
   findLinkedReceiptVouchersForSale,
@@ -65,6 +72,8 @@ import {
   getDefaultPermissionsForPosition,
   hasCompletedStaffPersonalGmail,
   isDateWithinRange,
+  isDirectImportPaymentVoucher,
+  isDirectSaleReceiptVoucher,
   matchDebtTermDays,
   normalizeVietnameseSearch,
   parseAndValidateBackupPayload,
@@ -78,6 +87,8 @@ import {
   resolveActiveWarehouses,
   reverseCustomerReceiptVoucherAllocations,
   reverseSupplierPaymentVoucherAllocations,
+  syncImportsOnDirectPaymentVoucherMutation,
+  syncSalesOnDirectReceiptVoucherMutation,
   toVietnamDateStr,
   updateImportRecord,
   updateSaleRecord,
@@ -5216,4 +5227,400 @@ test('Phase 4C: buildCustomerZaloDebtReminderQueue prioritizes overdue & due-soo
   assert.equal(afterMark.has(queue[0].customerKey), true);
   assert.equal(loadZaloRemindedTodaySet('2026-11-28', mockStore).has(queue[0].customerKey), true);
   assert.equal(loadZaloRemindedTodaySet('2026-11-29', mockStore).size, 0);
+});
+
+test('Direct upfront PT-/PC- vouchers: partial & full order payments appear in voucher logs without double-counting cashflow, cashbook, or tax statements', () => {
+  const wh = 'TÂM AN CHUNG';
+  const prod: ProductItem = {
+    id: 'p_bup_pro',
+    code: 'BP-01',
+    name: 'Búp Pro',
+    category: 'Thuốc BVTV',
+    unit: 'Chai',
+    importPrice: 160000,
+    sellPrice: 200000,
+    stock: 20,
+    minStock: 5,
+    supplierName: 'GAP',
+    warehouseName: wh,
+    ownerId: 'u1',
+    createdAt: '2026-11-28T01:00:00.000Z',
+    updatedAt: '2026-11-28T01:00:00.000Z',
+  };
+
+  // 1) Customer buys 5 Chai @ 200k = 1.000.000 đ, pays 300.000 đ upfront (debt 700.000 đ)
+  const initialSale: SaleTransaction = {
+    id: 'sale_partial_1',
+    invoiceCode: 'HD-2611-001',
+    customerId: 'c_nhan',
+    customerName: 'Trần Nhân',
+    customerPhone: '0933919024',
+    productId: prod.id,
+    productName: prod.name,
+    unit: prod.unit,
+    quantity: 5,
+    unitPrice: 200000,
+    unitCost: 160000,
+    totalAmount: 1000000,
+    paidAmount: 300000,
+    debtAmount: 700000,
+    dueDate: '2026-12-28',
+    status: 'partial',
+    paymentMethod: 'Tiền mặt',
+    warehouseName: wh,
+    note: '',
+    staffName: 'Trần Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-28T02:00:00.000Z',
+    updatedAt: '2026-11-28T02:00:00.000Z',
+  };
+
+  const directRv = buildDirectSaleReceiptVoucher({
+    salesLines: [initialSale],
+    voucherId: 'rv_direct_1',
+    voucherCode: 'PT-2611-001',
+    paymentMethod: 'Tiền mặt',
+    staffName: 'Trần Nhất',
+    ownerId: 'u1',
+    nowIso: initialSale.createdAt,
+  });
+  assert.ok(directRv);
+  assert.equal(isDirectSaleReceiptVoucher(directRv), true);
+  assert.equal(directRv!.isDebtSettlement, false);
+  assert.equal(directRv!.countsTowardOtherIncome, false);
+  assert.equal(directRv!.groupName, DIRECT_SALE_RECEIPT_GROUP);
+  assert.equal(directRv!.amount, 300000);
+
+  // Later customer pays 95.000 đ debt settlement
+  const settled = applyCustomerFifoDebtSettlement(
+    [initialSale],
+    { customerId: 'c_nhan', warehouseName: wh },
+    95000,
+    '',
+    '2026-11-29T03:00:00.000Z'
+  );
+  const debtRv: CashReceiptVoucher = {
+    id: 'rv_debt_1',
+    voucherCode: 'PT-2611-002',
+    groupName: 'Thu nợ bán hàng khách hàng',
+    warehouseName: wh,
+    partnerId: 'c_nhan',
+    partnerName: 'Trần Nhân',
+    partnerPhone: '0933919024',
+    amount: settled.totalAllocated,
+    paymentMethod: 'Chuyển khoản ngân hàng',
+    isDebtSettlement: true,
+    settledAllocations: settled.settledAllocations,
+    countsTowardOtherIncome: false,
+    note: 'Thu nợ',
+    staffName: 'Trần Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-29T03:00:00.000Z',
+    updatedAt: '2026-11-29T03:00:00.000Z',
+  };
+
+  // 2) Supplier import scenario from user's screenshots:
+  // Import #1: 20 Chai = 3.200.000 đ, paid 0 upfront, later 195.000 đ via PC-2611-001
+  // Import #2: 5 Chai = 800.000 đ, paid 100.000 đ upfront (missing PC on legacy cloud before backfill!)
+  const imp1: ImportTransaction = {
+    id: 'imp_gap_1',
+    receiptCode: 'PN-2611-001',
+    supplierName: 'GAP',
+    supplierPhone: '0932919024',
+    productId: prod.id,
+    productName: prod.name,
+    unit: prod.unit,
+    quantity: 20,
+    unitCost: 160000,
+    totalCost: 3200000,
+    paidAmount: 195000,
+    debtAmount: 3005000,
+    dueDate: '2026-12-28',
+    status: 'partial',
+    warehouseName: wh,
+    note: '',
+    staffName: 'Trần Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-28T01:10:00.000Z',
+    updatedAt: '2026-11-28T01:30:00.000Z',
+  };
+  const debtPv: CashPaymentVoucher = {
+    id: 'pv_debt_1',
+    voucherCode: 'PC-2611-001',
+    groupName: 'Chi trả nợ Nhà cung cấp',
+    warehouseName: wh,
+    partnerName: 'GAP',
+    partnerPhone: '0932919024',
+    amount: 195000,
+    paymentMethod: 'Tiền mặt',
+    isDebtSettlement: true,
+    settledAllocations: [
+      {
+        recordId: imp1.id,
+        code: imp1.receiptCode,
+        date: '2026-11-28',
+        dueDate: '2026-12-28',
+        productName: prod.name,
+        previousDebt: 3200000,
+        allocatedAmount: 195000,
+        remainingDebt: 3005000,
+      },
+    ],
+    countsTowardOperatingExpense: false,
+    note: 'Chi quyết toán tổng công nợ NCC',
+    staffName: 'Trần Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-28T01:30:00.000Z',
+    updatedAt: '2026-11-28T01:30:00.000Z',
+  };
+  const imp2: ImportTransaction = {
+    id: 'imp_gap_2',
+    receiptCode: 'PN-2611-002',
+    supplierName: 'GAP',
+    supplierPhone: '0932919024',
+    productId: prod.id,
+    productName: prod.name,
+    unit: prod.unit,
+    quantity: 5,
+    unitCost: 160000,
+    totalCost: 800000,
+    paidAmount: 100000,
+    debtAmount: 700000,
+    dueDate: '2026-12-28',
+    status: 'partial',
+    warehouseName: wh,
+    note: '',
+    staffName: 'Trần Nhất',
+    ownerId: 'u1',
+    createdAt: '2026-11-28T04:00:00.000Z',
+    updatedAt: '2026-11-28T04:00:00.000Z',
+  };
+
+  // Backfill detects ONLY imp2's 100.000 đ (since sale already has directRv+debtRv and imp1's 195k is covered by debtPv)
+  const backfill1 = buildMissingDirectVouchersForExistingRecords({
+    sales: settled.updatedSales,
+    imports: [imp1, imp2],
+    receiptVouchers: [directRv!, debtRv],
+    paymentVouchers: [debtPv],
+  });
+  assert.equal(backfill1.createdReceipts.length, 0);
+  assert.equal(backfill1.createdPayments.length, 1);
+  const directPv = backfill1.createdPayments[0];
+  assert.equal(isDirectImportPaymentVoucher(directPv), true);
+  assert.equal(directPv.groupName, DIRECT_IMPORT_PAYMENT_GROUP);
+  assert.equal(directPv.amount, 100000);
+  assert.equal(directPv.linkedImportReceiptCode, 'PN-2611-002');
+  assert.equal(directPv.countsTowardOperatingExpense, false);
+
+  // Running backfill again is 100% idempotent
+  const allReceipts = [directRv!, debtRv];
+  const allPayments = [debtPv, directPv];
+  const backfill2 = buildMissingDirectVouchersForExistingRecords({
+    sales: settled.updatedSales,
+    imports: [imp1, imp2],
+    receiptVouchers: allReceipts,
+    paymentVouchers: allPayments,
+  });
+  assert.equal(backfill2.createdReceipts.length, 0);
+  assert.equal(backfill2.createdPayments.length, 0);
+
+  // Respects deletedRecordIds tombstone so deleted backfill vouchers never resurrect
+  const backfillTombstoned = buildMissingDirectVouchersForExistingRecords({
+    sales: settled.updatedSales,
+    imports: [imp1, imp2],
+    receiptVouchers: allReceipts,
+    paymentVouchers: [debtPv],
+    deletedRecordIds: new Set([directPv.id]),
+  });
+  assert.equal(backfillTombstoned.createdPayments.length, 0);
+
+  // Cross-links find BOTH direct and debt-settlement vouchers
+  assert.equal(findAllVouchersForSale(settled.updatedSales[0], allReceipts).length, 2);
+  assert.equal(findAllVouchersForImport(imp2, allPayments).length, 1);
+
+  // Zero double-counting across Cashflow, Cashbook, and Tax Statements!
+  const cf = computeCashflowAndFinancialReport({
+    sales: settled.updatedSales,
+    imports: [imp1, imp2],
+    products: [prod],
+    receiptVouchers: allReceipts,
+    paymentVouchers: allPayments,
+  });
+  assert.equal(cf.directSaleReceiptTotal, 300000);
+  assert.equal(cf.debtSettlementReceiptTotal, 95000);
+  assert.equal(cf.salesInitialPaidInflow, 0);
+  assert.equal(cf.totalCashInflow, 395000);
+  assert.equal(cf.otherIncome, 0);
+
+  assert.equal(cf.directImportPaymentTotal, 100000);
+  assert.equal(cf.debtSettlementPaymentTotal, 195000);
+  assert.equal(cf.importsInitialPaidOutflow, 0);
+  assert.equal(cf.totalCashOutflow, 295000);
+  assert.equal(cf.operatingExpenses, 0);
+  assert.equal(cf.netCashflow, 100000);
+  assert.equal(cf.totalReceivableDebt, 605000);
+  assert.equal(cf.totalPayableDebt, 3705000);
+
+  const cashbook = computeProvisionalCashbookProfitSummary({
+    sales: settled.updatedSales,
+    imports: [imp1, imp2],
+    products: [prod],
+    receiptVouchers: allReceipts,
+    paymentVouchers: allPayments,
+  });
+  assert.equal(cashbook.otherIncomeReceipts, 0);
+  assert.equal(cashbook.otherOperatingExpenses, 0);
+  assert.equal(cashbook.provisionalNetProfit, 1000000 - 800000);
+
+  const tax = computeTaxAuthorityFinancialStatement({
+    sales: settled.updatedSales,
+    imports: [imp1, imp2],
+    products: [prod],
+    receiptVouchers: allReceipts,
+    paymentVouchers: allPayments,
+  });
+  assert.equal(tax.otherIncome31, 0);
+  assert.equal(tax.operatingPaymentVouchers.length, 0);
+  assert.equal(tax.otherIncomeReceiptVouchers.length, 0);
+  assert.equal(tax.customerReceivables131, 605000);
+  assert.equal(tax.supplierPayables331, 3705000);
+});
+
+test('Bidirectional sync between direct PT-/PC- vouchers and HD-/PN- orders + Fiscal Year Close retention', () => {
+  const wh = 'TÂM AN CHUNG';
+  const sale: SaleTransaction = {
+    id: 's_sync_1',
+    invoiceCode: 'HD-2611-010',
+    customerId: 'c1',
+    customerName: 'Khách Đồng Bộ',
+    customerPhone: '0909111222',
+    productId: 'p1',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: 5,
+    unitPrice: 200000,
+    unitCost: 160000,
+    totalAmount: 1000000,
+    paidAmount: 450000, // 300k direct + 150k later debt settlement
+    debtAmount: 550000,
+    dueDate: '2026-12-28',
+    status: 'partial',
+    paymentMethod: 'Tiền mặt',
+    warehouseName: wh,
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-10T02:00:00.000Z',
+    updatedAt: '2026-11-12T02:00:00.000Z',
+  };
+  const directRv = buildDirectSaleReceiptVoucher({
+    salesLines: [{ ...sale, paidAmount: 300000, debtAmount: 700000 }],
+    voucherId: 'rv_sync_direct',
+    voucherCode: 'PT-2611-010',
+    paymentMethod: 'Tiền mặt',
+    nowIso: sale.createdAt,
+  })!;
+  const laterDebtRv: CashReceiptVoucher = {
+    id: 'rv_sync_debt',
+    voucherCode: 'PT-2611-011',
+    groupName: 'Thu nợ bán hàng khách hàng',
+    warehouseName: wh,
+    partnerId: 'c1',
+    partnerName: sale.customerName,
+    partnerPhone: sale.customerPhone,
+    amount: 150000,
+    paymentMethod: 'Tiền mặt',
+    isDebtSettlement: true,
+    settledAllocations: [
+      {
+        recordId: sale.id,
+        code: sale.invoiceCode,
+        date: '2026-11-10',
+        dueDate: sale.dueDate,
+        productName: sale.productName,
+        previousDebt: 700000,
+        allocatedAmount: 150000,
+        remainingDebt: 550000,
+      },
+    ],
+    countsTowardOtherIncome: false,
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-12T02:00:00.000Z',
+    updatedAt: '2026-11-12T02:00:00.000Z',
+  };
+
+  // Edit direct PT from 300k -> 500k: sale.paidAmount becomes 500k + 150k = 650k, debtAmount = 350k
+  const editedSaleSync = syncSalesOnDirectReceiptVoucherMutation({
+    sales: [sale],
+    voucher: directRv,
+    allReceiptVouchers: [directRv, laterDebtRv],
+    newAmount: 500000,
+    paymentMethod: 'Chuyển khoản ngân hàng',
+    nowIso: '2026-11-15T00:00:00.000Z',
+  });
+  assert.equal(editedSaleSync.effectiveAmount, 500000);
+  assert.equal(editedSaleSync.updatedSales[0].paidAmount, 650000);
+  assert.equal(editedSaleSync.updatedSales[0].debtAmount, 350000);
+  assert.equal(editedSaleSync.updatedSales[0].paymentMethod, 'Chuyển khoản ngân hàng');
+
+  // Import direct PC deletion reverts paidAmount -> 0 and status -> unpaid
+  const imp: ImportTransaction = {
+    id: 'imp_sync_1',
+    receiptCode: 'PN-2611-010',
+    supplierName: 'GAP',
+    supplierPhone: '0932919024',
+    productId: 'p1',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: 5,
+    unitCost: 160000,
+    totalCost: 800000,
+    paidAmount: 100000,
+    debtAmount: 700000,
+    dueDate: '2026-12-28',
+    status: 'partial',
+    paymentMethod: 'Tiền mặt',
+    warehouseName: wh,
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-10T02:00:00.000Z',
+    updatedAt: '2026-11-10T02:00:00.000Z',
+  };
+  const directPv = buildDirectImportPaymentVoucher({
+    importLines: [imp],
+    voucherId: 'pv_sync_direct',
+    voucherCode: 'PC-2611-010',
+    paymentMethod: 'Tiền mặt',
+    nowIso: imp.createdAt,
+  })!;
+  const deletedImpSync = syncImportsOnDirectPaymentVoucherMutation({
+    imports: [imp],
+    voucher: directPv,
+    allPaymentVouchers: [directPv],
+    newAmount: 0,
+    nowIso: '2026-11-16T00:00:00.000Z',
+  });
+  assert.equal(deletedImpSync.updatedImports[0].paidAmount, 0);
+  assert.equal(deletedImpSync.updatedImports[0].debtAmount, 800000);
+  assert.equal(deletedImpSync.updatedImports[0].status, 'unpaid');
+
+  // Fiscal Year Close for 2026 retains direct & debt vouchers linked to carried-forward open-debt orders
+  const closed = executeFiscalYearCloseAndCleanup({
+    fiscalYear: 2026,
+    products: [],
+    customers: [],
+    sales: editedSaleSync.updatedSales,
+    imports: [imp],
+    receiptVouchers: [{ ...directRv, amount: 500000 }, laterDebtRv],
+    paymentVouchers: [directPv],
+    savedVouchers: [],
+    nowIso: '2027-01-01T01:00:00.000Z',
+  });
+  assert.equal(closed.remainingSales.length, 1);
+  assert.equal(closed.remainingImports.length, 1);
+  assert.equal(closed.remainingReceiptVouchers.length, 2);
+  assert.equal(closed.remainingPaymentVouchers.length, 1);
 });

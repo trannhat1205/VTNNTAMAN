@@ -13,6 +13,7 @@ import {
   computeCashflowAndFinancialReport,
   formatVND,
   getTodayVietnamDateStr,
+  isContraOffsetVoucher,
 } from '../utils/businessLogic';
 import { computeShiftCloseSummary } from '../utils/smartInsights';
 
@@ -74,14 +75,18 @@ export const CashDrawerCloseModal: React.FC<CashDrawerCloseModalProps> = ({
       computeShiftCloseSummary({
         salesInitialPaidInflow: report.salesInitialPaidInflow,
         importsInitialPaidOutflow: report.importsInitialPaidOutflow,
-        receipts: report.filteredReceiptVouchers.map((r) => ({
-          amount: r.amount,
-          paymentMethod: r.paymentMethod,
-        })),
-        payments: report.filteredPaymentVouchers.map((p) => ({
-          amount: p.amount,
-          paymentMethod: p.paymentMethod,
-        })),
+        receipts: report.filteredReceiptVouchers
+          .filter((r) => !isContraOffsetVoucher(r))
+          .map((r) => ({
+            amount: r.amount,
+            paymentMethod: r.paymentMethod,
+          })),
+        payments: report.filteredPaymentVouchers
+          .filter((p) => !isContraOffsetVoucher(p))
+          .map((p) => ({
+            amount: p.amount,
+            paymentMethod: p.paymentMethod,
+          })),
         openingCash: Number(openingCash) || 0,
         countedCash: countedCash.trim() === '' ? null : Number(countedCash) || 0,
       }),
@@ -195,14 +200,18 @@ export const CashDrawerCloseModal: React.FC<CashDrawerCloseModalProps> = ({
               <div className="text-[11px] text-slate-500">Thu tiền mặt</div>
               <div className="font-mono font-bold text-emerald-800">{formatVND(summary.cashIn)}</div>
               <div className="text-[10px] text-slate-500">
-                gồm bán hàng tại quầy {formatVND(report.salesInitialPaidInflow)}
+                {report.salesInitialPaidInflow > 0
+                  ? `gồm đơn cũ chưa tách phiếu ${formatVND(report.salesInitialPaidInflow)}`
+                  : 'gồm thu tại đơn & phiếu thu tiền mặt'}
               </div>
             </div>
             <div className="p-2.5 rounded-lg border border-rose-200 bg-rose-50/60">
               <div className="text-[11px] text-slate-500">Chi tiền mặt</div>
               <div className="font-mono font-bold text-rose-800">{formatVND(summary.cashOut)}</div>
               <div className="text-[10px] text-slate-500">
-                gồm nhập hàng tại quầy {formatVND(report.importsInitialPaidOutflow)}
+                {report.importsInitialPaidOutflow > 0
+                  ? `gồm phiếu nhập cũ chưa tách phiếu ${formatVND(report.importsInitialPaidOutflow)}`
+                  : 'gồm chi tại phiếu nhập & phiếu chi tiền mặt'}
               </div>
             </div>
             <div className="p-2.5 rounded-lg border border-slate-200 bg-slate-50">
@@ -287,8 +296,8 @@ export const CashDrawerCloseModal: React.FC<CashDrawerCloseModalProps> = ({
               </strong>
             </div>
             <div className="text-[10px] text-slate-500 font-sans mt-1">
-              Doanh thu thuần trong ngày: {formatVND(report.netSalesRevenue)} · Bán/nhập thanh toán tại chỗ được tính là
-              tiền mặt.
+              Doanh thu thuần trong ngày: {formatVND(report.netSalesRevenue)} · Tự động tách riêng Tiền mặt & Chuyển
+              khoản theo phương thức trên đơn/phiếu.
             </div>
           </div>
 

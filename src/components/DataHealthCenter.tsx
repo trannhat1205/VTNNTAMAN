@@ -17,6 +17,7 @@ const FIX_LABEL: Record<DataHealthFixAction, string> = {
   duplicateSkus: 'Sửa tự động: đánh lại mã VT-... không trùng',
   customerDebtMismatch: 'Sửa tự động: tính lại công nợ từ hóa đơn',
   stockDrift: 'Sửa tự động: đối soát tồn kho theo chứng từ',
+  missingDirectVouchers: 'Sửa tự động: tạo bù Phiếu thu / Phiếu chi trả tại đơn',
 };
 
 export const DataHealthCenter: React.FC<DataHealthCenterProps> = ({ report, onOpenItem, onFix }) => {

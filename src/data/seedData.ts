@@ -47,6 +47,7 @@ export const INITIAL_RECEIPT_GROUPS: string[] = [
 
 export const INITIAL_PAYMENT_GROUPS: string[] = [
   'Chi trả nợ Nhà cung cấp',
+  'Chi thanh toán nhập hàng trực tiếp',
   'Chi phí vận chuyển & Bốc xếp hàng hóa',
   'Chi lương & Phụ cấp nhân sự',
   'Chi phí điện, nước & Mặt bằng kho',

@@ -4,6 +4,8 @@ import {
   applyCustomerFifoDebtSettlement,
   applySupplierFifoDebtSettlement,
   buildCustomerReturnRefundVouchers,
+  buildDirectImportPaymentVoucher,
+  buildDirectSaleReceiptVoucher,
   buildSupplierReturnRefundVouchers,
   findLinkedPaymentVouchersForImport,
   computeCashflowAndFinancialReport,
@@ -378,4 +380,98 @@ test('Supplier return refund vouchers keep each month exact and never touch prof
     imp: original, refundAmount: 0, returnCode: 'x', paymentId: 'a', paymentCode: 'b', receiptId: 'c', receiptCode: 'd',
     ownerId: OWNER, warehouseName: WH, staffName: 'x', nowIso: at('2026-11-12'),
   } }), null);
+});
+
+test('Golden month with direct upfront PT-/PC- vouchers: returns emit single refund voucher and monthly cashflow stays exact', () => {
+  const A = product('pV', 'V-01', 'Thuốc V', 6, 100000);
+  const cust = { id: 'cV', name: 'Khách V', phone: '0988888888' };
+
+  // Oct: Import 10 @ 100k = 1.000k, paid 600k upfront -> PC-2610-001 (600k), debt 400k
+  const octImp = imp('impV', 'PN-2610-001', A, 10, 100000, 600000, '2026-10-05');
+  const directPv = buildDirectImportPaymentVoucher({
+    importLines: [octImp],
+    voucherId: 'pv_oct_1',
+    voucherCode: 'PC-2610-001',
+    paymentMethod: 'Tiền mặt',
+    ownerId: OWNER,
+    nowIso: octImp.createdAt,
+  })!;
+
+  // Oct: Sale 4 @ 150k = 600k, paid 600k upfront -> PT-2610-001 (600k)
+  const octSale = sale('saleV', 'HD-2610-001', cust, A, 4, 150000, 600000, '2026-10-10');
+  const directRv = buildDirectSaleReceiptVoucher({
+    salesLines: [octSale],
+    voucherId: 'rv_oct_1',
+    voucherCode: 'PT-2610-001',
+    paymentMethod: 'Tiền mặt',
+    ownerId: OWNER,
+    nowIso: octSale.createdAt,
+  })!;
+
+  // Nov: Customer returns 1 unit (150k refund). Since directRv (600k) already sits in Oct,
+  // ONLY pair.payment (-150k in Nov) is emitted while directRv stays untouched in Oct!
+  const retCalc = computeCustomerSaleReturnCalculation({ sale: octSale, returnQuantity: 1 });
+  assert.equal(retCalc.cashRefundAmount, 150000);
+  const updatedSale: SaleTransaction = {
+    ...octSale,
+    quantity: retCalc.remainingQuantity,
+    totalAmount: retCalc.nextTotalAmount,
+    paidAmount: retCalc.nextPaidAmount,
+    debtAmount: retCalc.nextDebtAmount,
+    status: retCalc.nextStatus,
+  };
+  const refundPair = buildCustomerReturnRefundVouchers({
+    sale: octSale,
+    cashRefundAmount: retCalc.cashRefundAmount,
+    returnCode: 'TH-2611-001',
+    receiptId: 'rv_unused',
+    receiptCode: 'PT-UNUSED',
+    paymentId: 'pv_nov_refund',
+    paymentCode: 'PC-2611-001',
+    ownerId: OWNER,
+    warehouseName: WH,
+    staffName: 'Admin',
+    nowIso: at('2026-11-05'),
+  })!;
+
+  const receipts = [directRv];
+  const payments = [directPv, refundPair.payment];
+
+  const oct = computeCashflowAndFinancialReport({
+    sales: [updatedSale],
+    imports: [octImp],
+    products: [A],
+    receiptVouchers: receipts,
+    paymentVouchers: payments,
+    fromDate: '2026-10-01',
+    toDate: '2026-10-31',
+  });
+  const nov = computeCashflowAndFinancialReport({
+    sales: [updatedSale],
+    imports: [octImp],
+    products: [A],
+    receiptVouchers: receipts,
+    paymentVouchers: payments,
+    fromDate: '2026-11-01',
+    toDate: '2026-11-30',
+  });
+  const all = computeCashflowAndFinancialReport({
+    sales: [updatedSale],
+    imports: [octImp],
+    products: [A],
+    receiptVouchers: receipts,
+    paymentVouchers: payments,
+  });
+
+  assert.equal(oct.totalCashInflow, 600000);
+  assert.equal(oct.totalCashOutflow, 600000);
+  assert.equal(oct.netCashflow, 0);
+
+  assert.equal(nov.totalCashInflow, 0);
+  assert.equal(nov.totalCashOutflow, 150000);
+  assert.equal(nov.netCashflow, -150000);
+
+  assert.equal(all.netCashflow, -150000);
+  assert.equal(all.otherIncome, 0);
+  assert.equal(all.operatingExpenses, 0);
 });

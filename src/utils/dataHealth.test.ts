@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { computeDataHealthReport, findDuplicateSkuProductsToRename } from './dataHealth';
+import { buildMissingDirectVouchersForExistingRecords } from './businessLogic';
 import type {
   CashReceiptVoucher,
   CustomerProfile,
@@ -96,9 +97,9 @@ const emptyInput = {
   staffList: [],
 };
 
-test('Data health: empty workspace has zero issues and exposes all 14 groups', () => {
+test('Data health: empty workspace has zero issues and exposes all 15 groups', () => {
   const report = computeDataHealthReport(emptyInput);
-  assert.equal(report.groups.length, 14);
+  assert.equal(report.groups.length, 15);
   assert.equal(report.totalIssues, 0);
 });
 
@@ -217,4 +218,77 @@ test('Data health: flags zero-price stocked products (ignores gifts) and unbacke
   assert.equal(opening.byId.unbackedOpeningStock.severity, 'info');
   assert.ok(opening.byId.unbackedOpeningStock.count >= 1);
   assert.equal(opening.totalIssues, 0);
+});
+
+test('Data health: flags paid sales/imports missing direct PT-/PC- vouchers and clears to 0 after backfill', () => {
+  const products = [makeProduct('p1', 'VT-01', { stock: 3 })];
+  const customers: CustomerProfile[] = [
+    {
+      id: 'c1',
+      code: 'KH-01',
+      name: 'Khách A',
+      phone: '0900000001',
+      email: '',
+      address: '',
+      group: 'Nhà nông',
+      note: '',
+      totalPurchased: 200,
+      totalDebt: 100,
+      warehouseName: WH,
+      ownerId: 'u1',
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+  ];
+  const imports = [
+    makeImport('i_part', {
+      receiptCode: 'PN-2611-002',
+      quantity: 5,
+      unitCost: 160000,
+      totalCost: 800000,
+      paidAmount: 100000,
+      debtAmount: 700000,
+      status: 'partial',
+    }),
+  ];
+  const sales = [
+    makeSale('s_part', {
+      invoiceCode: 'HD-2611-001',
+      quantity: 2,
+      unitPrice: 100,
+      totalAmount: 200,
+      paidAmount: 100,
+      debtAmount: 100,
+      status: 'partial',
+    }),
+  ];
+
+  const before = computeDataHealthReport({
+    ...emptyInput,
+    products,
+    customers,
+    sales,
+    imports,
+  });
+  assert.equal(before.byId.missingDirectVouchers.count, 2);
+
+  const backfill = buildMissingDirectVouchersForExistingRecords({
+    sales,
+    imports,
+    receiptVouchers: [],
+    paymentVouchers: [],
+  });
+  assert.equal(backfill.createdReceipts.length, 1);
+  assert.equal(backfill.createdPayments.length, 1);
+
+  const after = computeDataHealthReport({
+    ...emptyInput,
+    products,
+    customers,
+    sales,
+    imports,
+    receiptVouchers: backfill.createdReceipts,
+    paymentVouchers: backfill.createdPayments,
+  });
+  assert.equal(after.byId.missingDirectVouchers.count, 0);
 });

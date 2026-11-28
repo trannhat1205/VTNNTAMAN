@@ -9,8 +9,10 @@ import {
   SupplierProfile,
 } from '../types';
 import {
+  computeCashflowAndFinancialReport,
   formatVND,
   getTodayVietnamDateStr,
+  isContraOffsetVoucher,
   resolveSaleGiftUnitCost,
   resolveSaleUnitCost,
 } from './businessLogic';
@@ -893,28 +895,26 @@ export function buildWarehouseReportSnapshot(params: {
     .sort((a, b) => b.revenue - a.revenue)
     .slice(0, 10);
 
-  const totalReceiptVouchersAmount = receiptVouchers.reduce(
-    (sum, r) => sum + (Number(r.amount) || 0),
-    0
-  );
-  const totalPaymentVouchersAmount = paymentVouchers.reduce(
-    (sum, p) => sum + (Number(p.amount) || 0),
-    0
-  );
-
-  // Align strictly with computeCashflowAndFinancialReport:
-  // Debt-settlement vouchers (isDebtSettlement === true) are ALREADY reflected inside sale.paidAmount / import.paidAmount!
-  // Only non-debt vouchers (Thu khác / Chi vận hành) are added to totalCashIn / totalCashOut so nothing is double-counted.
-  const otherReceiptInflow = receiptVouchers
-    .filter((r) => !r.isDebtSettlement)
+  const totalReceiptVouchersAmount = receiptVouchers
+    .filter((r) => !isContraOffsetVoucher(r))
     .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-  const operatingPaymentOutflow = paymentVouchers
-    .filter((p) => !p.isDebtSettlement)
+  const totalPaymentVouchersAmount = paymentVouchers
+    .filter((p) => !isContraOffsetVoucher(p))
     .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 
-  const totalCashIn = totalSalesCollected + otherReceiptInflow;
-  const totalCashOut = totalImportPaid + operatingPaymentOutflow;
-  const netCashFlow = totalCashIn - totalCashOut;
+  // Align 100% with computeCashflowAndFinancialReport so direct vouchers (PT-/PC- at order),
+  // debt-settlement vouchers, and contra-offset vouchers are never double-counted or mixed into cashflow.
+  const canonicalCashflow = computeCashflowAndFinancialReport({
+    sales,
+    imports,
+    products,
+    receiptVouchers,
+    paymentVouchers,
+  });
+
+  const totalCashIn = canonicalCashflow.totalCashInflow;
+  const totalCashOut = canonicalCashflow.totalCashOutflow;
+  const netCashFlow = canonicalCashflow.netCashflow;
 
   return {
     warehouseLabel: warehouseLabel || 'Kho VTNN Tâm An',

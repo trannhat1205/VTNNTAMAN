@@ -10,6 +10,7 @@ import {
   StockAdjustmentRecord,
 } from '../types';
 import {
+  buildMissingDirectVouchersForExistingRecords,
   doesRecordMatchProduct,
   evaluateProductStockIntegrity,
   normalizeVietnameseSearch,
@@ -24,6 +25,7 @@ export type DataHealthGroupId =
   | 'orphanSaleCustomers'
   | 'receiptAllocMissingSale'
   | 'paymentAllocMissingImport'
+  | 'missingDirectVouchers'
   | 'stockDrift'
   | 'zeroPriceProducts'
   | 'unbackedOpeningStock'
@@ -33,7 +35,11 @@ export type DataHealthGroupId =
   | 'duplicateWarehouseNames'
   | 'emptyWarehouses';
 
-export type DataHealthFixAction = 'duplicateSkus' | 'customerDebtMismatch' | 'stockDrift';
+export type DataHealthFixAction =
+  | 'duplicateSkus'
+  | 'customerDebtMismatch'
+  | 'stockDrift'
+  | 'missingDirectVouchers';
 
 export interface DataHealthItem {
   id: string;
@@ -225,6 +231,28 @@ export function computeDataHealthReport(input: DataHealthInput): DataHealthRepor
       tab: 'payment_vouchers' as CrossLinkTargetTab,
       recordId: pv.id,
     }));
+
+  // 4b. Missing upfront PT- / PC- vouchers for paid/partial sales & imports
+  const missingDirect = buildMissingDirectVouchersForExistingRecords({
+    sales,
+    imports,
+    receiptVouchers,
+    paymentVouchers,
+  });
+  const missingDirectVoucherItems: DataHealthItem[] = [
+    ...missingDirect.createdReceipts.map((rv) => ({
+      id: `mdr_${rv.id}`,
+      code: rv.linkedSaleInvoiceCode || rv.voucherCode,
+      label: `Đơn bán ${rv.linkedSaleInvoiceCode || ''} (${rv.partnerName}): đã thu trước ${rv.amount.toLocaleString('vi-VN')} đ chưa có Phiếu thu PT-...`,
+      tab: 'receipt_vouchers' as CrossLinkTargetTab,
+    })),
+    ...missingDirect.createdPayments.map((pv) => ({
+      id: `mdp_${pv.id}`,
+      code: pv.linkedImportReceiptCode || pv.voucherCode,
+      label: `Phiếu nhập ${pv.linkedImportReceiptCode || ''} (${pv.partnerName}): đã trả NCC ${pv.amount.toLocaleString('vi-VN')} đ chưa có Phiếu chi PC-...`,
+      tab: 'payment_vouchers' as CrossLinkTargetTab,
+    })),
+  ];
 
   // 5. Stock drift
   const stockDriftItems: DataHealthItem[] = [];
@@ -448,6 +476,14 @@ export function computeDataHealthReport(input: DataHealthInput): DataHealthRepor
       'Phiếu chi trả nợ NCC có phân bổ vào phiếu nhập không còn tồn tại.',
       'error',
       paymentAllocMissingImport
+    ),
+    make(
+      'missingDirectVouchers',
+      'Đơn bán / Phiếu nhập trả tiền tại chỗ thiếu Phiếu thu / Phiếu chi',
+      'Các khoản khách trả trước 1 phần / trả đủ trên đơn bán hoặc chi trả trước cho NCC khi nhập kho chưa có chứng từ PT-... / PC-... đối ứng.',
+      'warning',
+      missingDirectVoucherItems,
+      'missingDirectVouchers'
     ),
     make(
       'stockDrift',

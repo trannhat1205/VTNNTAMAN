@@ -40,12 +40,17 @@ import {
   diagnoseImportVoucher,
   diagnoseSaleVoucher,
   evaluateDebtUrgency,
+  findAllVouchersForImport,
+  findAllVouchersForSale,
   formatVND,
   getTodayVietnamDateStr,
+  isDirectImportPaymentVoucher,
+  isDirectSaleReceiptVoucher,
   matchDebtTermDays,
   normalizeVietnameseSearch,
   previewCustomerFifoDebtSettlement,
   previewSupplierFifoDebtSettlement,
+  toVietnamDateStr,
 } from '../utils/businessLogic';
 import {
   exportCustomerReceiptPDF,
@@ -1371,11 +1376,11 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                         }
                       />
                     )}
-                    {supDiag.linkedPaymentVouchers.map((pv) => (
+                    {findAllVouchersForImport(linkedSupplierRecord, paymentVouchers).map((pv) => (
                       <CrossLinkChip
                         key={pv.id}
-                        tone="rose"
-                        label={`Phiếu chi ${pv.voucherCode}`}
+                        tone={isDirectImportPaymentVoucher(pv) ? 'emerald' : 'rose'}
+                        label={`Phiếu chi ${pv.voucherCode}${isDirectImportPaymentVoucher(pv) ? ' (Tại PN)' : ''}`}
                         onClick={() =>
                           onNavigateCrossLink({
                             tab: 'payment_vouchers',
@@ -1552,11 +1557,11 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                         }
                       />
                     )}
-                    {custDiag.linkedReceiptVouchers.map((rv) => (
+                    {findAllVouchersForSale(linkedCustomerRecord, receiptVouchers).map((rv) => (
                       <CrossLinkChip
                         key={rv.id}
-                        tone="rose"
-                        label={`Phiếu thu ${rv.voucherCode}`}
+                        tone={isDirectSaleReceiptVoucher(rv) ? 'emerald' : 'rose'}
+                        label={`Phiếu thu ${rv.voucherCode}${isDirectSaleReceiptVoucher(rv) ? ' (Tại đơn)' : ''}`}
                         onClick={() =>
                           onNavigateCrossLink({
                             tab: 'receipt_vouchers',
@@ -2069,6 +2074,30 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                       </div>
                     </div>
 
+                    {onNavigateCrossLink && (() => {
+                      const allPayVouchers = findAllVouchersForImport(imp, paymentVouchers);
+                      if (allPayVouchers.length === 0) return null;
+                      return (
+                        <div className="flex flex-wrap items-center gap-1">
+                          {allPayVouchers.map((pv) => (
+                            <CrossLinkChip
+                              key={pv.id}
+                              tone={isDirectImportPaymentVoucher(pv) ? 'emerald' : 'rose'}
+                              label={`${pv.voucherCode}${isDirectImportPaymentVoucher(pv) ? ' (Tại PN)' : ''}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'payment_vouchers',
+                                  recordId: pv.id,
+                                  voucherCode: pv.voucherCode,
+                                  label: `Phiếu chi ${pv.voucherCode}`,
+                                })
+                              }
+                            />
+                          ))}
+                        </div>
+                      );
+                    })()}
+
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <button
@@ -2090,21 +2119,23 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
+                            const latestPv = findAllVouchersForImport(imp, paymentVouchers)[0];
                             exportSupplierPaymentPDF({
-                              voucherCode: `PC-${imp.receiptCode}`,
+                              voucherCode: latestPv?.voucherCode || `PC-${imp.receiptCode}`,
                               supplierName: imp.supplierName,
                               supplierPhone: imp.supplierPhone,
                               receiptCode: imp.receiptCode,
                               previousDebt: imp.totalCost,
                               paidAmount: imp.paidAmount,
                               remainingDebt: imp.debtAmount,
-                              paymentMethod: 'Chuyển khoản ngân hàng',
+                              paymentMethod:
+                                latestPv?.paymentMethod || imp.paymentMethod || 'Tiền mặt',
                               note: imp.note,
                               staffName: imp.staffName,
                               createdAt: imp.createdAt,
-                            })
-                          }
+                            });
+                          }}
                           className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap"
                         >
                           Phiếu PDF
@@ -2219,7 +2250,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             <ExternalLink className="w-3 h-3" />
                           </button>
                           <div className="text-xs text-slate-500 font-mono mt-0.5">
-                            {imp.createdAt.slice(0, 10)}
+                            {toVietnamDateStr(imp.createdAt)}
                           </div>
                           {supDiag.statusLevel !== 'ok' && (
                             <div className="mt-1">
@@ -2271,11 +2302,11 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                                   }
                                 />
                               )}
-                              {supDiag.linkedPaymentVouchers.map((pv) => (
+                              {findAllVouchersForImport(imp, paymentVouchers).map((pv) => (
                                 <CrossLinkChip
                                   key={pv.id}
-                                  tone="rose"
-                                  label={pv.voucherCode}
+                                  tone={isDirectImportPaymentVoucher(pv) ? 'emerald' : 'rose'}
+                                  label={`${pv.voucherCode}${isDirectImportPaymentVoucher(pv) ? ' (Tại PN)' : ''}`}
                                   onClick={() =>
                                     onNavigateCrossLink({
                                       tab: 'payment_vouchers',
@@ -2566,6 +2597,30 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                       </div>
                     </div>
 
+                    {onNavigateCrossLink && (() => {
+                      const allRecVouchers = findAllVouchersForSale(sale, receiptVouchers);
+                      if (allRecVouchers.length === 0) return null;
+                      return (
+                        <div className="flex flex-wrap items-center gap-1">
+                          {allRecVouchers.map((rv) => (
+                            <CrossLinkChip
+                              key={rv.id}
+                              tone={isDirectSaleReceiptVoucher(rv) ? 'emerald' : 'rose'}
+                              label={`${rv.voucherCode}${isDirectSaleReceiptVoucher(rv) ? ' (Tại đơn)' : ''}`}
+                              onClick={() =>
+                                onNavigateCrossLink({
+                                  tab: 'receipt_vouchers',
+                                  recordId: rv.id,
+                                  voucherCode: rv.voucherCode,
+                                  label: `Phiếu thu ${rv.voucherCode}`,
+                                })
+                              }
+                            />
+                          ))}
+                        </div>
+                      );
+                    })()}
+
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <button
@@ -2587,21 +2642,25 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() =>
+                          onClick={() => {
+                            const latestRv = findAllVouchersForSale(sale, receiptVouchers)[0];
                             exportCustomerReceiptPDF({
-                              voucherCode: `PT-${sale.invoiceCode}`,
+                              voucherCode: latestRv?.voucherCode || `PT-${sale.invoiceCode}`,
                               customerName: sale.customerName,
                               customerPhone: sale.customerPhone,
                               invoiceCode: sale.invoiceCode,
                               previousDebt: sale.totalAmount,
                               collectedAmount: sale.paidAmount,
                               remainingDebt: sale.debtAmount,
-                              paymentMethod: 'Tiền mặt / Chuyển khoản',
+                              paymentMethod:
+                                latestRv?.paymentMethod ||
+                                sale.paymentMethod ||
+                                'Tiền mặt / Chuyển khoản',
                               note: sale.note,
                               staffName: sale.staffName,
                               createdAt: sale.createdAt,
-                            })
-                          }
+                            });
+                          }}
                           className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg whitespace-nowrap"
                         >
                           Phiếu PDF
@@ -2733,7 +2792,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                             <ExternalLink className="w-3 h-3" />
                           </button>
                           <div className="text-xs text-slate-500 font-mono mt-0.5">
-                            {sale.createdAt.slice(0, 10)}
+                            {toVietnamDateStr(sale.createdAt)}
                           </div>
                           {custDiag.statusLevel !== 'ok' && (
                             <div className="mt-1">
@@ -2798,11 +2857,11 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
                                   }
                                 />
                               )}
-                              {custDiag.linkedReceiptVouchers.map((rv) => (
+                              {findAllVouchersForSale(sale, receiptVouchers).map((rv) => (
                                 <CrossLinkChip
                                   key={rv.id}
-                                  tone="rose"
-                                  label={rv.voucherCode}
+                                  tone={isDirectSaleReceiptVoucher(rv) ? 'emerald' : 'rose'}
+                                  label={`${rv.voucherCode}${isDirectSaleReceiptVoucher(rv) ? ' (Tại đơn)' : ''}`}
                                   onClick={() =>
                                     onNavigateCrossLink({
                                       tab: 'receipt_vouchers',

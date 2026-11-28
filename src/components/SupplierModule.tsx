@@ -43,9 +43,11 @@ import {
   getTodayVietnamDateStr,
   isContraOffsetVoucher,
   isDateWithinRange,
+  isDirectImportPaymentVoucher,
   normalizeVietnameseSearch,
   previewSupplierFifoDebtSettlement,
   SupplierDetailLedger,
+  toVietnamDateStr,
 } from '../utils/businessLogic';
 import { CrossLinkChip } from './VoucherCrossLinkUI';
 
@@ -1083,12 +1085,13 @@ export const SupplierModule: React.FC<SupplierModuleProps> = ({
                         <tbody className="divide-y divide-slate-200">
                           {activeLedger.paymentHistory.map((pv) => {
                             const isContra = isContraOffsetVoucher(pv);
+                            const isDirectImp = isDirectImportPaymentVoucher(pv);
                             return (
                               <tr key={pv.id} className="hover:bg-slate-50">
                                 <td className="py-2.5 px-3 font-mono whitespace-nowrap">
                                   <div className="font-bold text-slate-900">{pv.voucherCode}</div>
                                   <div className="text-[11px] text-slate-500">
-                                    {(pv.createdAt || '').slice(0, 10)}
+                                    {toVietnamDateStr(pv.createdAt)}
                                   </div>
                                 </td>
                                 <td className="py-2.5 px-3 whitespace-nowrap">
@@ -1096,10 +1099,16 @@ export const SupplierModule: React.FC<SupplierModuleProps> = ({
                                     className={`px-2 py-0.5 text-[11px] font-semibold rounded border ${
                                       isContra
                                         ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                        : isDirectImp
+                                        ? 'bg-amber-50 text-amber-800 border-amber-200'
                                         : 'bg-emerald-50 text-emerald-800 border-emerald-200'
                                     }`}
                                   >
-                                    {isContra ? 'Cấn trừ hàng xuất bán' : pv.paymentMethod}
+                                    {isContra
+                                      ? 'Cấn trừ hàng xuất bán'
+                                      : isDirectImp
+                                      ? `${pv.paymentMethod} (Trả tại PN)`
+                                      : pv.paymentMethod}
                                   </span>
                                 </td>
                                 <td className="py-2.5 px-3 text-slate-700">
@@ -1131,6 +1140,20 @@ export const SupplierModule: React.FC<SupplierModuleProps> = ({
                                           })
                                         }
                                       />
+                                      {pv.linkedImportIds?.[0] && (
+                                        <CrossLinkChip
+                                          tone="emerald"
+                                          label={pv.linkedImportReceiptCode || 'PN gốc'}
+                                          onClick={() =>
+                                            onNavigateCrossLink({
+                                              tab: 'imports',
+                                              recordId: pv.linkedImportIds![0],
+                                              voucherCode: pv.linkedImportReceiptCode,
+                                              label: `Phiếu nhập ${pv.linkedImportReceiptCode || ''}`,
+                                            })
+                                          }
+                                        />
+                                      )}
                                       {pv.linkedSaleIds?.[0] && (
                                         <CrossLinkChip
                                           tone="sky"

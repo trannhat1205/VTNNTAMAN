@@ -110,6 +110,8 @@ export interface SaleTransaction {
   supplierOffsetAmount?: number;
   linkedPaymentVoucherId?: string;
   linkedPaymentVoucherCode?: string;
+  /** Payment method chosen for upfront payment at checkout ('Tiền mặt' | 'Chuyển khoản ngân hàng'). */
+  paymentMethod?: string;
   note: string;
   staffName: string;
   ownerId: string;
@@ -153,6 +155,8 @@ export interface ImportTransaction {
   warehouseName?: string;
   batchNumber?: string;
   expiryDate?: string;
+  /** Payment method chosen for upfront supplier payment ('Tiền mặt' | 'Chuyển khoản ngân hàng'). */
+  paymentMethod?: string;
   note: string;
   staffName: string;
   ownerId: string;
@@ -226,6 +230,11 @@ export interface CashReceiptVoucher {
   totalPreviousDebt?: number;
   totalRemainingDebt?: number;
   countsTowardOtherIncome?: boolean;
+  /** True when auto-generated from upfront cash/transfer paid directly on a sales order (HD-...). */
+  isDirectSaleReceipt?: boolean;
+  linkedSaleInvoiceCode?: string;
+  linkedSaleGroupId?: string;
+  linkedSaleIds?: string[];
   /** Non-cash contra entry (cấn trừ công nợ NCC) — never counted as real cash. */
   isContraOffset?: boolean;
   linkedContraVoucherId?: string;
@@ -251,6 +260,11 @@ export interface CashPaymentVoucher {
   totalPreviousDebt?: number;
   totalRemainingDebt?: number;
   countsTowardOperatingExpense?: boolean;
+  /** True when auto-generated from upfront cash/transfer paid directly on an import receipt (PN-...). */
+  isDirectImportPayment?: boolean;
+  linkedImportReceiptCode?: string;
+  linkedImportGroupId?: string;
+  linkedImportIds?: string[];
   /** Non-cash contra entry (cấn trừ công nợ NCC) — never counted as real cash. */
   isContraOffset?: boolean;
   linkedContraVoucherId?: string;
