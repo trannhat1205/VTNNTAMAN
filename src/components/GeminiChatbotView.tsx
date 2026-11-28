@@ -390,10 +390,39 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   const [isSavingMarketPrice, setIsSavingMarketPrice] = useState(false);
 
   const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const modelDropdownRef = useRef<HTMLDivElement | null>(null);
   const communityBoardCacheRef = useRef<{
     board: CommunityMarketPriceBoard | null;
     fetchedAt: number;
   }>({ board: null, fetchedAt: 0 });
+
+  // Auto-collapse AI model dropdown when clicking/tapping anywhere outside or pressing Escape
+  useEffect(() => {
+    if (!showModelDropdown) return;
+    const handleOutsidePointer = (e: Event) => {
+      const target = e.target;
+      if (
+        modelDropdownRef.current &&
+        target instanceof Node &&
+        !modelDropdownRef.current.contains(target)
+      ) {
+        setShowModelDropdown(false);
+      }
+    };
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowModelDropdown(false);
+      }
+    };
+    document.addEventListener('pointerdown', handleOutsidePointer, true);
+    document.addEventListener('touchstart', handleOutsidePointer, true);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('pointerdown', handleOutsidePointer, true);
+      document.removeEventListener('touchstart', handleOutsidePointer, true);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [showModelDropdown]);
 
   // Reload sessions & quota when user account switches
   useEffect(() => {
@@ -532,6 +561,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
     setActiveSessionId(newId);
     setInputPrompt('');
     setShowHistoryDrawer(false);
+    setShowModelDropdown(false);
   };
 
   const handleDeleteSession = (sessionId: string) => {
@@ -648,6 +678,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
   };
 
   const handleSendMessage = async (customText?: string) => {
+    setShowModelDropdown(false);
     const promptText = (customText ?? inputPrompt).normalize('NFC').trim();
     if (!promptText || isGenerating || !activeSession) return;
 
@@ -1259,7 +1290,10 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
           <div className="flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1">
             <button
               type="button"
-              onClick={() => setShowHistoryDrawer((prev) => !prev)}
+              onClick={() => {
+                setShowModelDropdown(false);
+                setShowHistoryDrawer((prev) => !prev);
+              }}
               className="lg:hidden inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-700 hover:bg-slate-100 shrink-0 whitespace-nowrap"
             >
               <History className="w-3.5 h-3.5 shrink-0" />
@@ -1267,9 +1301,11 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
             </button>
 
             {/* Model Selector Dropdown */}
-            <div className="relative min-w-0">
+            <div ref={modelDropdownRef} className="relative min-w-0">
               <button
                 type="button"
+                aria-haspopup="listbox"
+                aria-expanded={showModelDropdown}
                 onClick={() => setShowModelDropdown((prev) => !prev)}
                 className="inline-flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-2xl bg-slate-100/90 hover:bg-slate-200/70 border border-slate-200/80 text-slate-800 text-xs sm:text-sm font-bold transition cursor-pointer max-w-full"
               >
@@ -1282,7 +1318,11 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
                 <span className="hidden sm:inline-block px-2 py-0.5 text-[10px] font-bold rounded-lg bg-white text-emerald-700 border border-emerald-200 shrink-0">
                   {activeModelMeta.badge}
                 </span>
-                <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-slate-500 shrink-0 transition-transform ${
+                    showModelDropdown ? 'rotate-180' : ''
+                  }`}
+                />
               </button>
 
               {showModelDropdown && (
@@ -1565,6 +1605,7 @@ export const GeminiChatbotView: React.FC<GeminiChatbotViewProps> = ({
               <textarea
                 rows={2}
                 value={inputPrompt}
+                onFocus={() => setShowModelDropdown(false)}
                 onChange={(e) => setInputPrompt(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
