@@ -82,7 +82,12 @@ interface InventoryViewProps {
   onAddProductCategory: (catName: string) => void;
   onSaveProduct: (
     data: Omit<ProductItem, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>,
-    editingId?: string
+    editingId?: string,
+    options?: {
+      createInitialImportReceipt?: boolean;
+      initialImportPaidMode?: 'paid' | 'debt';
+      initialImportDueDate?: string;
+    }
   ) => ProductItem;
   onDeleteProduct: (productId: string) => void;
   onExecuteStocktake?: (params: {
@@ -168,6 +173,12 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   const [barcode, setBarcode] = useState('');
   const [dosageGuide, setDosageGuide] = useState('');
   const [groupPriceInputs, setGroupPriceInputs] = useState<Record<string, string>>({});
+  // New product with opening stock: create a real PN receipt (default) or record opening stock only
+  const [initialReceiptMode, setInitialReceiptMode] = useState<'pn_paid' | 'pn_debt' | 'opening_only'>(
+    'pn_paid'
+  );
+  const [zeroPriceConfirmed, setZeroPriceConfirmed] = useState(false);
+  const [productFormError, setProductFormError] = useState<string | null>(null);
 
   // Stocktake Modal (Kiểm kê & Điều chỉnh tồn kho KK-YYMM-XXX)
   const [isStocktakeModalOpen, setIsStocktakeModalOpen] = useState(false);
@@ -460,6 +471,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
     setBarcode('');
     setDosageGuide('');
     setGroupPriceInputs({});
+    setInitialReceiptMode('pn_paid');
+    setZeroPriceConfirmed(false);
+    setProductFormError(null);
     setShowNewCategoryInput(false);
     setNewCategoryName('');
     setShowNewWarehouseInput(false);
@@ -549,6 +563,16 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
       lockedProductCodePreview ||
       generateUniqueProductCodeFromName(name, products, resolvedWarehouse, editingProduct?.id);
 
+    const openingStockNum = Math.max(0, Number(stock) || 0);
+    const importPriceNum = Math.max(0, Number(importPrice) || 0);
+    if (!editingProduct && openingStockNum > 0 && importPriceNum <= 0 && !zeroPriceConfirmed) {
+      setProductFormError(
+        'Tồn kho ban đầu > 0 nhưng Giá nhập đang là 0 đ. Vui lòng nhập Giá nhập thực tế (> 0 đ), hoặc tích chọn "Đây là hàng tặng / hàng mẫu 0 đ" bên dưới.'
+      );
+      return;
+    }
+    setProductFormError(null);
+
     onSaveProduct(
       {
         code: finalSafeCode,
@@ -556,10 +580,10 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         category: resolvedCategory,
         warehouseName: resolvedWarehouse,
         unit: unit.trim() || 'Bao',
-        importPrice: Math.max(0, Number(importPrice) || 0),
+        importPrice: importPriceNum,
         sellPrice: Math.max(0, Number(sellPrice) || 0),
-        stock: Math.max(0, Number(stock) || 0),
-        minStock: Math.max(0, Number(minStock) || 10),
+        stock: openingStockNum,
+        minStock: Math.max(0, Number(minStock) || (editingProduct ? 10 : 5)),
         supplierName: supplierName.trim() || 'Nhà cung cấp VTNN',
         batchNumber: batchNumber.trim() || undefined,
         expiryDate: expiryDate.trim() || undefined,
@@ -572,7 +596,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
           return entries.length > 0 ? Object.fromEntries(entries) : undefined;
         })(),
       },
-      editingProduct?.id
+      editingProduct?.id,
+      !editingProduct && openingStockNum > 0 && initialReceiptMode !== 'opening_only'
+        ? {
+            createInitialImportReceipt: true,
+            initialImportPaidMode: initialReceiptMode === 'pn_debt' ? 'debt' : 'paid',
+          }
+        : undefined
     );
     resetProductModalToBlank();
     setIsModalOpen(false);
@@ -1919,7 +1949,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     min={0}
                     value={minStock}
                     onChange={(e) => setMinStock(e.target.value)}
-                    placeholder="10"
+                    placeholder={editingProduct ? '10' : '5'}
                     className="w-full px-3 py-2 text-sm font-mono bg-white border border-slate-200 rounded-lg"
                   />
                   {editingProduct &&
@@ -1944,6 +1974,67 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     })()}
                 </div>
               </div>
+
+              {!editingProduct && Number(stock) > 0 && (
+                <div className="p-3 rounded-lg border border-emerald-200 bg-emerald-50/70 space-y-2">
+                  <div className="text-xs font-bold text-emerald-900">
+                    Tồn kho ban đầu {Number(stock).toLocaleString('vi-VN')} {unit || 'đơn vị'} — ghi nhận thế nào?
+                  </div>
+                  {(
+                    [
+                      {
+                        id: 'pn_paid',
+                        label: 'Lập kèm Phiếu nhập kho (PN-...) — đã thanh toán đủ NCC',
+                        hint: 'Hiện ngay trong Nhật ký Nhập hàng, Thẻ kho (+nhập) và Sổ quỹ.',
+                      },
+                      {
+                        id: 'pn_debt',
+                        label: 'Lập kèm Phiếu nhập kho (PN-...) — ghi nợ NCC 30 ngày',
+                        hint: 'Hiện thêm trong Quản lý Công nợ (phải trả NCC).',
+                      },
+                      {
+                        id: 'opening_only',
+                        label: 'Chỉ ghi Tồn đầu kỳ (hàng có sẵn, không tạo phiếu nhập)',
+                        hint: 'Nhật ký Nhập hàng sẽ không có phiếu cho phần tồn này.',
+                      },
+                    ] as const
+                  ).map((opt) => (
+                    <label
+                      key={opt.id}
+                      className={`flex items-start gap-2 p-2 rounded-md border cursor-pointer text-xs ${
+                        initialReceiptMode === opt.id
+                          ? 'bg-white border-emerald-500'
+                          : 'bg-transparent border-transparent hover:bg-white/60'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="prod-initial-receipt-mode"
+                        checked={initialReceiptMode === opt.id}
+                        onChange={() => setInitialReceiptMode(opt.id)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        <span className="font-semibold text-slate-900">{opt.label}</span>
+                        <span className="block text-[11px] text-slate-500">{opt.hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                  {Number(importPrice) <= 0 && (
+                    <label className="flex items-start gap-2 text-xs font-semibold text-amber-900 bg-amber-50 border border-amber-200 rounded-md p-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={zeroPriceConfirmed}
+                        onChange={(e) => setZeroPriceConfirmed(e.target.checked)}
+                        className="mt-0.5"
+                      />
+                      <span>
+                        Giá nhập đang là 0 đ — tích vào đây nếu đây là hàng tặng / hàng mẫu 0 đ (không tính tiền).
+                      </span>
+                    </label>
+                  )}
+                </div>
+              )}
 
               <div>
                 <label
@@ -2053,6 +2144,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
               </div>
 
               </div>
+
+              {productFormError && (
+                <div className="px-4 sm:px-6 py-2 bg-red-50 border-t border-red-200 text-xs font-semibold text-red-700 flex items-start gap-1.5 shrink-0">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{productFormError}</span>
+                </div>
+              )}
 
               <div className="px-4 sm:px-6 py-3 border-t border-slate-200 bg-slate-50/90 flex items-center justify-end gap-2.5 shrink-0">
                 <button

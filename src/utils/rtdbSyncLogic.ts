@@ -1142,6 +1142,8 @@ export function resolveDesignatedOwnerUidsForWarehouses(params: {
 
   for (const st of params.staffList || []) {
     if (!st?.uid) continue;
+    // Internal sample/demo accounts (staff_*) without a real workspace must never join a shared warehouse
+    if (st.uid.startsWith('staff_') && !params.workspacesMap?.[st.uid]) continue;
     const whKey = normalizeWarehouseKey(st.assignedWarehouse);
     if (whKey && selectedKeys.has(whKey)) {
       ownerUidsMap[st.uid] = true;
@@ -2261,4 +2263,128 @@ export function buildRecoveredVtnnTamAn99Workspace(
       autoDailyBackupEnabled: true,
     },
   };
+}
+
+
+/* ------------------------------------------------------------------------------------------------
+ * Idempotent atomic product mutations & pending-local-record protection
+ * ---------------------------------------------------------------------------------------------- */
+
+export const MAX_PRODUCT_MUTATION_IDS = 20;
+
+/** Appends a mutation id to the product's ring buffer (max 20, no duplicates). */
+export function appendProductMutationId(product: ProductItem, mutationId?: string): ProductItem {
+  const id = (mutationId || '').trim();
+  if (!id) return product;
+  const seen = Array.isArray(product.lastMutationIds) ? product.lastMutationIds : [];
+  if (seen.includes(id)) return product;
+  return {
+    ...product,
+    lastMutationIds: [...seen, id].slice(-MAX_PRODUCT_MUTATION_IDS),
+  };
+}
+
+/**
+ * Runs a stock/cost mutation against the freshest server product exactly ONCE per `mutationId`.
+ * - Server record present: mutate it (unless this mutationId was already applied -> return unchanged).
+ * - Server record missing: use `fallbackResult` (the already-mutated local product) as-is, or
+ *   `mutate(preMutationProduct)` when only the pre-mutation product is known. Never mutate twice.
+ */
+export function applyIdempotentProductMutation(params: {
+  currentRaw: unknown;
+  preMutationProduct?: ProductItem | null;
+  fallbackResult?: ProductItem | null;
+  mutationId?: string;
+  mutate: (base: ProductItem) => ProductItem;
+}): ProductItem | null {
+  const mutationId = (params.mutationId || '').trim();
+  const raw = params.currentRaw;
+  const hasServerRecord =
+    Boolean(raw) && typeof raw === 'object' && Boolean((raw as ProductItem).id);
+
+  if (hasServerRecord) {
+    const base = raw as ProductItem;
+    const seen = Array.isArray(base.lastMutationIds) ? base.lastMutationIds : [];
+    if (mutationId && seen.includes(mutationId)) {
+      return sanitizeForRealtimeDb(base);
+    }
+    return sanitizeForRealtimeDb(appendProductMutationId(params.mutate(base), mutationId));
+  }
+
+  if (params.fallbackResult) {
+    return sanitizeForRealtimeDb(appendProductMutationId(params.fallbackResult, mutationId));
+  }
+  if (params.preMutationProduct) {
+    return sanitizeForRealtimeDb(
+      appendProductMutationId(params.mutate(params.preMutationProduct), mutationId)
+    );
+  }
+  return null;
+}
+
+export const PENDING_LOCAL_RECORD_TTL_MS = 20000;
+
+/**
+ * Protects records the user just created/edited locally from being wiped by an early RTDB snapshot
+ * that does not contain them yet. Pending records are kept until the server confirms them
+ * (same id with `updatedAt/createdAt` >= local), they are deleted, or they expire.
+ */
+export function reconcileIncomingCollectionWithPendingLocal<
+  T extends { id: string; updatedAt?: string; createdAt?: string }
+>(params: {
+  remoteItems: T[];
+  pendingMap: ReadonlyMap<string, { record: T; stampedAtMs: number }>;
+  tombstones?: DeletedRecordTombstone[];
+  nowMs?: number;
+  ttlMs?: number;
+}): { merged: T[]; confirmedIds: string[]; stillPendingIds: string[]; expiredIds: string[] } {
+  const nowMs = params.nowMs ?? Date.now();
+  const ttlMs = params.ttlMs ?? PENDING_LOCAL_RECORD_TTL_MS;
+  const remote = params.remoteItems || [];
+  const confirmedIds: string[] = [];
+  const stillPendingIds: string[] = [];
+  const expiredIds: string[] = [];
+  if (params.pendingMap.size === 0) {
+    return { merged: remote, confirmedIds, stillPendingIds, expiredIds };
+  }
+
+  const deletedAtById = new Map<string, string>();
+  for (const t of params.tombstones || []) {
+    if (t?.id) deletedAtById.set(t.id, t.deletedAt || '');
+  }
+  const remoteById = new Map<string, T>();
+  for (const r of remote) {
+    if (r?.id) remoteById.set(r.id, r);
+  }
+
+  const keepLocal: T[] = [];
+  for (const [id, entry] of params.pendingMap.entries()) {
+    const pendingTs = entry.record.updatedAt || entry.record.createdAt || '';
+    const deletedAt = deletedAtById.get(id);
+    if (deletedAt !== undefined && deletedAt >= pendingTs) {
+      expiredIds.push(id);
+      continue;
+    }
+    if (nowMs - entry.stampedAtMs > ttlMs) {
+      expiredIds.push(id);
+      continue;
+    }
+    const remoteRec = remoteById.get(id);
+    if (remoteRec) {
+      const remoteTs = remoteRec.updatedAt || remoteRec.createdAt || '';
+      if (remoteTs >= pendingTs) {
+        confirmedIds.push(id);
+        continue;
+      }
+    }
+    stillPendingIds.push(id);
+    keepLocal.push(entry.record);
+  }
+
+  if (keepLocal.length === 0) {
+    return { merged: remote, confirmedIds, stillPendingIds, expiredIds };
+  }
+  const keepIds = new Set(keepLocal.map((r) => r.id));
+  const merged = [...keepLocal, ...remote.filter((r) => !keepIds.has(r.id))];
+  return { merged, confirmedIds, stillPendingIds, expiredIds };
 }

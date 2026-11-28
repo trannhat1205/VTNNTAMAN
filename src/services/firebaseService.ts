@@ -90,6 +90,8 @@ import {
 } from '../utils/internalChatLogic';
 import {
   AdminWarehouseAccountSummary,
+  applyIdempotentProductMutation,
+  RtdbRecordCollection,
   buildFullKeyedWorkspace,
   buildStorageWorkspacePaths,
   buildWorkspaceDiffUpdates,
@@ -2539,7 +2541,11 @@ function getActiveSkippedProductKeysForOwner(safeUid: string): Set<string> {
 export async function applyAtomicRealtimeProductMutation(params: {
   ownerUid: string;
   productId: string;
-  fallbackProduct?: ProductItem | null;
+  mutationId?: string;
+  /** Product BEFORE the mutation (used only when the server has no record and no fallbackResult exists). */
+  preMutationProduct?: ProductItem | null;
+  /** Already-mutated local product, used verbatim when the server has no record yet. */
+  fallbackResult?: ProductItem | null;
   mutate: (currentProduct: ProductItem) => ProductItem;
 }): Promise<ProductItem | null> {
   const user = auth.currentUser;
@@ -2552,13 +2558,15 @@ export async function applyAtomicRealtimeProductMutation(params: {
   try {
     const prodRef = rtdbRef(rtdb, `workspaces/${safeUid}/products/${recKey}`);
     const txRes = await runTransaction(prodRef, (currentRaw) => {
-      const base: ProductItem | null =
-        currentRaw && typeof currentRaw === 'object' && (currentRaw as ProductItem).id
-          ? (currentRaw as ProductItem)
-          : params.fallbackProduct || null;
-      if (!base) return currentRaw;
-      const mutated = params.mutate(base);
-      return sanitizeForRealtimeDb(mutated);
+      const next = applyIdempotentProductMutation({
+        currentRaw,
+        preMutationProduct: params.preMutationProduct,
+        fallbackResult: params.fallbackResult,
+        mutationId: params.mutationId,
+        mutate: params.mutate,
+      });
+      if (!next) return currentRaw;
+      return next;
     });
     recentAtomicProductLocks.set(lockKey, Date.now() + ATOMIC_PRODUCT_LOCK_TTL_MS);
     if (txRes.committed && txRes.snapshot.exists()) {
@@ -2659,10 +2667,33 @@ export async function writeRealtimeWorkspace(
 
     const wsRef = rtdbRef(rtdb, `workspaces/${safeUid}`);
 
-    if (!prevPayload || legacyLayoutOwnerUids.has(safeUid)) {
+    if (legacyLayoutOwnerUids.has(safeUid)) {
       const fullKeyed = buildFullKeyedWorkspace(normalizedPayload);
       await rtdbSet(wsRef, fullKeyed);
       legacyLayoutOwnerUids.delete(safeUid);
+    } else if (!prevPayload) {
+      // First write without a known server snapshot: MERGE every record with multi-path update instead of
+      // `set()` so we never wipe counters/records written meanwhile and never overwrite products locked by a transaction.
+      const skipProductKeys = getActiveSkippedProductKeysForOwner(safeUid);
+      const emptyPrev: RtdbWorkspacePayload = {
+        meta: normalizedPayload.meta,
+        products: [],
+        customers: [],
+        suppliers: [],
+        sales: [],
+        imports: [],
+        receiptVouchers: [],
+        paymentVouchers: [],
+        savedVouchers: [],
+        stockAdjustments: [],
+        auditLogs: [],
+        backups: [],
+        settings: { ...normalizedPayload.settings },
+      };
+      const firstUpdates = buildWorkspaceDiffUpdates(emptyPrev, normalizedPayload, {
+        skipProductKeys: skipProductKeys.size > 0 ? skipProductKeys : undefined,
+      });
+      await rtdbUpdate(wsRef, firstUpdates);
     } else {
       const skipProductKeys = getActiveSkippedProductKeysForOwner(safeUid);
       const diffUpdates = buildWorkspaceDiffUpdates(prevPayload, normalizedPayload, {
@@ -2683,6 +2714,53 @@ export async function writeRealtimeWorkspace(
     return true;
   } catch (err) {
     console.warn('writeRealtimeWorkspace warning:', err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Writes freshly created/edited business records straight to `/workspaces/{ownerUid}/{collection}/{k_id}`
+ * (multi-path update, no debounce) so vouchers like PN/HD/PT/PC are on the server within milliseconds.
+ */
+export async function upsertRealtimeWorkspaceRecordsImmediately(
+  ownerUid: string,
+  collectionRecords: Partial<Record<RtdbRecordCollection, Array<{ id: string }>>>,
+  options?: { allowMultiWarehouseManager?: boolean; allowSharedWarehouseMember?: boolean }
+): Promise<boolean> {
+  const user = auth.currentUser;
+  if (!user || !ownerUid) return false;
+  const safeUid = sanitizeFirestoreId(ownerUid);
+  if (
+    !safeUid ||
+    (user.uid !== safeUid &&
+      !isCurrentUserAdmin(user) &&
+      !options?.allowMultiWarehouseManager &&
+      !options?.allowSharedWarehouseMember)
+  ) {
+    return false;
+  }
+  try {
+    const updates: Record<string, unknown> = {};
+    const skipProductKeys = getActiveSkippedProductKeysForOwner(safeUid);
+    for (const [col, records] of Object.entries(collectionRecords)) {
+      for (const rec of (records || []) as Array<{ id: string }>) {
+        if (!rec || !rec.id) continue;
+        const key = toRtdbRecordKey(rec.id);
+        if (col === 'products' && skipProductKeys.has(key)) continue;
+        updates[`${col}/${key}`] = sanitizeForRealtimeDb(rec);
+      }
+    }
+    if (Object.keys(updates).length === 0) return true;
+    updates['meta/ownerUid'] = safeUid;
+    updates['meta/updatedAt'] = new Date().toISOString();
+    updates['meta/updatedByUid'] = user.uid;
+    await rtdbUpdate(rtdbRef(rtdb, `workspaces/${safeUid}`), updates);
+    return true;
+  } catch (err) {
+    console.warn(
+      'upsertRealtimeWorkspaceRecordsImmediately warning:',
+      err instanceof Error ? err.message : err
+    );
     return false;
   }
 }

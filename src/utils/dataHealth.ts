@@ -12,6 +12,7 @@ import {
 import {
   doesRecordMatchProduct,
   evaluateProductStockIntegrity,
+  normalizeVietnameseSearch,
   normalizeWarehouseKey,
   reconcileCustomersFromSales,
 } from './businessLogic';
@@ -24,6 +25,8 @@ export type DataHealthGroupId =
   | 'receiptAllocMissingSale'
   | 'paymentAllocMissingImport'
   | 'stockDrift'
+  | 'zeroPriceProducts'
+  | 'unbackedOpeningStock'
   | 'customerDebtMismatch'
   | 'amountInconsistency'
   | 'negativeOrNaN'
@@ -217,6 +220,8 @@ export function computeDataHealthReport(input: DataHealthInput): DataHealthRepor
 
   // 5. Stock drift
   const stockDriftItems: DataHealthItem[] = [];
+  const zeroPriceItems: DataHealthItem[] = [];
+  const unbackedOpeningItems: DataHealthItem[] = [];
   for (const p of products) {
     const integrity = evaluateProductStockIntegrity(p, sales, imports, stockAdjustments);
     if (integrity.hasNegativeDrift) {
@@ -224,6 +229,33 @@ export function computeDataHealthReport(input: DataHealthInput): DataHealthRepor
         id: `drift_${p.id}`,
         code: p.code,
         label: `${p.name}: tồn ${p.stock} nhưng sổ chứng từ chỉ còn ${integrity.recommendedReconciledStock}`,
+        tab: 'inventory',
+        recordId: p.id,
+      });
+    }
+    if (integrity.impliedOpeningStock > 0 && integrity.linkedImportCount === 0) {
+      unbackedOpeningItems.push({
+        id: `uos_${p.id}`,
+        code: p.code,
+        label: `${p.name}: tồn đầu kỳ ${integrity.impliedOpeningStock} ${p.unit} chưa có phiếu nhập PN-... nào`,
+        tab: 'inventory',
+        recordId: p.id,
+      });
+    }
+    const isGiftItem =
+      (p.code || '').trim().toUpperCase() === 'QUATANG' ||
+      normalizeVietnameseSearch(`${p.name} ${p.category}`).includes('qua tang');
+    if (
+      (Number(p.stock) || 0) > 0 &&
+      !isGiftItem &&
+      ((Number(p.importPrice) || 0) <= 0 || (Number(p.sellPrice) || 0) <= 0)
+    ) {
+      zeroPriceItems.push({
+        id: `zp_${p.id}`,
+        code: p.code,
+        label: `${p.name}: còn tồn ${p.stock} ${p.unit} nhưng ${
+          (Number(p.importPrice) || 0) <= 0 ? 'Giá nhập' : 'Giá bán'
+        } đang là 0 đ`,
         tab: 'inventory',
         recordId: p.id,
       });
@@ -416,6 +448,20 @@ export function computeDataHealthReport(input: DataHealthInput): DataHealthRepor
       'error',
       stockDriftItems,
       'stockDrift'
+    ),
+    make(
+      'zeroPriceProducts',
+      'Vật tư còn tồn nhưng giá 0 đ',
+      'Có tồn kho nhưng Giá nhập hoặc Giá bán bằng 0 đ → giá trị tồn và lãi gộp bị sai. Hàng tặng/quà KM được bỏ qua.',
+      'warning',
+      zeroPriceItems
+    ),
+    make(
+      'unbackedOpeningStock',
+      'Tồn đầu kỳ chưa có phiếu nhập',
+      'Phần tồn có sẵn từ lúc tạo vật tư, chưa có phiếu nhập PN-... tương ứng nên Nhật ký Nhập hàng không hiện. Chỉ để tham khảo.',
+      'info',
+      unbackedOpeningItems
     ),
     make(
       'customerDebtMismatch',

@@ -1037,3 +1037,121 @@ test('Presence: only fresh online heartbeats are listed and heartbeats do not ch
   const renamed = { ...dir, a: { ...dir.a, displayName: 'An 2' } };
   assert.notEqual(directoryStructureSignature(renamed), sig1);
 });
+/* ---- Regression: stock doubling (5 -> 10), disappearing vouchers, phantom staff_* routing ---- */
+import {
+  applyIdempotentProductMutation as regApplyIdempotentProductMutation,
+  reconcileIncomingCollectionWithPendingLocal as regReconcilePending,
+  resolveDesignatedOwnerUidsForWarehouses as regResolveOwners,
+} from './rtdbSyncLogic';
+import type { ProductItem as RegProductItem, StaffMember as RegStaffMember } from '../types';
+
+function regProduct(extra: Partial<RegProductItem> = {}): RegProductItem {
+  return {
+    id: 'prod_bpro',
+    code: 'BPRO',
+    name: 'BUP PRO',
+    category: 'Thuốc BVTV',
+    unit: 'CHAI',
+    importPrice: 100,
+    sellPrice: 150,
+    stock: 5,
+    minStock: 5,
+    supplierName: 'ANH NHẤT',
+    ownerId: 'u1',
+    createdAt: '2026-11-28T02:17:00.000Z',
+    updatedAt: '2026-11-28T02:17:00.000Z',
+    ...extra,
+  } as RegProductItem;
+}
+
+test('Atomic product mutation is idempotent: new inline product import 5 stays 5 (never 10)', () => {
+  const plus5 = (cur: RegProductItem): RegProductItem => ({ ...cur, stock: cur.stock + 5 });
+
+  // Server has no record yet: local fallback (already stock 5) is used verbatim
+  const first = regApplyIdempotentProductMutation({
+    currentRaw: null,
+    fallbackResult: regProduct({ stock: 5 }),
+    mutationId: 'imp_1',
+    mutate: plus5,
+  });
+  assert.equal(first?.stock, 5);
+  assert.deepEqual(first?.lastMutationIds, ['imp_1']);
+
+  // Workspace sync landed first / transaction retried: same mutationId must NOT add again
+  const retried = regApplyIdempotentProductMutation({
+    currentRaw: { ...regProduct({ stock: 5 }), lastMutationIds: ['imp_1'] },
+    fallbackResult: regProduct({ stock: 5 }),
+    mutationId: 'imp_1',
+    mutate: plus5,
+  });
+  assert.equal(retried?.stock, 5);
+
+  // A distinct co-worker mutation applies once on top of the server value
+  const sale = regApplyIdempotentProductMutation({
+    currentRaw: { ...regProduct({ stock: 5 }), lastMutationIds: ['imp_1'] },
+    mutationId: 'sale_2',
+    mutate: (cur) => ({ ...cur, stock: cur.stock - 2 }),
+  });
+  assert.equal(sale?.stock, 3);
+  assert.deepEqual(sale?.lastMutationIds, ['imp_1', 'sale_2']);
+});
+
+test('Pending local vouchers survive an early RTDB echo and are confirmed / expired correctly', () => {
+  const pn = {
+    id: 'imp_1',
+    receiptCode: 'PN-2611-001',
+    createdAt: '2026-11-28T02:17:44.000Z',
+    updatedAt: '2026-11-28T02:17:44.000Z',
+  };
+  const pendingMap = new Map([['imp_1', { record: pn, stampedAtMs: 1000 }]]);
+
+  const early = regReconcilePending({ remoteItems: [], pendingMap, nowMs: 1100 });
+  assert.deepEqual(
+    early.merged.map((r) => r.id),
+    ['imp_1']
+  );
+  assert.deepEqual(early.stillPendingIds, ['imp_1']);
+
+  const confirmed = regReconcilePending({ remoteItems: [pn], pendingMap, nowMs: 1200 });
+  assert.deepEqual(confirmed.confirmedIds, ['imp_1']);
+  assert.deepEqual(confirmed.stillPendingIds, []);
+
+  const deleted = regReconcilePending({
+    remoteItems: [],
+    pendingMap,
+    nowMs: 1300,
+    tombstones: [{ id: 'imp_1', deletedAt: '2026-11-28T02:20:00.000Z' }] as unknown as Parameters<
+      typeof regReconcilePending
+    >[0]['tombstones'],
+  });
+  assert.deepEqual(deleted.expiredIds, ['imp_1']);
+  assert.equal(deleted.merged.length, 0);
+
+  const stale = regReconcilePending({ remoteItems: [], pendingMap, nowMs: 1000 + 60000 });
+  assert.deepEqual(stale.expiredIds, ['imp_1']);
+});
+
+test('Seed staff_* accounts without a workspace never join a real single-warehouse owner map', () => {
+  const owners = regResolveOwners({
+    targetUid: 'real_uid_99',
+    selectedWarehouses: ['TÂM AN MỸ NGÃI'],
+    staffList: [
+      {
+        uid: 'staff_sales_02',
+        username: 'sales02',
+        password: '',
+        displayName: 'Mẫu',
+        phone: '',
+        role: 'staff',
+        positionRole: 'sales',
+        assignedWarehouse: 'Tâm An Mỹ Ngãi',
+        active: true,
+        createdAt: '2026-11-01T00:00:00Z',
+        updatedAt: '2026-11-01T00:00:00Z',
+      } as unknown as RegStaffMember,
+    ],
+    workspacesMap: {},
+  });
+  assert.equal(owners['real_uid_99'], true);
+  assert.equal(owners['staff_sales_02'], undefined);
+});

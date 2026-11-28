@@ -96,9 +96,9 @@ const emptyInput = {
   staffList: [],
 };
 
-test('Data health: empty workspace has zero issues and exposes all 12 groups', () => {
+test('Data health: empty workspace has zero issues and exposes all 14 groups', () => {
   const report = computeDataHealthReport(emptyInput);
-  assert.equal(report.groups.length, 12);
+  assert.equal(report.groups.length, 14);
   assert.equal(report.totalIssues, 0);
 });
 
@@ -199,4 +199,22 @@ test('Data health: flags duplicate warehouse names written differently and empty
   assert.equal(report.byId.emptyWarehouses.count >= 1, true);
   // empty warehouses are informational and never counted in totalIssues
   assert.equal(report.totalIssues, report.byId.duplicateWarehouseNames.count);
+});
+
+test('Data health: flags zero-price stocked products (ignores gifts) and unbacked opening stock as info', () => {
+  const products = [
+    makeProduct('p1', 'BPRO', { stock: 5, importPrice: 0 }),
+    makeProduct('p2', 'QUATANG', { stock: 5, importPrice: 0, sellPrice: 0 }),
+  ];
+  const report = computeDataHealthReport({ ...emptyInput, products });
+  assert.equal(report.byId.zeroPriceProducts.count, 1);
+  assert.equal(report.byId.zeroPriceProducts.severity, 'warning');
+
+  const opening = computeDataHealthReport({
+    ...emptyInput,
+    products: [makeProduct('p3', 'OPEN', { stock: 10 })],
+  });
+  assert.equal(opening.byId.unbackedOpeningStock.severity, 'info');
+  assert.ok(opening.byId.unbackedOpeningStock.count >= 1);
+  assert.equal(opening.totalIssues, 0);
 });

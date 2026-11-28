@@ -193,6 +193,7 @@ import {
   uploadBackupToGoogleDrive,
   upsertChatUserDirectoryProfile,
   upsertRealtimeUserDirectoryProfile,
+  upsertRealtimeWorkspaceRecordsImmediately,
   writeAdminWorkspacesIndexToFirebaseStorage,
   writeRealtimeWorkspace,
   writeWorkspaceToFirebaseStorage,
@@ -206,6 +207,9 @@ import { buildDirectChatRoomId } from './utils/internalChatLogic';
 import {
   AdminWarehouseAccountSummary,
   aggregateAdminWorkspacesFromRtdb,
+  appendProductMutationId,
+  reconcileIncomingCollectionWithPendingLocal,
+  RtdbRecordCollection,
   computeWorkspaceFingerprint,
   countWorkspaceBusinessRecords,
   dedupeRecordsById,
@@ -370,6 +374,22 @@ export default function App() {
   >([]);
   const rtdbHydratedKeyRef = useRef<string | null>(null);
   const rtdbSuppressNextWriteRef = useRef<boolean>(false);
+  // Records the user just created/edited that RTDB has not confirmed yet (protects them from early snapshots)
+  const pendingLocalRecordsRef = useRef<
+    Record<RtdbRecordCollection, Map<string, { record: any; stampedAtMs: number }>>
+  >({
+    products: new Map(),
+    customers: new Map(),
+    suppliers: new Map(),
+    sales: new Map(),
+    imports: new Map(),
+    receiptVouchers: new Map(),
+    paymentVouchers: new Map(),
+    savedVouchers: new Map(),
+    stockAdjustments: new Map(),
+    auditLogs: new Map(),
+    backups: new Map(),
+  });
   const rtdbLastFingerprintsRef = useRef<Record<string, string>>({});
   const rtdbLastPayloadRef = useRef<Record<string, RtdbWorkspacePayload>>({});
   const rtdbKnownOwnerUidsRef = useRef<Set<string>>(new Set([PRIMARY_ADMIN_UID]));
@@ -459,12 +479,73 @@ export default function App() {
     if (tombstones.length === 0) return;
     allowEmptyWorkspaceWriteRef.current = true;
     forceStorageSyncRef.current = true;
+    for (const t of tombstones) {
+      (Object.keys(pendingLocalRecordsRef.current) as RtdbRecordCollection[]).forEach((col) =>
+        pendingLocalRecordsRef.current[col].delete(t.id)
+      );
+    }
     setDeletedRecords((prev) => mergeDeletionTombstones(prev, tombstones));
   };
   const unmarkDeletedRecord = (id: string) => {
     if (!id) return;
     forceStorageSyncRef.current = true;
     setDeletedRecords((prev) => prev.filter((t) => t.id !== id));
+  };
+  /** Keeps just-created/edited records alive until RTDB confirms them (never lost to an early snapshot). */
+  const guardIncomingWithPending = <T extends { id: string; updatedAt?: string; createdAt?: string }>(
+    col: RtdbRecordCollection,
+    remote: T[],
+    tombstones: DeletedRecordTombstone[]
+  ): { merged: T[]; hasPending: boolean } => {
+    const map = pendingLocalRecordsRef.current[col];
+    if (map.size === 0) return { merged: remote, hasPending: false };
+    let view: ReadonlyMap<string, { record: T; stampedAtMs: number }> = map;
+    if (col === 'products') {
+      const latest = new Map<string, { record: T; stampedAtMs: number }>();
+      map.forEach((entry, id) => {
+        const live = productsRef.current.find((p) => p.id === id) as unknown as T | undefined;
+        latest.set(id, { record: live || entry.record, stampedAtMs: entry.stampedAtMs });
+      });
+      view = latest;
+    }
+    const res = reconcileIncomingCollectionWithPendingLocal({
+      remoteItems: remote,
+      pendingMap: view,
+      tombstones,
+    });
+    [...res.confirmedIds, ...res.expiredIds].forEach((id) => map.delete(id));
+    return { merged: res.merged, hasPending: res.stillPendingIds.length > 0 };
+  };
+  /** Registers records as pending-confirmation AND writes them straight to RTDB (no 250ms debounce). */
+  const stageAndFlushRecords = (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    records: Partial<Record<RtdbRecordCollection, Array<any>>>,
+    fallbackOwnerUid?: string
+  ) => {
+    const nowMs = Date.now();
+    const byOwner = new Map<string, Partial<Record<RtdbRecordCollection, Array<{ id: string }>>>>();
+    for (const [colKey, list] of Object.entries(records)) {
+      const col = colKey as RtdbRecordCollection;
+      for (const rec of list || []) {
+        if (!rec || !rec.id) continue;
+        pendingLocalRecordsRef.current[col].set(rec.id, { record: rec, stampedAtMs: nowMs });
+        const owner = (rec.ownerId || fallbackOwnerUid || '').trim();
+        if (!owner) continue;
+        const bucket = byOwner.get(owner) || {};
+        const arr = (bucket[col] ||= []);
+        arr.push(rec);
+        byOwner.set(owner, bucket);
+      }
+    }
+    const fbUser = auth.currentUser;
+    if (!isGoogleAuthenticated || !fbUser) return;
+    const isDesignated = !isCurrentUserAdmin(fbUser) && Boolean(designatedMultiWhOwnerUidsKey);
+    byOwner.forEach((cols, ownerUid) => {
+      void upsertRealtimeWorkspaceRecordsImmediately(ownerUid, cols, {
+        allowMultiWarehouseManager: isDesignated,
+        allowSharedWarehouseMember: isDesignated,
+      });
+    });
   };
   const [isOnline, setIsOnline] = useState<boolean>(() =>
     typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -1473,10 +1554,13 @@ export default function App() {
     ) {
       return '__ALL__';
     }
+    const isUsableOwnerUid = (uid: string) =>
+      Boolean(uid) && (!uid.startsWith('staff_') || rtdbKnownOwnerUidsRef.current.has(uid));
     const extraOwnerUids = Object.entries(currentStaff.assignedOwnerUids || {})
-      .filter(([, allowed]) => Boolean(allowed))
+      .filter(([uid, allowed]) => Boolean(allowed) && isUsableOwnerUid(uid))
       .map(([uid]) => uid);
-    const canonUid = (currentStaff.canonicalOwnerUid || '').trim();
+    const rawCanonUid = (currentStaff.canonicalOwnerUid || '').trim();
+    const canonUid = isUsableOwnerUid(rawCanonUid) ? rawCanonUid : '';
     const hasSharedSingleWarehouseLink =
       !hasMultiGrant &&
       ((Boolean(canonUid) && canonUid !== currentStaff.uid) ||
@@ -1608,7 +1692,12 @@ export default function App() {
         if (isPrimary && Object.keys(effectiveWsMap).length > 0) {
           const whMemberCountByKey = new Map<string, number>();
           for (const st of mergedStaffSnapshot) {
-            if (!st?.uid || canAccountCreateStaff(st) || st.assignedWarehouse === 'Tất cả kho') {
+            if (
+              !st?.uid ||
+              canAccountCreateStaff(st) ||
+              st.assignedWarehouse === 'Tất cả kho' ||
+              (st.uid.startsWith('staff_') && !effectiveWsMap[st.uid])
+            ) {
               continue;
             }
             const k = normalizeWarehouseKey(st.assignedWarehouse);
@@ -1616,7 +1705,12 @@ export default function App() {
           }
 
           for (const st of mergedStaffSnapshot) {
-            if (!st?.uid || canAccountCreateStaff(st) || st.assignedWarehouse === 'Tất cả kho') {
+            if (
+              !st?.uid ||
+              canAccountCreateStaff(st) ||
+              st.assignedWarehouse === 'Tất cả kho' ||
+              (st.uid.startsWith('staff_') && !effectiveWsMap[st.uid])
+            ) {
               continue;
             }
             const isMulti = Boolean(
@@ -1808,17 +1902,47 @@ export default function App() {
             }
           }
 
-          productsRef.current = nextProds;
-          setProducts(nextProds);
-          setCustomers(nextCusts);
-          setSuppliers(nextSups);
-          setSales(nextSales);
-          setImports(nextImps);
-          setReceiptVouchers(nextRvs);
-          setPaymentVouchers(nextPvs);
-          setSavedVouchers(nextSvs);
-          setStockAdjustments(nextAdjs);
-          setAuditLogs(nextLogs);
+          // Keep records the user just created/edited until the server confirms them (never wiped by an early snapshot)
+          const gProds = guardIncomingWithPending('products', nextProds, mergedTombstones);
+          const gSups = guardIncomingWithPending('suppliers', nextSups, mergedTombstones);
+          const gSales = guardIncomingWithPending('sales', nextSales, mergedTombstones);
+          const gCustsRaw = guardIncomingWithPending('customers', nextCusts, mergedTombstones);
+          const gImps = guardIncomingWithPending('imports', nextImps, mergedTombstones);
+          const gRvs = guardIncomingWithPending('receiptVouchers', nextRvs, mergedTombstones);
+          const gPvs = guardIncomingWithPending('paymentVouchers', nextPvs, mergedTombstones);
+          const gSvs = guardIncomingWithPending('savedVouchers', nextSvs, mergedTombstones);
+          const gAdjs = guardIncomingWithPending('stockAdjustments', nextAdjs, mergedTombstones);
+          const gLogs = guardIncomingWithPending('auditLogs', nextLogs, mergedTombstones);
+          const adminHasPending = [
+            gProds,
+            gSups,
+            gSales,
+            gCustsRaw,
+            gImps,
+            gRvs,
+            gPvs,
+            gSvs,
+            gAdjs,
+            gLogs,
+          ].some((g) => g.hasPending);
+          if (adminHasPending) {
+            rtdbSuppressNextWriteRef.current = false;
+          }
+          const gCusts = adminHasPending
+            ? reconcileCustomersFromSales(gCustsRaw.merged, gSales.merged).customers
+            : gCustsRaw.merged;
+
+          productsRef.current = gProds.merged;
+          setProducts(gProds.merged);
+          setCustomers(gCusts);
+          setSuppliers(gSups.merged);
+          setSales(gSales.merged);
+          setImports(gImps.merged);
+          setReceiptVouchers(gRvs.merged);
+          setPaymentVouchers(gPvs.merged);
+          setSavedVouchers(gSvs.merged);
+          setStockAdjustments(gAdjs.merged);
+          setAuditLogs(gLogs.merged);
           setBackups(nextBks);
           setDeletedRecords((prev) =>
             JSON.stringify(prev) === JSON.stringify(mergedTombstones) ? prev : mergedTombstones
@@ -2068,7 +2192,35 @@ export default function App() {
 
       rtdbHydratedKeyRef.current = sessionKey;
       rtdbLastFingerprintsRef.current[activeUid] = isLegacy || rtdbNeedsHeal ? '' : incomingFp;
-      rtdbSuppressNextWriteRef.current = !(isLegacy || rtdbNeedsHeal);
+      const sProds = guardIncomingWithPending('products', unifiedWs.products, mergedTombstones);
+      const sSups = guardIncomingWithPending('suppliers', unifiedWs.suppliers, mergedTombstones);
+      const sSales = guardIncomingWithPending('sales', unifiedWs.sales, mergedTombstones);
+      const sCustsRaw = guardIncomingWithPending('customers', unifiedWs.customers, mergedTombstones);
+      const sImps = guardIncomingWithPending('imports', unifiedWs.imports, mergedTombstones);
+      const sRvs = guardIncomingWithPending(
+        'receiptVouchers',
+        unifiedWs.receiptVouchers,
+        mergedTombstones
+      );
+      const sPvs = guardIncomingWithPending(
+        'paymentVouchers',
+        unifiedWs.paymentVouchers,
+        mergedTombstones
+      );
+      const sSvs = guardIncomingWithPending('savedVouchers', unifiedWs.savedVouchers, mergedTombstones);
+      const sAdjs = guardIncomingWithPending(
+        'stockAdjustments',
+        unifiedWs.stockAdjustments || [],
+        mergedTombstones
+      );
+      const sLogs = guardIncomingWithPending('auditLogs', unifiedWs.auditLogs, mergedTombstones);
+      const singleHasPending = [sProds, sSups, sSales, sCustsRaw, sImps, sRvs, sPvs, sSvs, sAdjs, sLogs].some(
+        (g) => g.hasPending
+      );
+      const sCusts = singleHasPending
+        ? reconcileCustomersFromSales(sCustsRaw.merged, sSales.merged).customers
+        : sCustsRaw.merged;
+      rtdbSuppressNextWriteRef.current = !(isLegacy || rtdbNeedsHeal) && !singleHasPending;
 
       if (
         mergedWs.meta?.updatedByUid &&
@@ -2082,17 +2234,17 @@ export default function App() {
         setLastRealtimePeerSyncLabel(`Vừa cập nhật bởi ${mergedWs.meta.updatedByName} (${hhmm})`);
       }
 
-      productsRef.current = unifiedWs.products;
-      setProducts(unifiedWs.products);
-      setCustomers(unifiedWs.customers);
-      setSuppliers(unifiedWs.suppliers);
-      setSales(unifiedWs.sales);
-      setImports(unifiedWs.imports);
-      setReceiptVouchers(unifiedWs.receiptVouchers);
-      setPaymentVouchers(unifiedWs.paymentVouchers);
-      setSavedVouchers(unifiedWs.savedVouchers);
-      setStockAdjustments(unifiedWs.stockAdjustments || []);
-      setAuditLogs(unifiedWs.auditLogs);
+      productsRef.current = sProds.merged;
+      setProducts(sProds.merged);
+      setCustomers(sCusts);
+      setSuppliers(sSups.merged);
+      setSales(sSales.merged);
+      setImports(sImps.merged);
+      setReceiptVouchers(sRvs.merged);
+      setPaymentVouchers(sPvs.merged);
+      setSavedVouchers(sSvs.merged);
+      setStockAdjustments(sAdjs.merged);
+      setAuditLogs(sLogs.merged);
       setBackups(unifiedWs.backups);
       setDeletedRecords((prev) =>
         JSON.stringify(prev) === JSON.stringify(mergedTombstones) ? prev : mergedTombstones
@@ -2560,6 +2712,7 @@ export default function App() {
         'Tất cả kho',
       snapshotObject,
     });
+    pendingLocalRecordsRef.current.auditLogs.set(entry.id, { record: entry, stampedAtMs: Date.now() });
     setAuditLogs((prev) => [entry, ...prev]);
   };
 
@@ -2637,13 +2790,29 @@ export default function App() {
   const dispatchAtomicProductMutation = (
     ownerUid: string,
     fallbackProduct: ProductItem,
-    mutate: (cur: ProductItem) => ProductItem
+    mutate: (cur: ProductItem) => ProductItem,
+    explicitMutationId?: string
   ) => {
     if (!isGoogleAuthenticated || !auth.currentUser || !ownerUid) return;
+    // Deterministic id: the same logical operation (retry / double-invoked updater) is applied to the server ONCE.
+    const mutationId =
+      explicitMutationId ||
+      `auto_${fallbackProduct.id}_${fallbackProduct.updatedAt}_${Number(fallbackProduct.stock) || 0}`;
+    // Stamp the mutation id on the LOCAL product too, so that any workspace flush that lands on RTDB
+    // before the transaction runs already carries the id (prevents 5 + 5 = 10 under every race).
+    const stampedFallback = appendProductMutationId(fallbackProduct, mutationId);
+    productsRef.current = productsRef.current.map((p) =>
+      p.id === stampedFallback.id ? appendProductMutationId(p, mutationId) : p
+    );
+    setProducts((prev) =>
+      prev.map((p) => (p.id === stampedFallback.id ? appendProductMutationId(p, mutationId) : p))
+    );
     void applyAtomicRealtimeProductMutation({
       ownerUid,
       productId: fallbackProduct.id,
-      fallbackProduct,
+      mutationId,
+      // The local product passed here is ALREADY mutated: use it verbatim if the server has no record yet.
+      fallbackResult: stampedFallback,
       mutate,
     }).then((committed) => {
       if (!committed) return;
@@ -2654,6 +2823,15 @@ export default function App() {
         (found.stock !== committed.stock || found.importPrice !== committed.importPrice)
       ) {
         const nextList = curList.map((p) => (p.id === committed.id ? committed : p));
+        productsRef.current = nextList;
+        setProducts(nextList);
+      } else if (
+        found &&
+        JSON.stringify(found.lastMutationIds || []) !== JSON.stringify(committed.lastMutationIds || [])
+      ) {
+        const nextList = curList.map((p) =>
+          p.id === committed.id ? { ...p, lastMutationIds: committed.lastMutationIds } : p
+        );
         productsRef.current = nextList;
         setProducts(nextList);
       }
@@ -2737,6 +2915,10 @@ export default function App() {
             s.id === newSaleId ? { ...s, invoiceCode: committedCode, updatedAt: new Date().toISOString() } : s
           )
         );
+        stageAndFlushRecords(
+          { sales: [{ ...newSale, invoiceCode: committedCode, updatedAt: new Date().toISOString() }] },
+          saleOwnerUid
+        );
       },
     });
     const newSale: SaleTransaction = {
@@ -2779,19 +2961,26 @@ export default function App() {
     productsRef.current = updatedProducts;
     setProducts(updatedProducts);
     setSales((prev) => [newSale, ...prev]);
+    stageAndFlushRecords({ sales: [newSale] }, saleOwnerUid);
 
     // Atomic server-side stock deduction so concurrent sales on shared warehouse NEVER overwrite each other
     const mainGiftCombined =
       updatedGiftProduct && updatedGiftProduct.id === updatedProduct.id
         ? -(payload.quantity + (payload.giftQuantity || 0))
         : -payload.quantity;
-    dispatchAtomicProductMutation(saleOwnerUid, updatedProduct, (cur) =>
-      computeAtomicProductStockDelta(cur, mainGiftCombined, nowIso)
+    dispatchAtomicProductMutation(
+      saleOwnerUid,
+      updatedProduct,
+      (cur) => computeAtomicProductStockDelta(cur, mainGiftCombined, nowIso),
+      `sale_${newSaleId}`
     );
     if (updatedGiftProduct && updatedGiftProduct.id !== updatedProduct.id && (payload.giftQuantity || 0) > 0) {
       const giftOwnerUid = updatedGiftProduct.ownerId || saleOwnerUid;
-      dispatchAtomicProductMutation(giftOwnerUid, updatedGiftProduct, (cur) =>
-        computeAtomicProductStockDelta(cur, -(payload.giftQuantity || 0), nowIso)
+      dispatchAtomicProductMutation(
+        giftOwnerUid,
+        updatedGiftProduct,
+        (cur) => computeAtomicProductStockDelta(cur, -(payload.giftQuantity || 0), nowIso),
+        `salegift_${newSaleId}`
       );
     }
 
@@ -2955,6 +3144,17 @@ export default function App() {
               : s
           )
         );
+        const reassignedAt = new Date().toISOString();
+        stageAndFlushRecords(
+          {
+            sales: createdSales.map((s) => ({
+              ...s,
+              invoiceCode: committedCode,
+              updatedAt: reassignedAt,
+            })),
+          },
+          cartOwnerUid
+        );
       },
     });
     const allocation = allocatePaymentAcrossCartItems(payload.items, payload.totalPaidAmount);
@@ -3027,14 +3227,18 @@ export default function App() {
     productsRef.current = workingProducts;
     setProducts(workingProducts);
     setSales((prev) => [...createdSales, ...prev]);
+    stageAndFlushRecords({ sales: createdSales }, cartOwnerUid);
 
     // Atomic server-side stock deductions per distinct SKU in POS cart
     cumulativeStockDeltaByProdId.forEach((delta, prodId) => {
       const touched = touchedProductsMap.get(prodId);
       if (!touched || delta === 0) return;
       const pOwner = touched.ownerId || cartOwnerUid;
-      dispatchAtomicProductMutation(pOwner, touched, (cur) =>
-        computeAtomicProductStockDelta(cur, delta, nowIso)
+      dispatchAtomicProductMutation(
+        pOwner,
+        touched,
+        (cur) => computeAtomicProductStockDelta(cur, delta, nowIso),
+        `salecart_${sharedGroupId}_${prodId}`
       );
     });
 
@@ -3640,6 +3844,10 @@ export default function App() {
       if (refundPair) {
         setReceiptVouchers((prev) => [refundPair.receipt, ...prev]);
         setPaymentVouchers((prev) => [refundPair.payment, ...prev]);
+        stageAndFlushRecords(
+          { receiptVouchers: [refundPair.receipt], paymentVouchers: [refundPair.payment] },
+          retOwnerUid
+        );
       }
     }
 
@@ -3731,6 +3939,10 @@ export default function App() {
             i.id === newImportId ? { ...i, receiptCode: committedCode, updatedAt: new Date().toISOString() } : i
           )
         );
+        stageAndFlushRecords(
+          { imports: [{ ...newImport, receiptCode: committedCode, updatedAt: new Date().toISOString() }] },
+          impOwnerUid
+        );
       },
     });
     const newImport: ImportTransaction = {
@@ -3761,17 +3973,22 @@ export default function App() {
     productsRef.current = updatedProducts;
     setProducts(updatedProducts);
     setImports((prev) => [newImport, ...prev]);
+    stageAndFlushRecords({ imports: [newImport] }, impOwnerUid);
 
     // Atomic server-side stock addition + weighted-average cost + FEFO batch on shared warehouse
-    dispatchAtomicProductMutation(impOwnerUid, updatedProduct, (cur) =>
-      computeAtomicProductImportAddition({
-        currentProduct: cur,
-        importQty: payload.quantity,
-        unitCost: payload.unitCost,
-        nowIso,
-        batchNumber: payload.batchNumber?.trim() || undefined,
-        expiryDate: payload.expiryDate?.trim() || undefined,
-      })
+    dispatchAtomicProductMutation(
+      impOwnerUid,
+      updatedProduct,
+      (cur) =>
+        computeAtomicProductImportAddition({
+          currentProduct: cur,
+          importQty: payload.quantity,
+          unitCost: payload.unitCost,
+          nowIso,
+          batchNumber: payload.batchNumber?.trim() || undefined,
+          expiryDate: payload.expiryDate?.trim() || undefined,
+        }),
+      `imp_${newImportId}`
     );
 
     recordAuditLog({
@@ -3830,6 +4047,17 @@ export default function App() {
               ? { ...i, receiptCode: committedCode, updatedAt: new Date().toISOString() }
               : i
           )
+        );
+        const reassignedAt = new Date().toISOString();
+        stageAndFlushRecords(
+          {
+            imports: createdImports.map((i) => ({
+              ...i,
+              receiptCode: committedCode,
+              updatedAt: reassignedAt,
+            })),
+          },
+          impOwnerUid
         );
       },
     });
@@ -3905,26 +4133,32 @@ export default function App() {
     productsRef.current = workingProducts;
     setProducts(workingProducts);
     setImports((prev) => [...createdImports, ...prev]);
+    stageAndFlushRecords({ imports: createdImports }, impOwnerUid);
 
     // Atomic server-side stock addition + weighted-average cost per distinct SKU
     perProductMutations.forEach((ops, prodId) => {
       const touched = touchedProductsMap.get(prodId);
       if (!touched || ops.length === 0) return;
       const pOwner = touched.ownerId || impOwnerUid;
-      dispatchAtomicProductMutation(pOwner, touched, (cur) => {
-        let running = cur;
-        for (const op of ops) {
-          running = computeAtomicProductImportAddition({
-            currentProduct: running,
-            importQty: op.qty,
-            unitCost: op.unitCost,
-            nowIso,
-            batchNumber: op.batchNumber,
-            expiryDate: op.expiryDate,
-          });
-        }
-        return running;
-      });
+      dispatchAtomicProductMutation(
+        pOwner,
+        touched,
+        (cur) => {
+          let running = cur;
+          for (const op of ops) {
+            running = computeAtomicProductImportAddition({
+              currentProduct: running,
+              importQty: op.qty,
+              unitCost: op.unitCost,
+              nowIso,
+              batchNumber: op.batchNumber,
+              expiryDate: op.expiryDate,
+            });
+          }
+          return running;
+        },
+        `impgrp_${sharedImportGroupId}_${prodId}`
+      );
     });
 
     recordAuditLog({
@@ -4218,6 +4452,10 @@ export default function App() {
       if (pair) {
         setPaymentVouchers((prev) => [pair.payment, ...prev]);
         setReceiptVouchers((prev) => [pair.receipt, ...prev]);
+        stageAndFlushRecords(
+          { paymentVouchers: [pair.payment], receiptVouchers: [pair.receipt] },
+          retOwnerUid
+        );
       }
     }
 
@@ -4390,6 +4628,10 @@ export default function App() {
       updatedAt: nowIso,
     };
     setStockAdjustments((prev) => [outRecord, inRecord, ...prev]);
+    stageAndFlushRecords({
+      stockAdjustments: [outRecord, inRecord],
+      products: [destProduct],
+    });
 
     recordAuditLog({
       actionCategory: 'update',
@@ -4606,13 +4848,19 @@ export default function App() {
     };
     suppliersRef.current = [created, ...suppliersRef.current];
     setSuppliers((prev) => [created, ...prev]);
+    stageAndFlushRecords({ suppliers: [created] }, created.ownerId);
     showToast(`Đã thêm Nhà cung cấp mới: ${created.name} [${autoSupplierCode}] (${resolvedWh})`);
     return created;
   };
 
   const handleSaveProduct = (
     data: Omit<ProductItem, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>,
-    editingId?: string
+    editingId?: string,
+    options?: {
+      createInitialImportReceipt?: boolean;
+      initialImportPaidMode?: 'paid' | 'debt';
+      initialImportDueDate?: string;
+    }
   ): ProductItem => {
     const nowIso = new Date().toISOString();
     const activeUid = auth.currentUser?.uid || currentStaff.uid;
@@ -4669,6 +4917,20 @@ export default function App() {
         return nextList;
       });
       if (existing) {
+        stageAndFlushRecords(
+          {
+            products: [
+              {
+                ...existing,
+                ...data,
+                code: resolvedCode,
+                warehouseName: resolvedWh,
+                updatedAt: nowIso,
+              },
+            ],
+          },
+          existing.ownerId || resolveOwnerUidForWarehouse(resolvedWh)
+        );
         recordAuditLog({
           actionCategory: 'update',
           targetEntity: 'product',
@@ -4694,8 +4956,13 @@ export default function App() {
         }
       );
     } else {
+      const initialQty = options?.createInitialImportReceipt
+        ? Math.max(0, Math.round(Number(data.stock) || 0))
+        : 0;
+      const wantsInitialImport = initialQty > 0;
       const created: ProductItem = {
         ...data,
+        stock: wantsInitialImport ? 0 : data.stock,
         code: resolvedCode,
         warehouseName: resolvedWh,
         id: generateUniqueRecordId('prod'),
@@ -4705,22 +4972,44 @@ export default function App() {
       };
       productsRef.current = [created, ...productsRef.current];
       setProducts((prev) => [created, ...prev]);
+      stageAndFlushRecords({ products: [created] }, created.ownerId);
       recordAuditLog({
         actionCategory: 'create',
         targetEntity: 'product',
         targetCode: created.code,
         warehouseName: resolvedWh,
         summary: `Thêm vật tư mới ${created.name} (${created.code}) tại ${resolvedWh}`,
-        details: `Tồn đầu: ${created.stock} ${created.unit} · Giá nhập: ${formatVND(
-          created.importPrice
-        )} · Giá bán: ${formatVND(created.sellPrice)}`,
+        details: `Tồn đầu: ${wantsInitialImport ? `0 (nhập ${initialQty} qua phiếu PN)` : created.stock} ${
+          created.unit
+        } · Giá nhập: ${formatVND(created.importPrice)} · Giá bán: ${formatVND(created.sellPrice)}`,
         snapshotData: JSON.stringify(created),
       });
       showToast(`Đã thêm vật tư mới: ${created.name} (${created.code} · ${resolvedWh})`);
       if (isGoogleAuthenticated) {
         void syncProductToFirestore(created, true);
       }
-      return created;
+      if (wantsInitialImport) {
+        const unitCost = Math.max(0, Number(data.importPrice) || 0);
+        const totalCost = Math.round(initialQty * unitCost);
+        const isDebt = options?.initialImportPaidMode === 'debt';
+        const supName = (data.supplierName || '').trim() || 'Nhà cung cấp VTNN';
+        handleCreateImport({
+          supplierName: supName,
+          supplierPhone: suppliersRef.current.find((s) => s.name === supName)?.phone || '',
+          productId: created.id,
+          quantity: initialQty,
+          unitCost,
+          paidAmount: isDebt ? 0 : totalCost,
+          dueDate: isDebt
+            ? options?.initialImportDueDate || computeDueDateAfterDays(30)
+            : computeDueDateAfterDays(0),
+          note: 'Phiếu nhập kho khởi tạo khi thêm vật tư mới',
+          warehouseName: resolvedWh,
+          batchNumber: data.batchNumber,
+          expiryDate: data.expiryDate,
+        });
+      }
+      return productsRef.current.find((p) => p.id === created.id) || created;
     }
   };
 
@@ -4787,6 +5076,7 @@ export default function App() {
     productsRef.current = nextProducts;
     setProducts(nextProducts);
     setStockAdjustments((prev) => [record, ...prev]);
+    stageAndFlushRecords({ stockAdjustments: [record] }, adjOwnerUid);
     dispatchAtomicProductMutation(adjOwnerUid, updatedProduct, (cur) => ({
       ...cur,
       stock: actualQty,
@@ -5007,6 +5297,7 @@ export default function App() {
       };
       customersRef.current = [created, ...customersRef.current];
       setCustomers((prev) => [created, ...prev]);
+      stageAndFlushRecords({ customers: [created] }, created.ownerId);
       recordAuditLog({
         actionCategory: 'create',
         targetEntity: 'customer',
@@ -5246,6 +5537,10 @@ export default function App() {
       updatedAt: nowIso,
     };
     setReceiptVouchers((prev) => [linkedReceiptVoucher, ...prev]);
+    stageAndFlushRecords(
+      { receiptVouchers: [linkedReceiptVoucher], sales: [updatedSale] },
+      linkedReceiptVoucher.ownerId
+    );
 
     recordAuditLog({
       actionCategory: 'debt_payment',
@@ -5379,6 +5674,7 @@ export default function App() {
     });
 
     setReceiptVouchers((prev) => [...createdVouchers, ...prev]);
+    stageAndFlushRecords({ receiptVouchers: createdVouchers });
 
     recordAuditLog({
       actionCategory: 'debt_payment',
@@ -5475,6 +5771,10 @@ export default function App() {
       updatedAt: nowIso,
     };
     setPaymentVouchers((prev) => [linkedPaymentVoucher, ...prev]);
+    stageAndFlushRecords(
+      { paymentVouchers: [linkedPaymentVoucher], imports: [updatedImport] },
+      linkedPaymentVoucher.ownerId
+    );
 
     recordAuditLog({
       actionCategory: 'debt_payment',
@@ -5613,6 +5913,13 @@ export default function App() {
       };
 
       setReceiptVouchers((prev) => [newReceiptVoucher, ...prev]);
+      stageAndFlushRecords(
+        {
+          receiptVouchers: [newReceiptVoucher],
+          sales: fifoResult.updatedSales.filter((s) => settledIds.has(s.id)),
+        },
+        fifoRvOwnerUid
+      );
 
       recordAuditLog({
         actionCategory: 'debt_payment',
@@ -5735,6 +6042,13 @@ export default function App() {
       };
 
       setPaymentVouchers((prev) => [newPaymentVoucher, ...prev]);
+      stageAndFlushRecords(
+        {
+          paymentVouchers: [newPaymentVoucher],
+          imports: fifoResult.updatedImports.filter((imp) => settledIds.has(imp.id)),
+        },
+        fifoPvOwnerUid
+      );
 
       recordAuditLog({
         actionCategory: 'debt_payment',
@@ -5824,6 +6138,7 @@ export default function App() {
       updatedAt: nowIso,
     };
     setReceiptVouchers((prev) => [created, ...prev]);
+    stageAndFlushRecords({ receiptVouchers: [created] }, rvOwnerUid);
     recordAuditLog({
       actionCategory: 'create',
       targetEntity: 'voucher',
@@ -6052,6 +6367,7 @@ export default function App() {
       updatedAt: nowIso,
     };
     setPaymentVouchers((prev) => [created, ...prev]);
+    stageAndFlushRecords({ paymentVouchers: [created] }, created.ownerId);
     recordAuditLog({
       actionCategory: 'create',
       targetEntity: 'voucher',

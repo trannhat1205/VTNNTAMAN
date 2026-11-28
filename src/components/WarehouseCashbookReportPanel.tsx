@@ -24,7 +24,10 @@ interface WarehouseCashbookReportPanelProps {
   onExportExcel: () => void;
   onExportPDF: () => void;
   onSelectSale?: (sale: SaleTransaction) => void;
-  onNavigateToModule?: (tab: 'sales' | 'receipt_vouchers' | 'payment_vouchers') => void;
+  onNavigateToModule?: (
+    tab: 'sales' | 'receipt_vouchers' | 'payment_vouchers',
+    recordId?: string
+  ) => void;
 }
 
 export const WarehouseCashbookReportPanel: React.FC<WarehouseCashbookReportPanelProps> = ({
@@ -268,9 +271,21 @@ export const WarehouseCashbookReportPanel: React.FC<WarehouseCashbookReportPanel
             </tr>
           )}
           {rows.map((v) => (
-            <tr key={v.id}>
+            <tr
+              key={v.id}
+              onClick={() =>
+                onNavigateToModule?.(sign === '+' ? 'receipt_vouchers' : 'payment_vouchers', v.id)
+              }
+              title={onNavigateToModule ? 'Bấm để mở phiếu gốc trong Nhật ký' : undefined}
+              className={onNavigateToModule ? 'cursor-pointer hover:bg-emerald-50/50' : ''}
+            >
               <td className="py-2.5 px-3 font-mono whitespace-nowrap">{(v.createdAt || '').slice(0, 10)}</td>
-              <td className="py-2.5 px-3 font-mono font-bold whitespace-nowrap">{v.voucherCode}</td>
+              <td className="py-2.5 px-3 font-mono font-bold whitespace-nowrap">
+                <span className="inline-flex items-center gap-1 text-emerald-800">
+                  {v.voucherCode}
+                  {onNavigateToModule && <ExternalLink className="w-3 h-3 opacity-70" />}
+                </span>
+              </td>
               <td className="py-2.5 px-3">{v.groupName}</td>
               <td className="py-2.5 px-3 font-semibold text-slate-900">{v.partnerName}</td>
               <td className="py-2.5 px-3">{v.note}</td>

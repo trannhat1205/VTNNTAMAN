@@ -4302,3 +4302,49 @@ test('Sổ Quỹ: non-primary accounts see Sổ Quỹ with provisional profit eq
   assert.ok(adminFin);
   assert.equal(adminFin!.title, 'Báo cáo Tài chính Tổng hợp, Lợi nhuận Gộp & Hiệu quả Kinh doanh Đa Kho');
 });
+
+test('Smart reorder: no false "Sắp thiếu" when nothing sold in 30 days and stock >= minStock', () => {
+  const base = {
+    id: 'p_idle',
+    code: 'IDLE',
+    name: 'Vật tư ít bán',
+    category: 'Thuốc BVTV',
+    unit: 'Chai',
+    importPrice: 100,
+    sellPrice: 150,
+    stock: 10,
+    minStock: 10,
+    supplierName: 'NCC',
+    ownerId: 'u1',
+    createdAt: '2026-11-01T00:00:00Z',
+    updatedAt: '2026-11-01T00:00:00Z',
+  } as ProductItem;
+  const opts = { lookbackDays: 30, coverDays: 21, todayStr: '2026-11-26' };
+
+  assert.equal(computeSmartReorderSuggestions([base], [], opts).length, 0);
+  assert.equal(computeSmartReorderSuggestions([{ ...base, stock: 4 }], [], opts).length, 1);
+
+  const sold = {
+    id: 's_idle',
+    invoiceCode: 'HD-IDLE',
+    customerId: 'c1',
+    customerName: 'A',
+    customerPhone: '0900000000',
+    productId: 'p_idle',
+    productName: 'Vật tư ít bán',
+    unit: 'Chai',
+    quantity: 30,
+    unitPrice: 150,
+    totalAmount: 4500,
+    paidAmount: 4500,
+    debtAmount: 0,
+    dueDate: '2026-12-01',
+    status: 'paid',
+    note: '',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-20T05:00:00Z',
+    updatedAt: '2026-11-20T05:00:00Z',
+  } as SaleTransaction;
+  assert.equal(computeSmartReorderSuggestions([base], [sold], opts).length, 1);
+});

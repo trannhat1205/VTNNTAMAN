@@ -5032,6 +5032,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   const [expiryDate, setExpiryDate] = useState<string>('');
   const [note, setNote] = useState<string>('');
   const [importCartItems, setImportCartItems] = useState<ImportCartDraftItem[]>([]);
+  // Zero-cost imports (free samples / promo goods from supplier) must be confirmed explicitly
+  const [isFreeSampleImport, setIsFreeSampleImport] = useState<boolean>(false);
+  const ZERO_COST_IMPORT_ERROR =
+    'Đơn giá nhập đang là 0 đ. Vui lòng nhập Đơn giá nhập thực tế (> 0 đ), hoặc tích chọn "Hàng tặng / Hàng mẫu 0 đ từ NCC" nếu đây là hàng khuyến mãi không tính tiền.';
   const [importRowLimit, setImportRowLimit] = useState<number>(80);
   const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(
     null
@@ -5081,6 +5085,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     setExpiryDate('');
     setNote('');
     setImportCartItems([]);
+    setIsFreeSampleImport(false);
     setShowNewProductBox(false);
     setNewProdCode('');
     setNewProdName('');
@@ -5192,6 +5197,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       return null;
     }
     const impPriceNum = Math.max(0, Number(newProdImportPrice) || 0);
+    if (impPriceNum <= 0 && !isFreeSampleImport) {
+      setFeedback({ type: 'error', text: ZERO_COST_IMPORT_ERROR });
+      return null;
+    }
     const sellPriceNum = Math.max(
       0,
       Number(newProdSellPrice) || Math.round(impPriceNum * 1.18)
@@ -5211,7 +5220,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       importPrice: impPriceNum,
       sellPrice: sellPriceNum,
       stock: 0,
-      minStock: 10,
+      minStock: 5,
       supplierName:
         selectedSupplierName && selectedSupplierName !== '__new_supplier__'
           ? selectedSupplierName
@@ -5355,6 +5364,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       return;
     }
     const effectiveCost = costNum > 0 ? costNum : resolvedProduct.importPrice;
+    if (effectiveCost <= 0 && !isFreeSampleImport) {
+      setFeedback({ type: 'error', text: ZERO_COST_IMPORT_ERROR });
+      return;
+    }
     const newItem: ImportCartDraftItem = {
       id: `imp_cart_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       productId: resolvedProduct.id,
@@ -5439,6 +5452,16 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
             batchNumber: batchNumber.trim() || undefined,
             expiryDate: expiryDate || undefined,
           });
+        }
+      }
+      if (!isFreeSampleImport) {
+        const zeroLine = finalCartItems.find((it) => (Number(it.unitCost) || 0) <= 0);
+        if (zeroLine) {
+          setFeedback({
+            type: 'error',
+            text: `"${zeroLine.productName}": ${ZERO_COST_IMPORT_ERROR}`,
+          });
+          return;
         }
       }
       if (!resolvedWarehouse || resolvedWarehouse === '__new_warehouse__') {
@@ -5526,6 +5549,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     }
 
     const effectiveCost = costNum > 0 ? costNum : resolvedProduct.importPrice;
+    if (effectiveCost <= 0 && !isFreeSampleImport) {
+      setFeedback({ type: 'error', text: ZERO_COST_IMPORT_ERROR });
+      return;
+    }
     const effectiveSummary = calculateImportSummary(qtyNum, effectiveCost, paidNum);
 
     const createdImport = onCreateImport({
@@ -5565,7 +5592,11 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Left: Create Import Form with Inline Warehouse, Product & Supplier Creation */}
         <div className="xl:col-span-5 bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <div className="px-6 py-3.5 border-b border-slate-200 bg-slate-50/60 flex items-center justify-end gap-2">
+          <div className="px-6 py-3.5 border-b border-slate-200 bg-slate-50/60 flex items-center justify-between gap-2">
+            <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Truck className="w-4 h-4 text-emerald-700" />
+              <span>Ghi Nhật Ký Nhập Kho &amp; Công Nợ NCC</span>
+            </h2>
             <button
               type="button"
               onClick={resetAllImportFieldsToBlank}
@@ -6206,6 +6237,16 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 />
               </div>
             </div>
+
+            <label className="flex items-start gap-2 text-[11px] font-semibold text-amber-900 bg-amber-50/70 border border-amber-200 rounded-lg px-2.5 py-1.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={isFreeSampleImport}
+                onChange={(e) => setIsFreeSampleImport(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>Hàng tặng / Hàng mẫu 0 đ từ NCC (không tính tiền)</span>
+            </label>
 
             <div className="grid grid-cols-2 gap-4">
               <div>

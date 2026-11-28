@@ -48,6 +48,8 @@ export interface ProductItem {
   dosageGuide?: string;
   /** Special selling price per customer group (key = group name). */
   groupPrices?: Record<string, number>;
+  /** Ring buffer of recent atomic mutation IDs (max 20) guaranteeing idempotent stock/cost updates across RTDB transactions. */
+  lastMutationIds?: string[];
   ownerId: string;
   createdAt: string;
   updatedAt: string;

@@ -4889,6 +4889,9 @@ export function computeSmartReorderSuggestions(
     const dailyVelocity = soldQtyLookback / lookbackDays;
     const daysOfStockLeft = dailyVelocity > 0 ? Math.floor(curStock / dailyVelocity) : null;
 
+    // No recent sales and stock already meets the minimum level -> never raise a false "low stock" suggestion
+    if (curStock > 0 && soldQtyLookback === 0 && curStock >= minStk) continue;
+
     const needsReorder = curStock <= minStk || (daysOfStockLeft !== null && daysOfStockLeft <= 14);
     if (!needsReorder) continue;
 
