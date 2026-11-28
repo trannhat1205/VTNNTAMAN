@@ -62,11 +62,13 @@ import { generateUniqueProductCodeFromName } from '../utils/businessLogic';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 import { DOSAGE_GUIDE_PRESETS } from '../utils/smartPosFeatures';
 import {
+  COMMON_VTNN_UNITS,
   computeMarginInfo,
   isSlowMovingProduct,
   priceFromMarkup,
   suggestMinStockFromVelocity,
 } from '../utils/smartInsights';
+import { TableDensityToggle, useTableDensity } from './CloudRecordSyncBadge';
 
 interface InventoryViewProps {
   products: ProductItem[];
@@ -137,6 +139,8 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   onClearFocusedProduct,
   onNavigateCrossLink,
 }) => {
+  const [tableDensity, setTableDensity] = useTableDensity();
+  const isCompactTable = tableDensity === 'compact';
   const [searchQuery, setSearchQuery] = useState('');
   const [warehouseFilter, setWarehouseFilter] = useState<string>('all');
   const [categoryFilter, setCategoryFilter] = useState<ProductCategory | 'all'>('all');
@@ -956,6 +960,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <TableDensityToggle density={tableDensity} onChange={setTableDensity} />
           {canPerformRoleAction(role, 'edit_record') && (
             <button
               type="button"
@@ -1051,7 +1056,9 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     setLedgerTypeFilter('all');
                     setDetailProductId(p.id);
                   }}
-                  className="p-4 space-y-3 hover:bg-emerald-50/40 cursor-pointer transition-colors"
+                  className={`${
+                    isCompactTable ? 'p-2.5 space-y-1.5' : 'p-4 space-y-3'
+                  } hover:bg-emerald-50/40 cursor-pointer transition-colors`}
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
@@ -1271,6 +1278,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                 const alert = evaluateStockAlert(p);
                 const movCounts = productMovementCounts.get(p.id) || { qtyIn: 0, qtyOut: 0 };
                 const integrity = evaluateProductStockIntegrity(p, sales, imports, stockAdjustments);
+                const invCellPad = isCompactTable ? 'py-1.5 px-3' : 'py-3.5 px-4';
                 return (
                   <tr
                     key={p.id}
@@ -1287,7 +1295,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         : 'hover:bg-emerald-50/50'
                     }`}
                   >
-                    <td className="py-3.5 px-4 min-w-[230px] align-middle">
+                    <td className={`${invCellPad} min-w-[230px] align-middle`}>
                       <div className="font-semibold text-slate-900 leading-snug flex flex-wrap items-center gap-1.5">
                         <span>{p.name}</span>
                         <Eye className="w-3.5 h-3.5 text-emerald-700 shrink-0 opacity-75" />
@@ -1324,6 +1332,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                           </span>
                         )}
                       </div>
+                      {(!isCompactTable || integrity.hasNegativeDrift) && (
                       <div className="text-xs text-slate-500 mt-0.5 flex flex-wrap items-center gap-1.5">
                         <span className="font-mono">{p.code}</span>
                         <span aria-hidden="true">·</span>
@@ -1371,24 +1380,27 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             );
                           })()}
                       </div>
+                      )}
                     </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap align-middle">
+                    <td className={`${invCellPad} whitespace-nowrap align-middle`}>
                       <span className="text-xs font-semibold text-emerald-800 flex items-center gap-1">
                         <Warehouse className="w-3.5 h-3.5 shrink-0" />
                         <span>{p.warehouseName || 'Tâm An Mỹ Ngãi'}</span>
                       </span>
                     </td>
-                    <td className="py-3.5 px-4 min-w-[190px] align-middle">
+                    <td className={`${invCellPad} min-w-[190px] align-middle`}>
                       <div className="text-xs font-medium text-slate-800 leading-snug">{p.category}</div>
-                      <div className="text-xs text-slate-500 mt-0.5 leading-snug">{p.supplierName}</div>
+                      {!isCompactTable && (
+                        <div className="text-xs text-slate-500 mt-0.5 leading-snug">{p.supplierName}</div>
+                      )}
                     </td>
-                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs text-slate-600 whitespace-nowrap align-middle">
+                    <td className={`${invCellPad} text-right font-mono tabular-nums text-xs text-slate-600 whitespace-nowrap align-middle`}>
                       {formatVND(p.importPrice)}
                     </td>
-                    <td className="py-3.5 px-4 text-right font-mono tabular-nums text-xs font-semibold text-slate-900 whitespace-nowrap align-middle">
+                    <td className={`${invCellPad} text-right font-mono tabular-nums text-xs font-semibold text-slate-900 whitespace-nowrap align-middle`}>
                       {formatVND(p.sellPrice)}
                     </td>
-                    <td className="py-3.5 px-4 text-right font-mono tabular-nums whitespace-nowrap align-middle">
+                    <td className={`${invCellPad} text-right font-mono tabular-nums whitespace-nowrap align-middle`}>
                       <span
                         className={`text-sm font-bold ${
                           alert === 'out_of_stock'
@@ -1405,7 +1417,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         / {p.minStock} {p.unit}
                       </span>
                     </td>
-                    <td className="py-3.5 px-4 text-xs whitespace-nowrap align-middle">
+                    <td className={`${invCellPad} text-xs whitespace-nowrap align-middle`}>
                       {alert === 'out_of_stock' ? (
                         <span className="text-red-600 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
@@ -1423,7 +1435,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                         </span>
                       )}
                     </td>
-                    <td className="py-3.5 px-4 text-right whitespace-nowrap align-middle">
+                    <td className={`${invCellPad} text-right whitespace-nowrap align-middle`}>
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
@@ -1815,6 +1827,22 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                     placeholder="CẶP / Bao 50kg / Chai 500ml"
                     className="w-full px-3 py-2 text-sm bg-white border border-slate-200 rounded-lg"
                   />
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                    {COMMON_VTNN_UNITS.map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setUnit(u)}
+                        className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors ${
+                          unit.trim().toLowerCase() === u.toLowerCase()
+                            ? 'bg-emerald-700 text-white border-emerald-700'
+                            : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-emerald-300'
+                        }`}
+                      >
+                        {u}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 

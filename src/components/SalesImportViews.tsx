@@ -107,11 +107,18 @@ import {
   priceFromMarkup,
   resolveCustomerGroupPrice,
   addParkedOrder,
+  COMMON_VTNN_UNITS,
   loadParkedOrders,
   saveParkedOrders,
   VTNN_MARKUP_PRESETS,
+  type CloudSyncMeta,
   type ParkedOrder,
 } from '../utils/smartInsights';
+import {
+  CloudRecordSyncBadge,
+  TableDensityToggle,
+  useTableDensity,
+} from './CloudRecordSyncBadge';
 import { ExcelDataBar } from './ExcelDataBar';
 import { SearchableSelect } from './SearchableSelect';
 import {
@@ -237,6 +244,7 @@ interface SalesLogViewProps {
     reason: string;
   }) => void;
   onOpenDebtRecord?: (recordId: string) => void;
+  syncMeta?: CloudSyncMeta;
   onRequestAddNewProductInImports?: (initialKeyword?: string) => void;
 }
 
@@ -276,8 +284,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
   onDeleteSaleGroup,
   onProcessCustomerReturn,
   onOpenDebtRecord,
+  syncMeta,
   onRequestAddNewProductInImports,
 }) => {
+  const [tableDensity, setTableDensity] = useTableDensity();
+  const isCompactTable = tableDensity === 'compact';
   // Blank initial form state per user requirement
   const [selectedWarehouse, setSelectedWarehouse] = useState<string>(lockedWarehouse || '');
   const [showNewWarehouseBox, setShowNewWarehouseBox] = useState<boolean>(false);
@@ -555,12 +566,9 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
   const handleProductSelectChange = (prodId: string) => {
     if (prodId === '__new_product__') {
-      if (onRequestAddNewProductInImports) {
-        onRequestAddNewProductInImports('');
-        return;
-      }
       setSelectedProductId('__new_product__');
       setShowNewProductBox(true);
+      if (!newProdUnit) setNewProdUnit('Chai');
       return;
     }
     setSelectedProductId(prodId);
@@ -600,11 +608,27 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     }
   };
 
+  useEffect(() => {
+    if (!showNewCustomerBox || typeof document === 'undefined') return;
+    const t = window.setTimeout(() => {
+      document.getElementById('inline-cust-name')?.focus();
+    }, 40);
+    return () => window.clearTimeout(t);
+  }, [showNewCustomerBox]);
+
+  useEffect(() => {
+    if (!showNewProductBox || typeof document === 'undefined') return;
+    const t = window.setTimeout(() => {
+      document.getElementById('inline-prod-name')?.focus();
+    }, 40);
+    return () => window.clearTimeout(t);
+  }, [showNewProductBox]);
+
   const handleConfirmInlineCustomer = () => {
-    if (!newCustName.trim() || !newCustPhone.trim()) {
+    if (!newCustName.trim()) {
       setFormMessage({
         type: 'error',
-        text: 'Vui lòng nhập Tên khách hàng mới và Số điện thoại để lưu.',
+        text: 'Vui lòng nhập Họ tên khách hàng mới (SĐT có thể để trống nếu chưa có).',
       });
       return null;
     }
@@ -641,7 +665,9 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setInlineCustGroupText('');
     setFormMessage({
       type: 'success',
-      text: `Đã tạo và chọn khách hàng mới: ${created.name} (${created.phone} · ${created.group})`,
+      text: `Đã tạo và chọn khách hàng mới: ${created.name} (${
+        created.phone ? `${created.phone} · ${created.group}` : created.group
+      })`,
     });
     return created;
   };
@@ -1274,9 +1300,22 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     // MULTI-ITEM POS CART CHECKOUT PATH
     if (posCartItems.length > 0 && onCreateMultiItemSale) {
       const finalCartItems: PosCartDraftItem[] = [...posCartItems];
+      let activeDraftProduct =
+        selectedProductId && selectedProductId !== '__new_product__'
+          ? products.find((p) => p.id === selectedProductId)
+          : undefined;
+      if (
+        !activeDraftProduct &&
+        (showNewProductBox || selectedProductId === '__new_product__') &&
+        newProdName.trim()
+      ) {
+        const inlineCreated = handleConfirmInlineProduct();
+        if (!inlineCreated) return;
+        activeDraftProduct = inlineCreated;
+      }
       // Also include currently selected product in form if user filled it without clicking "+ Thêm vào giỏ"
-      if (selectedProductId && selectedProductId !== '__new_product__' && qtyNum > 0) {
-        const draftProd = products.find((p) => p.id === selectedProductId);
+      if (activeDraftProduct && qtyNum > 0) {
+        const draftProd = activeDraftProduct;
         if (draftProd) {
           const effPrice = priceNum > 0 ? priceNum : draftProd.sellPrice;
           const effGross = Math.round(qtyNum * effPrice);
@@ -1604,8 +1643,12 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     setReturnReasonInput('Dư sau mùa vụ');
   };
 
+  const hasMobileStickySaleDraft =
+    combinedPreviewItems.length > 0 ||
+    (showNewProductBox && Boolean(newProdName.trim()) && qtyNum > 0);
+
   return (
-    <div className="space-y-5">
+    <div className={`space-y-5 ${hasMobileStickySaleDraft ? 'pb-20 md:pb-0' : ''}`}>
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Left: Blank-by-Default Fast Sale Form with Inline Warehouse, Customer & Product Creation */}
         <div className="xl:col-span-5 bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -1876,8 +1919,13 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
               {showNewCustomerBox && (
                 <div className="p-3.5 bg-emerald-50/60 rounded-lg border border-emerald-200 space-y-3">
-                  <div className="text-xs font-bold text-emerald-900">
-                    Tạo khách hàng mới trực tiếp trong đơn bán
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-emerald-900">
+                      Tạo nhanh khách hàng mới (1 chạm — tự chọn vào đơn)
+                    </div>
+                    <span className="text-[10px] font-medium text-emerald-700">
+                      Bấm Lưu đơn bên dưới cũng tự lưu KH
+                    </span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                     <div>
@@ -1909,8 +1957,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         type="text"
                         value={newCustName}
                         onChange={(e) => setNewCustName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleConfirmInlineCustomer();
+                          }
+                        }}
                         placeholder="VD: Ông Nguyễn Văn Hòa"
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                       />
                     </div>
                     <div>
@@ -1918,15 +1972,21 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         htmlFor="inline-cust-phone"
                         className="block text-[11px] font-semibold text-slate-700 mb-1"
                       >
-                        Số điện thoại *
+                        Số điện thoại (tùy chọn)
                       </label>
                       <input
                         id="inline-cust-phone"
                         type="tel"
                         value={newCustPhone}
                         onChange={(e) => setNewCustPhone(e.target.value)}
-                        placeholder="VD: 0913456789"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleConfirmInlineCustomer();
+                          }
+                        }}
+                        placeholder="VD: 0913456789 (có thể trống)"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
                       />
                     </div>
                   </div>
@@ -1943,38 +2003,58 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         type="text"
                         value={newCustAddress}
                         onChange={(e) => setNewCustAddress(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleConfirmInlineCustomer();
+                          }
+                        }}
                         placeholder="Ấp, Xã, Huyện..."
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                       />
                     </div>
                     <div className="space-y-1.5">
-                      <label
-                        htmlFor="inline-cust-group"
-                        className="block text-[11px] font-semibold text-slate-700"
-                      >
-                        Phân nhóm khách hàng
+                      <label className="block text-[11px] font-semibold text-slate-700">
+                        Phân nhóm khách hàng (chọn 1 chạm)
                       </label>
-                      <SearchableSelect
-                        id="inline-cust-group"
-                        value={newCustGroup === '__new_group__' ? '' : newCustGroup}
-                        onChange={(v) => {
-                          setNewCustGroup(v as CustomerGroup);
-                          setShowInlineCustGroupInput(false);
-                        }}
-                        placeholder="Gõ tên phân nhóm KH để chọn nhanh..."
-                        emptyOptionLabel="-- Chưa chọn nhóm --"
-                        createActionLabel="+ Tạo nhóm khách hàng mới trực tiếp..."
-                        onCreateAction={(kw) => {
-                          setNewCustGroup('__new_group__');
-                          setShowInlineCustGroupInput(true);
-                          if (kw) setInlineCustGroupText(kw);
-                        }}
-                        options={customerGroups.map((grp) => ({
-                          value: grp,
-                          label: grp,
-                          keywords: grp,
-                        }))}
-                      />
+                      <div className="flex flex-wrap gap-1.5">
+                        {customerGroups.map((grp) => {
+                          const activeGrp =
+                            !showInlineCustGroupInput &&
+                            (newCustGroup ? newCustGroup === grp : grp === (customerGroups[0] || 'Nhà nông'));
+                          return (
+                            <button
+                              key={grp}
+                              type="button"
+                              onClick={() => {
+                                setNewCustGroup(grp as CustomerGroup);
+                                setShowInlineCustGroupInput(false);
+                              }}
+                              className={`px-2.5 py-1 text-[11px] font-semibold rounded-md border transition-colors ${
+                                activeGrp
+                                  ? 'bg-emerald-700 text-white border-emerald-700'
+                                  : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-300'
+                              }`}
+                            >
+                              {grp}
+                            </button>
+                          );
+                        })}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewCustGroup('__new_group__');
+                            setShowInlineCustGroupInput((v) => !v);
+                          }}
+                          className={`px-2 py-1 text-[11px] font-semibold rounded-md border transition-colors ${
+                            showInlineCustGroupInput
+                              ? 'bg-emerald-100 text-emerald-900 border-emerald-400'
+                              : 'bg-white text-emerald-700 border-dashed border-emerald-300 hover:bg-emerald-50'
+                          }`}
+                        >
+                          + Nhóm khác
+                        </button>
+                      </div>
                       {showInlineCustGroupInput && (
                         <input
                           type="text"
@@ -1989,7 +2069,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   <button
                     type="button"
                     onClick={handleConfirmInlineCustomer}
-                    className="w-full py-1.5 px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md transition-colors"
+                    className="w-full py-2 px-3 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md transition-colors"
                   >
                     Lưu khách hàng mới & Chọn ngay vào đơn
                   </button>
@@ -2018,13 +2098,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      if (onRequestAddNewProductInImports) {
-                        onRequestAddNewProductInImports('');
-                        return;
-                      }
                       const nextState = !showNewProductBox;
                       setShowNewProductBox(nextState);
                       setSelectedProductId(nextState ? '__new_product__' : '');
+                      if (nextState && !newProdUnit) setNewProdUnit('Chai');
                     }}
                     className="text-xs font-semibold text-emerald-700 hover:underline flex items-center gap-1 whitespace-nowrap"
                   >
@@ -2052,13 +2129,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     : undefined
                 }
                 onCreateAction={(kw) => {
-                  if (onRequestAddNewProductInImports) {
-                    onRequestAddNewProductInImports(kw || '');
-                    return;
-                  }
                   setSelectedProductId('__new_product__');
                   setShowNewProductBox(true);
                   if (kw) setNewProdName(kw);
+                  if (!newProdUnit) setNewProdUnit('Chai');
                 }}
                 options={products.map((p) => {
                   const expInfo = evaluateProductExpiry(p.expiryDate);
@@ -2272,8 +2346,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
 
               {showNewProductBox && (
                 <div className="p-3.5 bg-emerald-50/60 rounded-lg border border-emerald-200 space-y-3">
-                  <div className="text-xs font-bold text-emerald-900">
-                    Bổ sung vật tư nông nghiệp mới trực tiếp
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="text-xs font-bold text-emerald-900">
+                      Bổ sung vật tư mới trực tiếp (1 chạm — tự chọn vào đơn)
+                    </div>
+                    {onRequestAddNewProductInImports && (
+                      <button
+                        type="button"
+                        onClick={() => onRequestAddNewProductInImports(newProdName.trim())}
+                        className="text-[11px] font-semibold text-emerald-800 underline hover:text-emerald-950"
+                      >
+                        Mở sang Nhập kho kèm NCC →
+                      </button>
+                    )}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
                     <div>
@@ -2315,7 +2400,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         value={newProdName}
                         onChange={(e) => setNewProdName(e.target.value)}
                         placeholder="VD: GAP DIỆT MẦM KÍCH RỄ"
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                       />
                     </div>
                     <div>
@@ -2330,10 +2415,27 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         type="text"
                         value={newProdUnit}
                         onChange={(e) => setNewProdUnit(e.target.value)}
-                        placeholder="CẶP / Bao 50kg"
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                        placeholder="Chai / Bao 50kg"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                       />
                     </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="text-[11px] text-slate-600 mr-1">ĐVT nhanh:</span>
+                    {COMMON_VTNN_UNITS.map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setNewProdUnit(u)}
+                        className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors ${
+                          newProdUnit.trim().toLowerCase() === u.toLowerCase()
+                            ? 'bg-emerald-700 text-white border-emerald-700'
+                            : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-300'
+                        }`}
+                      >
+                        {u}
+                      </button>
+                    ))}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                     <div>
@@ -3646,33 +3748,36 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
             </div>
 
             <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2 w-full sm:w-auto">
-              <div className="hidden md:inline-flex items-center p-0.5 bg-slate-100 rounded-lg border border-slate-200">
-                <button
-                  type="button"
-                  onClick={() => setSalesViewMode('grouped')}
-                  title="Gom các mặt hàng cùng hóa đơn POS thành 1 dòng gọn gàng"
-                  className={`px-2 py-1 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 transition-colors ${
-                    salesViewMode === 'grouped'
-                      ? 'bg-white text-emerald-800 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <Layers className="w-3 h-3" />
-                  <span>Gộp HĐ</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSalesViewMode('flat')}
-                  title="Hiển thị tách rời từng dòng vật tư"
-                  className={`px-2 py-1 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 transition-colors ${
-                    salesViewMode === 'flat'
-                      ? 'bg-white text-emerald-800 shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  <List className="w-3 h-3" />
-                  <span>Từng món</span>
-                </button>
+              <div className="flex items-center justify-between sm:justify-start gap-2">
+                <TableDensityToggle density={tableDensity} onChange={setTableDensity} />
+                <div className="hidden md:inline-flex items-center p-0.5 bg-slate-100 rounded-lg border border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => setSalesViewMode('grouped')}
+                    title="Gom các mặt hàng cùng hóa đơn POS thành 1 dòng gọn gàng"
+                    className={`px-2 py-1 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 transition-colors ${
+                      salesViewMode === 'grouped'
+                        ? 'bg-white text-emerald-800 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <Layers className="w-3 h-3" />
+                    <span>Gộp HĐ</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSalesViewMode('flat')}
+                    title="Hiển thị tách rời từng dòng vật tư"
+                    className={`px-2 py-1 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 transition-colors ${
+                      salesViewMode === 'flat'
+                        ? 'bg-white text-emerald-800 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <List className="w-3 h-3" />
+                    <span>Từng món</span>
+                  </button>
+                </div>
               </div>
               {!lockedWarehouse && (
                 <select
@@ -3792,7 +3897,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 return (
                 <div
                   key={s.id}
-                  className={`p-4 space-y-3 transition-colors ${
+                  className={`${isCompactTable ? 'p-2.5 space-y-2' : 'p-4 space-y-3'} transition-colors ${
                     isFocused
                       ? 'bg-emerald-50/80 ring-2 ring-inset ring-emerald-500'
                       : 'hover:bg-slate-50'
@@ -3800,8 +3905,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <div className="font-mono text-xs font-bold text-slate-900">
-                        {s.invoiceCode}
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-mono text-xs font-bold text-slate-900">
+                          {s.invoiceCode}
+                        </span>
+                        <CloudRecordSyncBadge recordId={s.id} syncMeta={syncMeta} />
                       </div>
                       <div className="text-[11px] font-mono text-slate-500 mt-0.5">
                         Ngày: {s.createdAt.slice(0, 10)}
@@ -3880,7 +3988,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     </div>
                   </div>
 
-                  {onNavigateCrossLink && (
+                  {onNavigateCrossLink && (!isCompactTable || diag.statusLevel !== 'ok' || isFocused) && (
                     <div className="pt-1 border-t border-slate-100 flex flex-wrap items-center gap-1.5">
                       {diag.statusLevel !== 'ok' && (
                         <span
@@ -4116,13 +4224,14 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       const { group: grp, isExpanded } = entry;
                       const firstSale = grp.items[0];
                       const matchedCust = customers.find((c) => c.id === grp.customerId);
+                      const cellPad = isCompactTable ? 'py-1.5 px-3' : 'py-3 px-4';
                       return (
                         <tr
                           key={grp.groupKey}
                           className="bg-emerald-50/45 hover:bg-emerald-50/80 transition-colors"
                         >
-                          <td className="py-3 px-4 whitespace-nowrap align-middle">
-                            <div className="flex items-center gap-1.5">
+                          <td className={`${cellPad} whitespace-nowrap align-middle`}>
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <span className="font-mono text-xs font-bold text-slate-900">
                                 {grp.invoiceCode}
                               </span>
@@ -4130,14 +4239,23 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                                 {grp.items.length} món
                               </span>
                             </div>
-                            <div className="text-xs font-semibold text-emerald-800 mt-0.5">
-                              {grp.warehouseName}
+                            <div className="mt-0.5">
+                              <CloudRecordSyncBadge
+                                recordId={grp.items.map((x) => x.id)}
+                                syncMeta={syncMeta}
+                              />
                             </div>
+                            {!isCompactTable && (
+                              <div className="text-xs font-semibold text-emerald-800 mt-0.5">
+                                {grp.warehouseName}
+                              </div>
+                            )}
                             <div className="text-[11px] font-mono text-slate-500">
                               {(grp.createdAt || '').slice(0, 10)}
+                              {isCompactTable ? ` · ${grp.warehouseName}` : ''}
                             </div>
                           </td>
-                          <td className="py-3 px-4 min-w-[180px] align-middle">
+                          <td className={`${cellPad} min-w-[180px] align-middle`}>
                             {onNavigateCrossLink && matchedCust ? (
                               <button
                                 type="button"
@@ -4200,10 +4318,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                               )}
                             </button>
                           </td>
-                          <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-extrabold text-slate-900 whitespace-nowrap align-middle">
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-xs font-extrabold text-slate-900 whitespace-nowrap align-middle`}>
                             {formatVND(grp.totalAmount)}
                           </td>
-                          <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                          <td className={`${cellPad} text-right whitespace-nowrap align-middle`}>
                             <div className="font-mono tabular-nums text-xs font-semibold text-emerald-700">
                               Thu: {formatVND(grp.paidAmount)}
                             </div>
@@ -4215,7 +4333,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                               <div className="text-xs text-slate-500 mt-0.5">Đã tất toán</div>
                             )}
                           </td>
-                          <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                          <td className={`${cellPad} text-right whitespace-nowrap align-middle`}>
                             <div className="flex items-center justify-end gap-1">
                               <button
                                 type="button"
@@ -4283,6 +4401,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       receiptVouchers,
                     });
                     const isFocused = focusedSaleRecord?.id === s.id;
+                    const sCellPad = isCompactTable ? 'py-1.5 px-3' : 'py-3 px-4';
                     return (
                     <tr
                       key={s.id}
@@ -4294,15 +4413,21 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           : 'hover:bg-slate-50'
                       }`}
                     >
-                    <td className="py-3 px-4 whitespace-nowrap align-middle">
-                      <div className="font-mono text-xs font-semibold text-slate-900">
-                        {s.invoiceCode}
+                    <td className={`${sCellPad} whitespace-nowrap align-middle`}>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span className="font-mono text-xs font-semibold text-slate-900">
+                          {s.invoiceCode}
+                        </span>
+                        <CloudRecordSyncBadge recordId={s.id} syncMeta={syncMeta} />
                       </div>
-                      <div className="text-xs font-semibold text-emerald-800 mt-0.5">
-                        {s.warehouseName || 'Tâm An Mỹ Ngãi'}
-                      </div>
+                      {!isCompactTable && (
+                        <div className="text-xs font-semibold text-emerald-800 mt-0.5">
+                          {s.warehouseName || 'Tâm An Mỹ Ngãi'}
+                        </div>
+                      )}
                       <div className="text-[11px] font-mono text-slate-500">
                         {s.createdAt.slice(0, 10)}
+                        {isCompactTable ? ` · ${s.warehouseName || 'Tâm An Mỹ Ngãi'}` : ''}
                       </div>
                       {diag.statusLevel !== 'ok' && (
                         <div className="mt-1">
@@ -4318,7 +4443,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         </div>
                       )}
                     </td>
-                    <td className="py-3 px-4 min-w-[180px] align-middle">
+                    <td className={`${sCellPad} min-w-[180px] align-middle`}>
                       {onNavigateCrossLink && diag.linkedCustomer ? (
                         <button
                           type="button"
@@ -4337,9 +4462,11 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       ) : (
                         <div className="font-semibold text-slate-900 leading-snug">{s.customerName}</div>
                       )}
-                      <div className="text-xs font-mono text-slate-500 mt-0.5">{s.customerPhone}</div>
+                      {!isCompactTable && (
+                        <div className="text-xs font-mono text-slate-500 mt-0.5">{s.customerPhone}</div>
+                      )}
                     </td>
-                    <td className="py-3 px-4 min-w-[220px] align-middle">
+                    <td className={`${sCellPad} min-w-[220px] align-middle`}>
                       {onNavigateCrossLink && diag.linkedProduct ? (
                         <button
                           type="button"
@@ -4379,7 +4506,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           )}
                         </div>
                       )}
-                      {s.dosageGuide && (
+                      {!isCompactTable && s.dosageGuide && (
                         <div className="mt-1 text-[11px] text-teal-800 flex items-start gap-1 max-w-[260px]">
                           <Leaf className="w-3 h-3 shrink-0 mt-0.5 text-teal-700" />
                           <span className="truncate" title={s.dosageGuide}>
@@ -4387,7 +4514,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                           </span>
                         </div>
                       )}
-                      {onNavigateCrossLink && (
+                      {onNavigateCrossLink && (!isCompactTable || isFocused || s.isSupplierSale) && (
                         <div className="flex flex-wrap items-center gap-1 mt-1.5">
                           {s.isSupplierSale && (
                             <span className="px-1.5 py-0.5 text-[10px] font-bold rounded border bg-indigo-50 text-indigo-800 border-indigo-200">
@@ -4494,10 +4621,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         </div>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
+                    <td className={`${sCellPad} text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle`}>
                       {formatVND(s.totalAmount)}
                     </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                    <td className={`${sCellPad} text-right whitespace-nowrap align-middle`}>
                       <div className="font-mono tabular-nums text-xs text-emerald-700">
                         Thu: {formatVND(Math.max(0, s.paidAmount - (s.supplierOffsetAmount || 0)))}
                       </div>
@@ -4528,7 +4655,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                         <div className="text-xs text-slate-500 mt-0.5">Đã tất toán</div>
                       )}
                     </td>
-                    <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                    <td className={`${sCellPad} text-right whitespace-nowrap align-middle`}>
                       <div className="flex items-center justify-end gap-1">
                         <button
                           type="button"
@@ -5259,6 +5386,57 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         }}
       />
 
+      {/* Sticky Mobile Checkout Action Bar (< md) — sits cleanly above bottom nav */}
+      {hasMobileStickySaleDraft && (
+        <div className="md:hidden fixed bottom-[52px] inset-x-0 z-20 bg-white/95 backdrop-blur-md border-t border-emerald-300 px-3 py-2 shadow-[0_-4px_12px_rgba(15,23,42,0.08)] flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-semibold text-slate-600">
+              <span>{combinedPreviewItems.length || 1} món</span>
+              <span>·</span>
+              <span>
+                {supplierFullyOffset
+                  ? 'Cấn trừ NCC'
+                  : paymentMode === 'debt'
+                  ? `Nợ ${formatVND(summary.debtAmount)}`
+                  : 'Thu đủ'}
+              </span>
+              {profitEval.level === 'loss' ? (
+                <span className="px-1 py-0.5 rounded bg-rose-100 text-rose-700 font-bold">
+                  Lỗ {formatVND(profitEval.lossAmount)}
+                </span>
+              ) : profitEval.hasItems ? (
+                <span className="text-emerald-700 font-mono">
+                  Lãi +{formatVND(profitEval.estimatedGrossProfit)}
+                </span>
+              ) : null}
+            </div>
+            <div className="text-sm font-extrabold font-mono tabular-nums text-slate-900 truncate">
+              {formatVND(effectiveTotalPayable)}
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => submitSale(true)}
+              className="px-2.5 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg inline-flex items-center gap-1"
+            >
+              <FileDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              <span>PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => submitSale(false)}
+              className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs inline-flex items-center gap-1"
+            >
+              <Plus className="w-4 h-4 shrink-0" />
+              <span>
+                {posCartItems.length > 0 ? `Lưu đơn (${combinedPreviewItems.length})` : 'Lưu đơn'}
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
       <VietQrPaymentModal
         isOpen={Boolean(vietQrModalTarget)}
         onClose={() => setVietQrModalTarget(null)}
@@ -5342,6 +5520,7 @@ interface ImportLogViewProps {
   onDeleteImport: (importId: string) => void;
   onReturnToSupplier?: (params: { importId: string; returnQuantity: number; reason: string }) => void;
   onOpenDebtRecord?: (recordId: string) => void;
+  syncMeta?: CloudSyncMeta;
   newProductRedirectTrigger?: { key: number; initialName: string } | null;
   onConsumeNewProductRedirect?: () => void;
 }
@@ -5374,9 +5553,12 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
   onDeleteImport,
   onReturnToSupplier,
   onOpenDebtRecord,
+  syncMeta,
   newProductRedirectTrigger,
   onConsumeNewProductRedirect,
 }) => {
+  const [tableDensity, setTableDensity] = useTableDensity();
+  const isCompactTable = tableDensity === 'compact';
   // Blank-by-default state so fields are empty on open and reset after save/export
   const [selectedWarehouse, setSelectedWarehouse] = useState<string>(lockedWarehouse || '');
   const [showNewWarehouseBox, setShowNewWarehouseBox] = useState<boolean>(false);
@@ -5593,6 +5775,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     if (prodId === '__new_product__') {
       setSelectedProductId('__new_product__');
       setShowNewProductBox(true);
+      if (!newProdUnit) setNewProdUnit('Chai');
       return;
     }
     setSelectedProductId(prodId);
@@ -5631,6 +5814,22 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
       setSupplierPhone(matched.phone);
     }
   };
+
+  useEffect(() => {
+    if (!showNewProductBox || typeof document === 'undefined') return;
+    const t = window.setTimeout(() => {
+      document.getElementById('imp-inline-prod-name')?.focus();
+    }, 40);
+    return () => window.clearTimeout(t);
+  }, [showNewProductBox]);
+
+  useEffect(() => {
+    if (!showNewSupplierBox || typeof document === 'undefined') return;
+    const t = window.setTimeout(() => {
+      document.getElementById('imp-inline-sup-name')?.focus();
+    }, 40);
+    return () => window.clearTimeout(t);
+  }, [showNewSupplierBox]);
 
   const handleConfirmInlineProductInImport = () => {
     if (!newProdName.trim() || !newProdUnit.trim() || !newProdImportPrice) {
@@ -5919,8 +6118,21 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
         return;
       }
       const finalCartItems: ImportCartDraftItem[] = [...importCartItems];
-      if (selectedProductId && selectedProductId !== '__new_product__' && qtyNum > 0) {
-        const draftProd = products.find((p) => p.id === selectedProductId);
+      let activeDraftImpProd =
+        selectedProductId && selectedProductId !== '__new_product__'
+          ? products.find((p) => p.id === selectedProductId)
+          : undefined;
+      if (
+        !activeDraftImpProd &&
+        (showNewProductBox || selectedProductId === '__new_product__') &&
+        newProdName.trim()
+      ) {
+        const inlineCreatedProd = handleConfirmInlineProductInImport();
+        if (!inlineCreatedProd) return;
+        activeDraftImpProd = inlineCreatedProd;
+      }
+      if (activeDraftImpProd && qtyNum > 0) {
+        const draftProd = activeDraftImpProd;
         if (draftProd) {
           finalCartItems.push({
             id: `imp_cart_last_${Date.now()}`,
@@ -6075,8 +6287,12 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     });
   };
 
+  const hasMobileStickyImportDraft =
+    combinedImportPreviewItems.length > 0 ||
+    (showNewProductBox && Boolean(newProdName.trim()) && qtyNum > 0);
+
   return (
-    <div className="space-y-5">
+    <div className={`space-y-5 ${hasMobileStickyImportDraft ? 'pb-20 md:pb-0' : ''}`}>
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Left: Create Import Form with Inline Warehouse, Product & Supplier Creation */}
         <div className="xl:col-span-5 bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -6439,10 +6655,27 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         type="text"
                         value={newProdUnit}
                         onChange={(e) => setNewProdUnit(e.target.value)}
-                        placeholder="Bao 50kg / CẶP"
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                        placeholder="Bao 50kg / Chai"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                       />
                     </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <span className="text-[11px] text-slate-600 mr-1">ĐVT nhanh:</span>
+                    {COMMON_VTNN_UNITS.map((u) => (
+                      <button
+                        key={u}
+                        type="button"
+                        onClick={() => setNewProdUnit(u)}
+                        className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors ${
+                          newProdUnit.trim().toLowerCase() === u.toLowerCase()
+                            ? 'bg-emerald-700 text-white border-emerald-700'
+                            : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-300'
+                        }`}
+                      >
+                        {u}
+                      </button>
+                    ))}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                     <div>
@@ -6651,8 +6884,14 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         type="text"
                         value={newSupName}
                         onChange={(e) => setNewSupName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleConfirmInlineSupplierInImport();
+                          }
+                        }}
                         placeholder="VD: Công ty CP Phân bón Miền Tây"
-                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-md"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs bg-white border border-slate-200 rounded-md"
                       />
                     </div>
                     <div>
@@ -6660,15 +6899,21 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         htmlFor="imp-inline-sup-phone"
                         className="block text-[11px] font-semibold text-slate-700 mb-1"
                       >
-                        Số điện thoại NCC *
+                        Số điện thoại NCC (tùy chọn)
                       </label>
                       <input
                         id="imp-inline-sup-phone"
                         type="tel"
                         value={newSupPhone}
                         onChange={(e) => setNewSupPhone(e.target.value)}
-                        placeholder="VD: 0283..."
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleConfirmInlineSupplierInImport();
+                          }
+                        }}
+                        placeholder="VD: 0283... (có thể trống)"
+                        className="w-full px-2.5 py-2 sm:py-1.5 text-xs font-mono bg-white border border-slate-200 rounded-md"
                       />
                     </div>
                   </div>
@@ -7187,6 +7432,9 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
               </p>
             </div>
             <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2">
+              <div className="flex items-center justify-between sm:justify-start gap-2">
+                <TableDensityToggle density={tableDensity} onChange={setTableDensity} />
+              </div>
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -7278,7 +7526,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                 return (
                   <div
                     key={imp.id}
-                    className={`p-4 space-y-3 transition-colors ${
+                    className={`${isCompactTable ? 'p-2.5 space-y-2' : 'p-4 space-y-3'} transition-colors ${
                       isFocused
                         ? 'bg-emerald-50/80 ring-2 ring-inset ring-emerald-500'
                         : 'hover:bg-slate-50'
@@ -7286,8 +7534,11 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <div className="font-mono text-xs font-bold text-slate-900">
-                          {imp.receiptCode}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-mono text-xs font-bold text-slate-900">
+                            {imp.receiptCode}
+                          </span>
+                          <CloudRecordSyncBadge recordId={imp.id} syncMeta={syncMeta} />
                         </div>
                         <div className="text-[11px] font-mono text-slate-500 mt-0.5">
                           Ngày: {imp.createdAt.slice(0, 10)}
@@ -7343,6 +7594,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                     </div>
 
                     {/* Cross-Document Links & Diagnostic Strip (Mobile) */}
+                    {(!isCompactTable || diag.statusLevel !== 'ok' || isFocused) && (
                     <div className="flex flex-wrap items-center gap-1.5">
                       {diag.statusLevel !== 'ok' && (
                         <span
@@ -7435,6 +7687,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         </>
                       )}
                     </div>
+                    )}
 
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                       <div className="flex items-center gap-2">
@@ -7543,6 +7796,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                   displayedImportEntries.map(({ imp, diag }) => {
                   const { urgency } = evaluateDebtUrgency(imp.dueDate, imp.debtAmount);
                   const isFocused = focusedImportRecord?.id === imp.id;
+                  const impCellPad = isCompactTable ? 'py-1.5 px-3' : 'py-3 px-4';
                   return (
                     <tr
                       key={imp.id}
@@ -7552,15 +7806,21 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           : 'hover:bg-slate-50'
                       }`}
                     >
-                      <td className="py-3 px-4 whitespace-nowrap align-middle">
-                        <div className="font-mono text-xs font-semibold text-slate-900">
-                          {imp.receiptCode}
+                      <td className={`${impCellPad} whitespace-nowrap align-middle`}>
+                        <div className="flex flex-wrap items-center gap-1">
+                          <span className="font-mono text-xs font-semibold text-slate-900">
+                            {imp.receiptCode}
+                          </span>
+                          <CloudRecordSyncBadge recordId={imp.id} syncMeta={syncMeta} />
                         </div>
-                        <div className="text-xs font-semibold text-emerald-800 mt-0.5">
-                          {imp.warehouseName || 'Tâm An Mỹ Ngãi'}
-                        </div>
+                        {!isCompactTable && (
+                          <div className="text-xs font-semibold text-emerald-800 mt-0.5">
+                            {imp.warehouseName || 'Tâm An Mỹ Ngãi'}
+                          </div>
+                        )}
                         <div className="text-[11px] font-mono text-slate-500">
                           {imp.createdAt.slice(0, 10)}
+                          {isCompactTable ? ` · ${imp.warehouseName || 'Tâm An Mỹ Ngãi'}` : ''}
                         </div>
                         {diag.statusLevel !== 'ok' && (
                           <div className="mt-1">
@@ -7576,11 +7836,13 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </div>
                         )}
                       </td>
-                      <td className="py-3 px-4 min-w-[175px] align-middle">
+                      <td className={`${impCellPad} min-w-[175px] align-middle`}>
                         <div className="font-semibold text-slate-900 leading-snug">{imp.supplierName}</div>
-                        <div className="text-xs font-mono text-slate-500 mt-0.5">{imp.supplierPhone}</div>
+                        {!isCompactTable && (
+                          <div className="text-xs font-mono text-slate-500 mt-0.5">{imp.supplierPhone}</div>
+                        )}
                       </td>
-                      <td className="py-3 px-4 min-w-[240px] align-middle">
+                      <td className={`${impCellPad} min-w-[240px] align-middle`}>
                         {onNavigateCrossLink && diag.linkedProduct ? (
                           <button
                             type="button"
@@ -7602,7 +7864,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         <div className="text-xs font-mono text-emerald-700 font-semibold mt-0.5">
                           +{imp.quantity} {imp.unit} (Giá nhập: {formatVND(imp.unitCost)})
                         </div>
-                        {onNavigateCrossLink && (
+                        {onNavigateCrossLink && (!isCompactTable || diag.statusLevel !== 'ok' || isFocused) && (
                           <div className="flex flex-wrap items-center gap-1 mt-1.5">
                             {imp.supplierName && (
                             <CrossLinkChip
@@ -7682,10 +7944,10 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </div>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle">
+                      <td className={`${impCellPad} text-right font-mono tabular-nums text-xs font-bold text-slate-900 whitespace-nowrap align-middle`}>
                         {formatVND(imp.totalCost)}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                      <td className={`${impCellPad} text-right whitespace-nowrap align-middle`}>
                         {imp.debtAmount > 0 ? (
                           <div>
                             <button
@@ -7721,7 +7983,7 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                           </span>
                         )}
                       </td>
-                      <td className="py-3 px-4 text-right whitespace-nowrap align-middle">
+                      <td className={`${impCellPad} text-right whitespace-nowrap align-middle`}>
                         <div className="flex items-center justify-end gap-1.5">
                           <button
                             type="button"
@@ -8277,6 +8539,50 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
           onConfirmDelete={onDeleteImport}
           onNavigateCrossLink={onNavigateCrossLink}
         />
+      )}
+
+      {/* Sticky Mobile Import Save Bar (< md) — sits cleanly above bottom nav */}
+      {hasMobileStickyImportDraft && (
+        <div className="md:hidden fixed bottom-[52px] inset-x-0 z-20 bg-white/95 backdrop-blur-md border-t border-emerald-300 px-3 py-2 shadow-[0_-4px_12px_rgba(15,23,42,0.08)] flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-semibold text-slate-600">
+              <span>{combinedImportPreviewItems.length || 1} mặt hàng</span>
+              <span>·</span>
+              {summary.debtAmount > 0 ? (
+                <span className="text-red-600 font-bold">
+                  Nợ NCC {formatVND(summary.debtAmount)}
+                </span>
+              ) : (
+                <span className="text-emerald-700">Trả đủ</span>
+              )}
+            </div>
+            <div className="text-sm font-extrabold font-mono tabular-nums text-slate-900 truncate">
+              {formatVND(summary.totalCost)}
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => submitImport(true)}
+              className="px-2.5 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg inline-flex items-center gap-1"
+            >
+              <FileDown className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              <span>PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => submitImport(false)}
+              className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-xs inline-flex items-center gap-1"
+            >
+              <Plus className="w-4 h-4 shrink-0" />
+              <span>
+                {importCartItems.length > 0
+                  ? `Lưu PN (${combinedImportPreviewItems.length})`
+                  : 'Lưu phiếu nhập'}
+              </span>
+            </button>
+          </div>
+        </div>
       )}
 
       <BarcodeScannerModal

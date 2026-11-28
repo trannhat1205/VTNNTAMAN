@@ -4801,3 +4801,114 @@ test('Phase 2C: evaluateSaleOrderProfitability warns on negative margin, respect
   ]);
   assert.equal(thin.level, 'thin_margin');
 });
+
+
+import {
+  COMMON_VTNN_UNITS,
+  loadTableDensity,
+  resolveRecordCloudSyncStatus,
+  saveTableDensity,
+  TABLE_DENSITY_STORAGE_KEY,
+} from './smartInsights.ts';
+
+test('Phase 3B: resolveRecordCloudSyncStatus accurately reflects Cloud, Syncing, Offline, and Local-Only states', () => {
+  assert.equal(resolveRecordCloudSyncStatus('s_1', undefined), null);
+  assert.equal(
+    resolveRecordCloudSyncStatus('', {
+      isOnline: true,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'live',
+    }),
+    null
+  );
+
+  // Local-only when not signed into Google Cloud
+  assert.equal(
+    resolveRecordCloudSyncStatus('s_1', {
+      isOnline: true,
+      isCloudAuthenticated: false,
+      rtdbSyncState: 'offline',
+    }),
+    'local_only'
+  );
+
+  // Offline pending when network drops or RTDB is offline while cloud-authenticated
+  assert.equal(
+    resolveRecordCloudSyncStatus('s_1', {
+      isOnline: false,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'live',
+    }),
+    'offline_pending'
+  );
+  assert.equal(
+    resolveRecordCloudSyncStatus('s_1', {
+      isOnline: true,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'offline',
+    }),
+    'offline_pending'
+  );
+
+  // Syncing when record (or any line in a grouped invoice) is in pendingSyncIds or connecting
+  const pending = new Set<string>(['s_2']);
+  assert.equal(
+    resolveRecordCloudSyncStatus('s_2', {
+      isOnline: true,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'live',
+      pendingSyncIds: pending,
+    }),
+    'syncing'
+  );
+  assert.equal(
+    resolveRecordCloudSyncStatus(['s_1', 's_2'], {
+      isOnline: true,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'live',
+      pendingSyncIds: pending,
+    }),
+    'syncing'
+  );
+  assert.equal(
+    resolveRecordCloudSyncStatus('s_1', {
+      isOnline: true,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'connecting',
+    }),
+    'syncing'
+  );
+
+  // Synced once flushed and RTDB live
+  assert.equal(
+    resolveRecordCloudSyncStatus(['s_1', 's_3'], {
+      isOnline: true,
+      isCloudAuthenticated: true,
+      rtdbSyncState: 'live',
+      pendingSyncIds: pending,
+    }),
+    'synced'
+  );
+});
+
+test('Phase 3A & 3C: Table density persistence and 1-tap VTNN unit presets', () => {
+  const mem = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      mem.set(k, v);
+    },
+  };
+
+  assert.equal(loadTableDensity(mockStorage), 'comfortable');
+  saveTableDensity('compact', mockStorage);
+  assert.equal(mem.get(TABLE_DENSITY_STORAGE_KEY), 'compact');
+  assert.equal(loadTableDensity(mockStorage), 'compact');
+
+  saveTableDensity('comfortable', mockStorage);
+  assert.equal(loadTableDensity(mockStorage), 'comfortable');
+
+  assert.ok(COMMON_VTNN_UNITS.includes('Chai'));
+  assert.ok(COMMON_VTNN_UNITS.includes('Bao 50kg'));
+  assert.equal(generateUniqueCustomerCodeFromName('Anh Tư', []), 'ATU');
+});

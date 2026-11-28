@@ -71,19 +71,34 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
     }
   }, [isOpen, selectedLabel]);
 
-  // Close dropdown when clicking outside
+  // Close dropdown when clicking/tapping outside or pressing Escape (desktop + mobile touch)
   useEffect(() => {
-    const handleOutsideClick = (event: MouseEvent) => {
+    if (!isOpen) return;
+    const handleOutside = (event: Event) => {
       if (
         containerRef.current &&
-        !containerRef.current.contains(event.target as Node)
+        event.target instanceof Node &&
+        !containerRef.current.contains(event.target)
       ) {
         setIsOpen(false);
       }
     };
-    document.addEventListener('mousedown', handleOutsideClick);
-    return () => document.removeEventListener('mousedown', handleOutsideClick);
-  }, []);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handleOutside, true);
+    document.addEventListener('touchstart', handleOutside, true);
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handleOutside, true);
+      document.removeEventListener('touchstart', handleOutside, true);
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
 
   const cleanCreateLabel = useMemo(
     () => (createActionLabel ? createActionLabel.replace(/^\+\s*/, '') : ''),
@@ -143,7 +158,29 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
             if (!isOpen) setIsOpen(true);
             setSearchQuery(e.target.value);
           }}
-          className="w-full px-2.5 py-2 text-sm text-slate-900 bg-transparent focus:outline-none placeholder:text-slate-400 truncate"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              setIsOpen(false);
+              inputRef.current?.blur();
+              return;
+            }
+            if (e.key === 'Enter' && isOpen) {
+              const kw = searchQuery.trim();
+              if (filteredOptions.length === 0 && kw && onCreateAction) {
+                e.preventDefault();
+                setIsOpen(false);
+                onCreateAction(kw);
+                return;
+              }
+              if (filteredOptions.length === 1) {
+                e.preventDefault();
+                onChange(filteredOptions[0].value);
+                setSearchQuery(filteredOptions[0].label);
+                setIsOpen(false);
+              }
+            }
+          }}
+          className="w-full px-2.5 py-2.5 sm:py-2 text-sm text-slate-900 bg-transparent focus:outline-none placeholder:text-slate-400 truncate"
         />
 
         {!disabled && (value || (isOpen && searchQuery)) && (
@@ -186,7 +223,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
       {isOpen && !disabled && (
         <div
           role="listbox"
-          className="absolute left-0 right-0 z-50 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-72 overflow-y-auto divide-y divide-slate-100"
+          className="absolute left-0 right-0 z-50 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-72 overflow-y-auto overscroll-contain divide-y divide-slate-100"
         >
           {/* Sticky helper header showing count & quick clear */}
           <div className="px-3 py-1.5 bg-slate-50 text-[11px] text-slate-500 flex items-center justify-between sticky top-0 z-10 border-b border-slate-200">
@@ -262,12 +299,12 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                   key={opt.value}
                   role="option"
                   aria-selected={isSelected || quickQty > 0}
-                  className={`w-full px-3 py-2 text-left transition-colors flex items-center justify-between gap-2 ${
+                  className={`w-full px-3 py-2.5 sm:py-2 text-left transition-colors flex items-center justify-between gap-2 ${
                     quickQty > 0
                       ? 'bg-emerald-50/95 text-emerald-950'
                       : isSelected
                       ? 'bg-emerald-50/80 text-emerald-950 font-semibold'
-                      : 'hover:bg-slate-50 text-slate-900'
+                      : 'hover:bg-slate-50 active:bg-emerald-50/60 text-slate-900'
                   }`}
                 >
                   <button
@@ -277,7 +314,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                       setSearchQuery(opt.label);
                       setIsOpen(false);
                     }}
-                    className="min-w-0 flex-1 text-left focus:outline-none"
+                    className="min-w-0 flex-1 text-left focus:outline-none py-0.5"
                   >
                     <div className="text-xs sm:text-sm font-medium truncate">{opt.label}</div>
                     {opt.subLabel && (
@@ -293,6 +330,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                         className="flex items-center gap-0.5 bg-white border border-emerald-300 rounded-lg p-0.5 shadow-2xs"
                         onClick={(e) => e.stopPropagation()}
                         onMouseDown={(e) => e.stopPropagation()}
+                        onTouchStart={(e) => e.stopPropagation()}
                       >
                         {isOutOfStock ? (
                           <span className="px-1.5 py-0.5 text-[10px] font-semibold text-rose-600 whitespace-nowrap">
@@ -304,7 +342,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                             onClick={() => onQuickQuantityChange(opt.value, 1)}
                             title="Chọn nhanh 1 vào hóa đơn chung"
                             aria-label={`Thêm nhanh 1 ${opt.label} vào hóa đơn chung`}
-                            className="px-2 py-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-0.5 whitespace-nowrap transition-colors"
+                            className="px-2.5 py-1.5 sm:px-2 sm:py-1 text-[11px] font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-0.5 whitespace-nowrap transition-colors"
                           >
                             <Plus className="w-3 h-3" />
                             <span>SL</span>
@@ -315,7 +353,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                               type="button"
                               onClick={() => onQuickQuantityChange(opt.value, Math.max(0, quickQty - 1))}
                               aria-label={`Giảm số lượng ${opt.label}`}
-                              className="w-6 h-6 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-800 flex items-center justify-center"
+                              className="w-7 h-7 sm:w-6 sm:h-6 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-800 flex items-center justify-center"
                             >
                               <Minus className="w-3 h-3" />
                             </button>
@@ -336,7 +374,7 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
                               disabled={maxQty !== undefined && quickQty >= maxQty}
                               onClick={() => onQuickQuantityChange(opt.value, quickQty + 1)}
                               aria-label={`Tăng số lượng ${opt.label}`}
-                              className="w-6 h-6 rounded-md bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 text-white flex items-center justify-center"
+                              className="w-7 h-7 sm:w-6 sm:h-6 rounded-md bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 text-white flex items-center justify-center"
                             >
                               <Plus className="w-3 h-3" />
                             </button>
@@ -412,14 +450,32 @@ export const AutocompleteTextInput: React.FC<AutocompleteTextInputProps> = ({
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
-    const handleOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+    if (!isOpen) return;
+    const handleOutside = (event: Event) => {
+      if (
+        containerRef.current &&
+        event.target instanceof Node &&
+        !containerRef.current.contains(event.target)
+      ) {
         setIsOpen(false);
       }
     };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handleOutside, true);
+    document.addEventListener('touchstart', handleOutside, true);
     document.addEventListener('mousedown', handleOutside);
-    return () => document.removeEventListener('mousedown', handleOutside);
-  }, []);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handleOutside, true);
+      document.removeEventListener('touchstart', handleOutside, true);
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
 
   const matched = useMemo(
     () => filterSearchableOptions(suggestions, value).slice(0, 12),

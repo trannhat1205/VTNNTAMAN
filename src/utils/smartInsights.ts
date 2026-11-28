@@ -568,3 +568,82 @@ export function evaluateSaleOrderProfitability(
     reasons,
   };
 }
+
+
+/* ------------------------------ Phase 3: Mobile UX, Sync Badge & Density */
+
+export const COMMON_VTNN_UNITS = ['Chai', 'Gói', 'Cặp', 'Bao 50kg', 'Can 5L', 'Kg'] as const;
+
+export type TableDensityMode = 'comfortable' | 'compact';
+
+export const TABLE_DENSITY_STORAGE_KEY = 'vtnn_taman_table_density_v1';
+
+export function loadTableDensity(
+  storage?: Pick<Storage, 'getItem'> | null
+): TableDensityMode {
+  try {
+    const target =
+      storage !== undefined
+        ? storage
+        : typeof window !== 'undefined'
+        ? window.localStorage
+        : null;
+    const raw = target?.getItem(TABLE_DENSITY_STORAGE_KEY);
+    return raw === 'compact' ? 'compact' : 'comfortable';
+  } catch {
+    return 'comfortable';
+  }
+}
+
+export function saveTableDensity(
+  mode: TableDensityMode,
+  storage?: Pick<Storage, 'setItem'> | null
+): void {
+  try {
+    const target =
+      storage !== undefined
+        ? storage
+        : typeof window !== 'undefined'
+        ? window.localStorage
+        : null;
+    target?.setItem(TABLE_DENSITY_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage quota / private browsing errors
+  }
+}
+
+export type RecordCloudSyncStatus = 'synced' | 'syncing' | 'offline_pending' | 'local_only';
+
+export interface CloudSyncMeta {
+  isOnline: boolean;
+  isCloudAuthenticated: boolean;
+  rtdbSyncState: 'connecting' | 'live' | 'offline';
+  pendingSyncIds?: ReadonlySet<string>;
+}
+
+/**
+ * Resolves the live cloud persistence badge state for a single voucher ID (or a grouped invoice's IDs).
+ */
+export function resolveRecordCloudSyncStatus(
+  recordId: string | readonly string[],
+  meta?: CloudSyncMeta
+): RecordCloudSyncStatus | null {
+  if (!meta) return null;
+  const ids = Array.isArray(recordId) ? recordId : [recordId];
+  const validIds = ids.filter((id) => Boolean(id));
+  if (validIds.length === 0) return null;
+
+  if (!meta.isCloudAuthenticated) {
+    return 'local_only';
+  }
+  if (!meta.isOnline || meta.rtdbSyncState === 'offline') {
+    return 'offline_pending';
+  }
+  const hasPending = Boolean(
+    meta.pendingSyncIds && validIds.some((id) => meta.pendingSyncIds!.has(id))
+  );
+  if (hasPending || meta.rtdbSyncState === 'connecting') {
+    return 'syncing';
+  }
+  return 'synced';
+}

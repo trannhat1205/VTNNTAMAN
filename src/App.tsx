@@ -479,6 +479,26 @@ export default function App() {
     setSavedVouchers((prev) => strip(prev));
     setStockAdjustments((prev) => strip(prev));
   }, [dataWipedAt]);
+  /** Tracks record IDs currently in-flight to Firebase RTDB so voucher badges show live sync state. */
+  const unflushedSyncIdsRef = useRef<Set<string>>(new Set());
+  const [pendingSyncIds, setPendingSyncIds] = useState<Set<string>>(() => new Set());
+  const schedulePendingSyncIdsRefresh = () => {
+    const publish = () => {
+      const snapshot = new Set(unflushedSyncIdsRef.current);
+      setPendingSyncIds((prev) => {
+        if (prev.size === snapshot.size && Array.from(prev).every((id) => snapshot.has(id))) {
+          return prev;
+        }
+        return snapshot;
+      });
+    };
+    if (typeof queueMicrotask === 'function') {
+      queueMicrotask(publish);
+    } else {
+      setTimeout(publish, 0);
+    }
+  };
+
   const markRecordsDeleted = (ids: string | string[], nowIso = new Date().toISOString()) => {
     const idArr = Array.isArray(ids) ? ids : [ids];
     const tombstones: DeletedRecordTombstone[] = idArr
@@ -487,10 +507,17 @@ export default function App() {
     if (tombstones.length === 0) return;
     allowEmptyWorkspaceWriteRef.current = true;
     forceStorageSyncRef.current = true;
+    let removedPending = false;
     for (const t of tombstones) {
       (Object.keys(pendingLocalRecordsRef.current) as RtdbRecordCollection[]).forEach((col) =>
         pendingLocalRecordsRef.current[col].delete(t.id)
       );
+      if (unflushedSyncIdsRef.current.delete(t.id)) {
+        removedPending = true;
+      }
+    }
+    if (removedPending) {
+      schedulePendingSyncIdsRefresh();
     }
     setDeletedRecords((prev) => mergeDeletionTombstones(prev, tombstones));
   };
@@ -521,7 +548,16 @@ export default function App() {
       pendingMap: view,
       tombstones,
     });
-    [...res.confirmedIds, ...res.expiredIds].forEach((id) => map.delete(id));
+    let clearedUnflushed = false;
+    [...res.confirmedIds, ...res.expiredIds].forEach((id) => {
+      map.delete(id);
+      if (unflushedSyncIdsRef.current.delete(id)) {
+        clearedUnflushed = true;
+      }
+    });
+    if (clearedUnflushed) {
+      schedulePendingSyncIdsRefresh();
+    }
     return { merged: res.merged, hasPending: res.stillPendingIds.length > 0 };
   };
   /** Registers records as pending-confirmation AND writes them straight to RTDB (no 250ms debounce). */
@@ -532,11 +568,16 @@ export default function App() {
   ) => {
     const nowMs = Date.now();
     const byOwner = new Map<string, Partial<Record<RtdbRecordCollection, Array<{ id: string }>>>>();
+    let stagedUiIds = false;
     for (const [colKey, list] of Object.entries(records)) {
       const col = colKey as RtdbRecordCollection;
       for (const rec of list || []) {
         if (!rec || !rec.id) continue;
         pendingLocalRecordsRef.current[col].set(rec.id, { record: rec, stampedAtMs: nowMs });
+        if (col !== 'auditLogs') {
+          unflushedSyncIdsRef.current.add(rec.id);
+          stagedUiIds = true;
+        }
         const owner = (rec.ownerId || fallbackOwnerUid || '').trim();
         if (!owner) continue;
         const bucket = byOwner.get(owner) || {};
@@ -545,13 +586,34 @@ export default function App() {
         byOwner.set(owner, bucket);
       }
     }
+    if (stagedUiIds) {
+      schedulePendingSyncIdsRefresh();
+    }
     const fbUser = auth.currentUser;
     if (!isGoogleAuthenticated || !fbUser) return;
     const isDesignated = !isCurrentUserAdmin(fbUser) && Boolean(designatedMultiWhOwnerUidsKey);
     byOwner.forEach((cols, ownerUid) => {
+      const idsInBatch: string[] = [];
+      Object.entries(cols).forEach(([colKey, arr]) => {
+        if (colKey === 'auditLogs') return;
+        (arr || []).forEach((item) => {
+          if (item?.id) idsInBatch.push(item.id);
+        });
+      });
       void upsertRealtimeWorkspaceRecordsImmediately(ownerUid, cols, {
         allowMultiWarehouseManager: isDesignated,
         allowSharedWarehouseMember: isDesignated,
+      }).then((ok) => {
+        if (!ok || idsInBatch.length === 0) return;
+        let changed = false;
+        idsInBatch.forEach((id) => {
+          if (unflushedSyncIdsRef.current.delete(id)) {
+            changed = true;
+          }
+        });
+        if (changed) {
+          schedulePendingSyncIdsRefresh();
+        }
       });
     });
   };
@@ -11248,6 +11310,12 @@ export default function App() {
                 setFocusedDebtRecordId(recId);
                 setActiveTab('debts');
               }}
+              syncMeta={{
+                isOnline,
+                isCloudAuthenticated: isGoogleAuthenticated,
+                rtdbSyncState,
+                pendingSyncIds,
+              }}
               onRequestAddNewProductInImports={(keyword) => {
                 setImportNewProductTrigger({
                   key: Date.now(),
@@ -11291,6 +11359,12 @@ export default function App() {
               onOpenDebtRecord={(recId) => {
                 setFocusedDebtRecordId(recId);
                 setActiveTab('debts');
+              }}
+              syncMeta={{
+                isOnline,
+                isCloudAuthenticated: isGoogleAuthenticated,
+                rtdbSyncState,
+                pendingSyncIds,
               }}
               newProductRedirectTrigger={importNewProductTrigger}
               onConsumeNewProductRedirect={() => setImportNewProductTrigger(null)}
@@ -11455,6 +11529,12 @@ export default function App() {
               onCreateReceiptVoucher={handleCreateReceiptVoucher}
               onUpdateReceiptVoucher={handleUpdateReceiptVoucher}
               onDeleteReceiptVoucher={handleDeleteReceiptVoucher}
+              syncMeta={{
+                isOnline,
+                isCloudAuthenticated: isGoogleAuthenticated,
+                rtdbSyncState,
+                pendingSyncIds,
+              }}
             />
           )}
 
@@ -11477,6 +11557,12 @@ export default function App() {
               onCreatePaymentVoucher={handleCreatePaymentVoucher}
               onUpdatePaymentVoucher={handleUpdatePaymentVoucher}
               onDeletePaymentVoucher={handleDeletePaymentVoucher}
+              syncMeta={{
+                isOnline,
+                isCloudAuthenticated: isGoogleAuthenticated,
+                rtdbSyncState,
+                pendingSyncIds,
+              }}
             />
           )}
 

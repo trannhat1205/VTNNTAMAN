@@ -47,6 +47,8 @@ import {
   generateUniqueSupplierCodeFromName,
 } from '../utils/businessLogic';
 import { CrossLinkChip, FocusedLinkBanner } from './VoucherCrossLinkUI';
+import { CloudRecordSyncBadge } from './CloudRecordSyncBadge';
+import type { CloudSyncMeta } from '../utils/smartInsights';
 
 export interface CreateReceiptVoucherInput {
   warehouseName: string;
@@ -86,6 +88,7 @@ interface ReceiptVoucherLogViewProps {
   focusedVoucherId?: string | null;
   onClearFocusedVoucher?: () => void;
   onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
+  syncMeta?: CloudSyncMeta;
   onAddWarehouse: (name: string) => void;
   onAddReceiptGroup: (groupName: string) => void;
   onCreateReceiptVoucher: (input: CreateReceiptVoucherInput) => void;
@@ -127,6 +130,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
   focusedVoucherId,
   onClearFocusedVoucher,
   onNavigateCrossLink,
+  syncMeta,
   onAddWarehouse,
   onAddReceiptGroup,
   onCreateReceiptVoucher,
@@ -1075,6 +1079,7 @@ export const ReceiptVoucherLogView: React.FC<ReceiptVoucherLogViewProps> = ({
                         <span className="font-mono text-xs font-bold text-emerald-900 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
                           {rv.voucherCode}
                         </span>
+                        <CloudRecordSyncBadge recordId={rv.id} syncMeta={syncMeta} />
                         <span className="text-xs font-semibold text-stone-800 bg-stone-100 border border-stone-200 px-2 py-0.5 rounded">
                           {rv.groupName}
                         </span>
@@ -1470,6 +1475,7 @@ interface PaymentVoucherLogViewProps {
   focusedVoucherId?: string | null;
   onClearFocusedVoucher?: () => void;
   onNavigateCrossLink?: (req: CrossLinkNavigateRequest) => void;
+  syncMeta?: CloudSyncMeta;
   onAddWarehouse: (name: string) => void;
   onAddPaymentGroup: (groupName: string) => void;
   onCreatePaymentVoucher: (input: CreatePaymentVoucherInput) => void;
@@ -1507,6 +1513,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
   focusedVoucherId,
   onClearFocusedVoucher,
   onNavigateCrossLink,
+  syncMeta,
   onAddWarehouse,
   onAddPaymentGroup,
   onCreatePaymentVoucher,
@@ -2437,6 +2444,7 @@ export const PaymentVoucherLogView: React.FC<PaymentVoucherLogViewProps> = ({
                         <span className="font-mono text-xs font-bold text-amber-900 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
                           {pv.voucherCode}
                         </span>
+                        <CloudRecordSyncBadge recordId={pv.id} syncMeta={syncMeta} />
                         <span className="text-xs font-semibold text-stone-800 bg-stone-100 border border-stone-200 px-2 py-0.5 rounded">
                           {pv.groupName}
                         </span>
