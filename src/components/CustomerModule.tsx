@@ -1093,6 +1093,11 @@ export const CustomerModule: React.FC<CustomerModuleProps> = ({
         moduleType="customers"
         moduleTitle="Quản Lý Khách Hàng"
         onImportRows={onImportCustomersFromExcel}
+        validationContext={{
+          products,
+          sales,
+          imports,
+        }}
         onExportCurrentData={() =>
           exportModuleDataExcel({
             moduleType: 'customers',

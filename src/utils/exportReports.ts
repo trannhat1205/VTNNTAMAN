@@ -271,11 +271,14 @@ function drawSignatureFooterOnCanvas(
   ctx.textAlign = 'left';
 }
 
+export type StandardVoucherPaperSize = 'a4' | 'a5';
+
 function saveCanvasAsA4PDF(
   orientation: 'portrait' | 'landscape',
   fileName: string,
   title: string,
-  drawCallback: (ctx: CanvasRenderingContext2D, width: number, height: number) => void
+  drawCallback: (ctx: CanvasRenderingContext2D, width: number, height: number) => void,
+  paperSize: StandardVoucherPaperSize = 'a4'
 ): string {
   if (typeof document === 'undefined') {
     return fileName;
@@ -321,11 +324,25 @@ function saveCanvasAsA4PDF(
   const doc = new jsPDF({
     orientation,
     unit: 'mm',
-    format: 'a4',
+    format: paperSize,
     compress: true,
   });
-  const pdfWidthMm = orientation === 'portrait' ? 210 : 297;
-  const pdfHeightMm = orientation === 'portrait' ? 297 : 210;
+  const pdfWidthMm =
+    paperSize === 'a5'
+      ? orientation === 'portrait'
+        ? 148
+        : 210
+      : orientation === 'portrait'
+      ? 210
+      : 297;
+  const pdfHeightMm =
+    paperSize === 'a5'
+      ? orientation === 'portrait'
+        ? 210
+        : 148
+      : orientation === 'portrait'
+      ? 297
+      : 210;
 
   doc.addImage(dataUrl, 'PNG', 0, 0, pdfWidthMm, pdfHeightMm, undefined, 'FAST');
   doc.save(fileName);
@@ -491,9 +508,11 @@ export function exportSaleInvoicePDF(sale: {
   warehouseName?: string;
   staffName: string;
   createdAt: string;
+  paperSize?: StandardVoucherPaperSize;
 }): string {
+  const paperSize: StandardVoucherPaperSize = sale.paperSize || 'a4';
   const dateStr = (sale.createdAt || new Date().toISOString()).slice(0, 10);
-  const fileName = `PhieuBanHang_${sale.invoiceCode}_${dateStr}.pdf`;
+  const fileName = `PhieuBanHang_${paperSize === 'a5' ? 'A5_' : ''}${sale.invoiceCode}_${dateStr}.pdf`;
 
   const lineItems: SaleInvoiceLineItem[] =
     sale.items && sale.items.length > 0
@@ -722,13 +741,21 @@ export function exportSaleInvoicePDF(sale: {
     };
 
     try {
-      saveCanvasAsA4PDF('portrait', fileName, 'PHIẾU HÓA ĐƠN BÁN HÀNG', (ctx, pageWidth) =>
-        drawContent(ctx, pageWidth, Boolean(qrImg))
+      saveCanvasAsA4PDF(
+        'portrait',
+        fileName,
+        'PHIẾU HÓA ĐƠN BÁN HÀNG',
+        (ctx, pageWidth) => drawContent(ctx, pageWidth, Boolean(qrImg)),
+        paperSize
       );
     } catch {
       // Safe fallback if browser marks external VietQR image canvas as tainted
-      saveCanvasAsA4PDF('portrait', fileName, 'PHIẾU HÓA ĐƠN BÁN HÀNG', (ctx, pageWidth) =>
-        drawContent(ctx, pageWidth, false)
+      saveCanvasAsA4PDF(
+        'portrait',
+        fileName,
+        'PHIẾU HÓA ĐƠN BÁN HÀNG',
+        (ctx, pageWidth) => drawContent(ctx, pageWidth, false),
+        paperSize
       );
     }
   };
@@ -760,9 +787,11 @@ export function exportCustomerReceiptPDF(receipt: {
   note: string;
   staffName: string;
   createdAt: string;
+  paperSize?: StandardVoucherPaperSize;
 }): string {
+  const paperSize: StandardVoucherPaperSize = receipt.paperSize || 'a4';
   const dateStr = (receipt.createdAt || new Date().toISOString()).slice(0, 10);
-  const fileName = `PhieuThuKhachHang_${receipt.voucherCode}_${dateStr}.pdf`;
+  const fileName = `PhieuThuKhachHang_${paperSize === 'a5' ? 'A5_' : ''}${receipt.voucherCode}_${dateStr}.pdf`;
 
   return saveCanvasAsA4PDF(
     'portrait',
@@ -842,7 +871,8 @@ export function exportCustomerReceiptPDF(receipt: {
         receipt.customerName,
         receipt.staffName
       );
-    }
+    },
+    paperSize
   );
 }
 
@@ -859,9 +889,11 @@ export function exportSupplierPaymentPDF(payment: {
   note: string;
   staffName: string;
   createdAt: string;
+  paperSize?: StandardVoucherPaperSize;
 }): string {
+  const paperSize: StandardVoucherPaperSize = payment.paperSize || 'a4';
   const dateStr = (payment.createdAt || new Date().toISOString()).slice(0, 10);
-  const fileName = `PhieuThanhToanNCC_${payment.voucherCode}_${dateStr}.pdf`;
+  const fileName = `PhieuThanhToanNCC_${paperSize === 'a5' ? 'A5_' : ''}${payment.voucherCode}_${dateStr}.pdf`;
 
   return saveCanvasAsA4PDF(
     'portrait',
@@ -937,7 +969,8 @@ export function exportSupplierPaymentPDF(payment: {
         payment.supplierName,
         payment.staffName
       );
-    }
+    },
+    paperSize
   );
 }
 
@@ -958,6 +991,7 @@ export function exportImportReceiptPDF(imp: {
   warehouseName?: string;
   staffName: string;
   createdAt: string;
+  paperSize?: StandardVoucherPaperSize;
   items?: Array<{
     productName: string;
     unit: string;
@@ -968,8 +1002,9 @@ export function exportImportReceiptPDF(imp: {
     expiryDate?: string;
   }>;
 }): string {
+  const paperSize: StandardVoucherPaperSize = imp.paperSize || 'a4';
   const dateStr = (imp.createdAt || new Date().toISOString()).slice(0, 10);
-  const fileName = `PhieuNhapKho_${imp.receiptCode}_${dateStr}.pdf`;
+  const fileName = `PhieuNhapKho_${paperSize === 'a5' ? 'A5_' : ''}${imp.receiptCode}_${dateStr}.pdf`;
 
   return saveCanvasAsA4PDF(
     'portrait',
@@ -1076,7 +1111,8 @@ export function exportImportReceiptPDF(imp: {
         imp.supplierName,
         imp.staffName
       );
-    }
+    },
+    paperSize
   );
 }
 
@@ -2964,6 +3000,8 @@ export function exportThermalReceiptPDF(params: {
   remainingDebt: number;
   dueDate?: string;
   staffName: string;
+  staffLabel?: string;
+  footerNote?: string;
   note?: string;
 }): string {
   const safeCode = String(params.voucherCode || 'BILL').replace(/[^a-zA-Z0-9_-]/g, '');
@@ -3070,7 +3108,7 @@ export function exportThermalReceiptPDF(params: {
         y += 18;
       }
       ctx.font = `400 ${baseSize - 1}px ${FONT_FAMILY}`;
-      ctx.fillText(`Thu ngân: ${params.staffName}`, marginX, y);
+      ctx.fillText(`${params.staffLabel || 'Thu ngân'}: ${params.staffName}`, marginX, y);
       y += 14;
 
       drawDashedLine(y);
@@ -3222,7 +3260,7 @@ export function exportThermalReceiptPDF(params: {
       ctx.textAlign = 'center';
       ctx.fillStyle = '#0F172A';
       ctx.font = `600 ${baseSize - 1}px ${FONT_FAMILY}`;
-      ctx.fillText('Cảm ơn Quý khách — Hẹn gặp lại!', logicalWidth / 2, y);
+      ctx.fillText(params.footerNote || 'Cảm ơn Quý khách — Hẹn gặp lại!', logicalWidth / 2, y);
 
       const usedLogicalHeight = Math.max(360, Math.min(logicalHeight, y + 26));
       const outCanvas = document.createElement('canvas');
@@ -3296,3 +3334,253 @@ export function exportThermalReceiptPDF(params: {
 
 
 
+
+
+// 14. In Biên Bản Chốt Ca & Đối Soát Quỹ Cuối Ngày — Khổ Nhiệt K80 / A5 / A4 (Phase 4B)
+export interface ShiftClosePrintParams {
+  format: 'k80' | 'a5' | 'a4';
+  dateStr: string;
+  warehouseName: string;
+  staffName?: string;
+  openingCash: number;
+  cashIn: number;
+  salesInitialPaidInflow: number;
+  cashOut: number;
+  importsInitialPaidOutflow: number;
+  nonCashIn: number;
+  nonCashOut: number;
+  expectedCash: number;
+  countedCash: number | null;
+  difference: number | null;
+  netSalesRevenue: number;
+  byMethodIn?: Record<string, number>;
+  byMethodOut?: Record<string, number>;
+}
+
+export function exportShiftCloseReportPDF(params: ShiftClosePrintParams): string {
+  const safeDate = (params.dateStr || getTodayVietnamDateStr()).slice(0, 10);
+  const code = `CHOT-CA-${safeDate.replace(/-/g, '')}`;
+  const whLabel = params.warehouseName?.trim() || 'Tất cả kho';
+  const staffLabel = params.staffName?.trim() || 'Thu ngân / Quản lý kho';
+  const diffDisplay =
+    params.difference === null
+      ? 'Chưa nhập tiền thực đếm'
+      : params.difference === 0
+      ? '0 VNĐ (Khớp két)'
+      : params.difference > 0
+      ? `+${formatCurrencyPlain(params.difference)} (Thừa)`
+      : `-${formatCurrencyPlain(Math.abs(params.difference))} (Thiếu)`;
+
+  if (params.format === 'k80') {
+    const fileName = `BienBanChotCa_K80_${safeDate}.pdf`;
+    if (typeof document === 'undefined') return fileName;
+
+    const logicalWidth = 520;
+    const methodRowsCount =
+      Object.keys(params.byMethodIn || {}).length + Object.keys(params.byMethodOut || {}).length;
+    const logicalHeight = Math.max(680, 620 + methodRowsCount * 24);
+    const scale = 2.5;
+    const marginX = 18;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(logicalWidth * scale);
+    canvas.height = Math.round(logicalHeight * scale);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return fileName;
+
+    ctx.scale(scale, scale);
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, logicalWidth, logicalHeight);
+
+    const drawDash = (lineY: number) => {
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = '#94A3B8';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(marginX, lineY);
+      ctx.lineTo(logicalWidth - marginX, lineY);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    let y = 28;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#0F172A';
+    ctx.font = `800 17px ${FONT_FAMILY}`;
+    ctx.fillText(whLabel.toUpperCase(), logicalWidth / 2, y);
+    y += 20;
+    ctx.font = `800 16px ${FONT_FAMILY}`;
+    ctx.fillText('BIÊN BẢN CHỐT CA CUỐI NGÀY', logicalWidth / 2, y);
+    y += 20;
+    ctx.font = `600 13px ${FONT_FAMILY}`;
+    ctx.fillStyle = '#334155';
+    ctx.fillText(`Mã: ${code}  |  Ngày: ${safeDate}`, logicalWidth / 2, y);
+    y += 18;
+    ctx.font = `500 12.5px ${FONT_FAMILY}`;
+    ctx.fillText(`Người chốt: ${staffLabel}`, logicalWidth / 2, y);
+    y += 14;
+
+    drawDash(y);
+    y += 20;
+
+    const drawRow = (label: string, val: string, bold = false) => {
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `${bold ? 800 : 500} ${bold ? 14.5 : 13.5}px ${FONT_FAMILY}`;
+      ctx.textAlign = 'left';
+      ctx.fillText(label, marginX, y);
+      ctx.textAlign = 'right';
+      ctx.fillText(val, logicalWidth - marginX, y);
+      ctx.textAlign = 'left';
+      y += 22;
+    };
+
+    drawRow('1. Tiền mặt đầu ca:', formatCurrencyPlain(params.openingCash));
+    drawRow('2. Tổng thu tiền mặt (+):', formatCurrencyPlain(params.cashIn), true);
+    drawRow('   • Bán hàng thu tại quầy:', formatCurrencyPlain(params.salesInitialPaidInflow));
+    drawRow('3. Tổng chi tiền mặt (-):', formatCurrencyPlain(params.cashOut), true);
+    drawRow('   • Nhập hàng trả tại quầy:', formatCurrencyPlain(params.importsInitialPaidOutflow));
+    drawRow('4. Thu chuyển khoản / Khác:', formatCurrencyPlain(params.nonCashIn));
+    drawRow('5. Chi chuyển khoản / Khác:', formatCurrencyPlain(params.nonCashOut));
+
+    drawDash(y - 6);
+    y += 14;
+    drawRow('TIỀN MẶT DỰ KIẾN CUỐI CA:', formatCurrencyPlain(params.expectedCash), true);
+    drawRow(
+      'TIỀN MẶT THỰC ĐẾM:',
+      params.countedCash === null ? '---' : formatCurrencyPlain(params.countedCash),
+      true
+    );
+    drawRow('CHÊNH LỆCH KÉT:', diffDisplay, true);
+    drawRow('Doanh thu thuần trong ngày:', formatCurrencyPlain(params.netSalesRevenue));
+
+    if (methodRowsCount > 0) {
+      drawDash(y - 6);
+      y += 14;
+      ctx.font = `700 12.5px ${FONT_FAMILY}`;
+      ctx.fillText('Chi tiết Phiếu thu / Phiếu chi theo hình thức:', marginX, y);
+      y += 18;
+      Object.entries(params.byMethodIn || {}).forEach(([m, amt]) => {
+        drawRow(`+ PT (${m}):`, formatCurrencyPlain(amt));
+      });
+      Object.entries(params.byMethodOut || {}).forEach(([m, amt]) => {
+        drawRow(`- PC (${m}):`, formatCurrencyPlain(amt));
+      });
+    }
+
+    drawDash(y);
+    y += 24;
+    ctx.textAlign = 'center';
+    ctx.font = `700 12.5px ${FONT_FAMILY}`;
+    ctx.fillText('NGƯỜI BÀN GIAO', logicalWidth * 0.27, y);
+    ctx.fillText('NGƯỜI NHẬN BÀN GIAO', logicalWidth * 0.73, y);
+    y += 58;
+    ctx.font = `600 12.5px ${FONT_FAMILY}`;
+    ctx.fillText(staffLabel, logicalWidth * 0.27, y);
+    y += 24;
+
+    const usedH = Math.max(420, Math.min(logicalHeight, y));
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = canvas.width;
+    outCanvas.height = Math.round(usedH * scale);
+    const outCtx = outCanvas.getContext('2d');
+    if (outCtx) {
+      outCtx.fillStyle = '#FFFFFF';
+      outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
+      outCtx.drawImage(canvas, 0, 0, canvas.width, outCanvas.height, 0, 0, outCanvas.width, outCanvas.height);
+    }
+    const dataUrl = (outCtx ? outCanvas : canvas).toDataURL('image/png', 1.0);
+    const heightMm = Math.round((usedH / logicalWidth) * 80 * 10) / 10;
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'mm',
+      format: [80, heightMm],
+      compress: true,
+    });
+    doc.addImage(dataUrl, 'PNG', 0, 0, 80, heightMm, undefined, 'FAST');
+    doc.save(fileName);
+    return fileName;
+  }
+
+  const paperSize: StandardVoucherPaperSize = params.format === 'a5' ? 'a5' : 'a4';
+  const fileName = `BienBanChotCa_${paperSize.toUpperCase()}_${safeDate}.pdf`;
+
+  return saveCanvasAsA4PDF(
+    'portrait',
+    fileName,
+    'BIÊN BẢN CHỐT CA & ĐỐI SOÁT QUỸ CUỐI NGÀY',
+    (ctx, pageWidth) => {
+      const marginX = 52;
+      let y = drawVoucherHeaderOnCanvas(
+        ctx,
+        pageWidth,
+        'BIÊN BẢN CHỐT CA & ĐỐI SOÁT QUỸ CUỐI NGÀY',
+        code,
+        safeDate
+      );
+
+      ctx.fillStyle = '#0F172A';
+      ctx.font = `600 14px ${FONT_FAMILY}`;
+      ctx.fillText(`Kho / Chi nhánh: ${whLabel}`, marginX, y);
+      y += 24;
+      ctx.font = `500 14px ${FONT_FAMILY}`;
+      ctx.fillText(`Nhân sự chốt ca: ${staffLabel}`, marginX, y);
+      y += 26;
+
+      const columns: CanvasTableColumn[] = [
+        { header: 'STT', width: 55, align: 'center' },
+        { header: 'Chỉ Tiêu Đối Soát Dòng Tiền Trong Ca', width: 435, align: 'left' },
+        { header: 'Số Tiền (VNĐ)', width: 200, align: 'right' },
+      ];
+
+      const rows: string[][] = [
+        ['1', 'Tiền mặt đầu ca (Quỹ mở ca)', params.openingCash.toLocaleString('vi-VN')],
+        [
+          '2',
+          `Tổng thu tiền mặt trong ca (Gồm thu bán hàng tại quầy: ${params.salesInitialPaidInflow.toLocaleString('vi-VN')} đ)`,
+          `+${params.cashIn.toLocaleString('vi-VN')}`,
+        ],
+        [
+          '3',
+          `Tổng chi tiền mặt trong ca (Gồm trả nhập hàng tại quầy: ${params.importsInitialPaidOutflow.toLocaleString('vi-VN')} đ)`,
+          `-${params.cashOut.toLocaleString('vi-VN')}`,
+        ],
+        [
+          '4',
+          'Tổng thu không tiền mặt (Chuyển khoản ngân hàng / VietQR)',
+          params.nonCashIn.toLocaleString('vi-VN'),
+        ],
+        [
+          '5',
+          'Tổng chi không tiền mặt (Chuyển khoản trả NCC / Chi khác)',
+          params.nonCashOut.toLocaleString('vi-VN'),
+        ],
+        ['6', 'TIỀN MẶT DỰ KIẾN CUỐI CA (= 1 + 2 - 3)', params.expectedCash.toLocaleString('vi-VN')],
+        [
+          '7',
+          'TIỀN MẶT THỰC ĐẾM TẠI KÉT CUỐI CA',
+          params.countedCash === null ? 'Chưa nhập' : params.countedCash.toLocaleString('vi-VN'),
+        ],
+        ['8', 'CHÊNH LỆCH THỰC ĐẾM SO VỚI SỔ SÁCH', diffDisplay],
+        [
+          '9',
+          'Doanh thu bán hàng thuần phát sinh trong ngày',
+          params.netSalesRevenue.toLocaleString('vi-VN'),
+        ],
+      ];
+
+      const tableEndY = drawCanvasTable(ctx, marginX, y, columns, rows, '#0F766E');
+
+      drawSignatureFooterOnCanvas(
+        ctx,
+        pageWidth,
+        tableEndY + 46,
+        'THU NGÂN / NGƯỜI BÀN GIAO',
+        'QUẢN LÝ / NGƯỜI NHẬN BÀN GIAO',
+        staffLabel,
+        ''
+      );
+    },
+    paperSize
+  );
+}

@@ -1596,6 +1596,13 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
         moduleType="inventory"
         moduleTitle="Quản Lý Tồn Kho Vật Tư"
         onImportRows={onImportProductsFromExcel}
+        validationContext={{
+          products,
+          sales,
+          imports,
+          lockedWarehouse,
+          defaultWarehouse: warehouses[0] || 'Tâm An Mỹ Ngãi',
+        }}
         onExportCurrentData={() =>
           exportModuleDataExcel({
             moduleType: 'inventory',

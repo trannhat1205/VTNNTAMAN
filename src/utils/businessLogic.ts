@@ -4996,6 +4996,14 @@ export function computeDebtAgingSummary<T extends { debtAmount: number; dueDate:
   return summary;
 }
 
+export interface ZaloDebtVietQrSummary {
+  bankLabel: string;
+  accountNumber: string;
+  accountName?: string;
+  transferContent: string;
+  qrImageUrl?: string;
+}
+
 export function buildZaloDebtReminderMessage(params: {
   storeName?: string;
   customerName: string;
@@ -5009,10 +5017,12 @@ export function buildZaloDebtReminderMessage(params: {
     dueDate: string;
   }>;
   todayStr?: string;
+  vietQrSummary?: ZaloDebtVietQrSummary | null;
 }): { message: string; zaloUrl: string | null } {
   const storeName = params.storeName?.trim() || 'VTNN Tâm An';
   const today = params.todayStr || getTodayVietnamDateStr();
-  const totalStr = formatVND(Math.max(0, Math.round(params.totalDebt)));
+  const safeTotal = Math.max(0, Math.round(params.totalDebt));
+  const totalStr = formatVND(safeTotal);
   const lines = (params.unpaidInvoices || [])
     .slice(0, 8)
     .map(
@@ -5025,11 +5035,28 @@ export function buildZaloDebtReminderMessage(params: {
     lines.push(`... và ${params.unpaidInvoices.length - 8} hóa đơn khác.`);
   }
 
+  const qrBlocks: string[] = [];
+  if (params.vietQrSummary && params.vietQrSummary.accountNumber && safeTotal > 0) {
+    qrBlocks.push('');
+    qrBlocks.push('Thông tin chuyển khoản nhanh (VietQR):');
+    qrBlocks.push(`• Ngân hàng: ${params.vietQrSummary.bankLabel}`);
+    qrBlocks.push(`• Số TK: ${params.vietQrSummary.accountNumber}`);
+    if (params.vietQrSummary.accountName) {
+      qrBlocks.push(`• Chủ TK: ${params.vietQrSummary.accountName.toUpperCase()}`);
+    }
+    qrBlocks.push(`• Số tiền: ${totalStr}`);
+    qrBlocks.push(`• Nội dung CK: ${params.vietQrSummary.transferContent}`);
+    if (params.vietQrSummary.qrImageUrl) {
+      qrBlocks.push(`• Mở mã QR quét nhanh: ${params.vietQrSummary.qrImageUrl}`);
+    }
+  }
+
   const message = [
     `Kính gửi Anh/Chị ${params.customerName},`,
     `${storeName} xin gửi bảng đối soát công nợ vật tư nông nghiệp tính đến ngày ${today}:`,
     ...lines,
     `=> Tổng dư nợ hiện tại: ${totalStr}.`,
+    ...qrBlocks,
     `Rất mong Anh/Chị kiểm tra đối chiếu và thu xếp thanh toán thuận tiện. Trân trọng cảm ơn!`,
   ].join('\n');
 

@@ -1084,7 +1084,10 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
     saveParkedOrders(next);
   };
 
-  const handleExportGroupedInvoicePdf = (sale: SaleTransaction) => {
+  const handleExportGroupedInvoicePdf = (
+    sale: SaleTransaction,
+    paperSize: 'a4' | 'a5' = 'a4'
+  ) => {
     const groupSales = findInvoiceGroupSales(sales, sale);
     const cust = customers.find((c) => c.id === sale.customerId);
     exportSaleInvoicePDF({
@@ -1106,6 +1109,7 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         dosageGuide: r.dosageGuide,
       })),
       bankQrConfig,
+      paperSize,
     });
   };
 
@@ -3373,7 +3377,15 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleExportGroupedInvoicePdf(lastCreatedOrder.sales[0])}
+                    onClick={() => handleExportGroupedInvoicePdf(lastCreatedOrder.sales[0], 'a5')}
+                    className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg inline-flex items-center justify-center gap-1"
+                  >
+                    <FileDown className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>PDF A5</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportGroupedInvoicePdf(lastCreatedOrder.sales[0], 'a4')}
                     className="px-2.5 py-1.5 text-[11px] font-semibold text-slate-800 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg inline-flex items-center justify-center gap-1"
                   >
                     <FileDown className="w-3.5 h-3.5 text-emerald-700" />
@@ -4084,10 +4096,17 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
-                        onClick={() => handleExportGroupedInvoicePdf(s)}
+                        onClick={() => handleExportGroupedInvoicePdf(s, 'a4')}
                         className="px-2.5 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                       >
-                        PDF A4
+                        A4
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleExportGroupedInvoicePdf(s, 'a5')}
+                        className="px-2 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50/70 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
+                      >
+                        A5
                       </button>
                       <button
                         type="button"
@@ -4337,11 +4356,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                             <div className="flex items-center justify-end gap-1">
                               <button
                                 type="button"
-                                onClick={() => handleExportGroupedInvoicePdf(firstSale)}
+                                onClick={() => handleExportGroupedInvoicePdf(firstSale, 'a4')}
                                 title="Xuất Hóa đơn gộp A4"
                                 className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-white border border-emerald-200 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                               >
-                                PDF
+                                A4
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleExportGroupedInvoicePdf(firstSale, 'a5')}
+                                title="Xuất Hóa đơn gộp khổ gọn A5"
+                                className="px-1.5 py-1 text-xs font-semibold text-emerald-800 bg-white border border-emerald-200 hover:bg-emerald-100 rounded-md whitespace-nowrap"
+                              >
+                                A5
                               </button>
                               <button
                                 type="button"
@@ -4659,11 +4686,19 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
                       <div className="flex items-center justify-end gap-1">
                         <button
                           type="button"
-                          onClick={() => handleExportGroupedInvoicePdf(s)}
+                          onClick={() => handleExportGroupedInvoicePdf(s, 'a4')}
                           title="Xuất Hóa đơn A4 (kèm Liều lượng & VietQR)"
                           className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                         >
-                          PDF
+                          A4
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportGroupedInvoicePdf(s, 'a5')}
+                          title="Xuất Hóa đơn khổ gọn A5"
+                          className="px-1.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50/70 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
+                        >
+                          A5
                         </button>
                         <button
                           type="button"
@@ -4791,6 +4826,13 @@ export const SalesLogView: React.FC<SalesLogViewProps> = ({
         moduleType="sales"
         moduleTitle="Nhật Ký Bán Hàng"
         onImportRows={onImportSalesFromExcel}
+        validationContext={{
+          products,
+          sales,
+          imports,
+          lockedWarehouse,
+          defaultWarehouse: warehouses[0] || 'Tâm An Mỹ Ngãi',
+        }}
         onExportCurrentData={() =>
           exportModuleDataExcel({
             moduleType: 'sales',
@@ -6066,13 +6108,17 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
     });
   };
 
-  const handleExportGroupedImportPdf = (imp: ImportTransaction) => {
+  const handleExportGroupedImportPdf = (
+    imp: ImportTransaction,
+    paperSize: 'a4' | 'a5' = 'a4'
+  ) => {
     const groupImps = findImportGroupTransactions(imports, imp);
     exportImportReceiptPDF({
       ...imp,
       totalCost: groupImps.reduce((s, r) => s + r.totalCost, 0),
       paidAmount: groupImps.reduce((s, r) => s + r.paidAmount, 0),
       debtAmount: groupImps.reduce((s, r) => s + r.debtAmount, 0),
+      paperSize,
       items: groupImps.map((r) => ({
         productName: r.productName,
         unit: r.unit,
@@ -6082,6 +6128,42 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
         batchNumber: r.batchNumber,
         expiryDate: r.expiryDate,
       })),
+    });
+  };
+
+  const handleExportGroupedImportThermalPdf = (
+    imp: ImportTransaction,
+    paperWidthMm: 58 | 80 = 80
+  ) => {
+    const groupImps = findImportGroupTransactions(imports, imp);
+    exportThermalReceiptPDF({
+      paperWidthMm,
+      storeName: imp.warehouseName || 'VTNN Tâm An',
+      voucherTitle: 'Phiếu Nhập Kho',
+      voucherCode: imp.receiptCode,
+      dateStr: imp.createdAt.slice(0, 16),
+      partnerLabel: 'Nhà cung cấp',
+      partnerName: imp.supplierName,
+      partnerPhone: imp.supplierPhone,
+      items: groupImps.map((r) => ({
+        productName: r.batchNumber
+          ? `${r.productName} (Lô: ${r.batchNumber}${r.expiryDate ? ` · HSD: ${r.expiryDate}` : ''})`
+          : r.productName,
+        unit: r.unit,
+        quantity: r.quantity,
+        unitPrice: r.unitCost,
+      })),
+      totalLabel: 'Tổng tiền nhập:',
+      totalAmount: groupImps.reduce((s, r) => s + r.totalCost, 0),
+      paidLabel: 'Đã trả NCC:',
+      paidAmount: groupImps.reduce((s, r) => s + r.paidAmount, 0),
+      debtLabel: 'Còn nợ NCC:',
+      remainingDebt: groupImps.reduce((s, r) => s + r.debtAmount, 0),
+      dueDate: imp.dueDate,
+      staffName: imp.staffName,
+      staffLabel: 'Thủ kho / Người nhập',
+      footerNote: 'Đã kiểm nhận đủ số lượng nhập kho!',
+      note: imp.note,
     });
   };
 
@@ -7690,13 +7772,27 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                     )}
 
                     <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <button
                           type="button"
-                          onClick={() => handleExportGroupedImportPdf(imp)}
-                          className="px-3 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
+                          onClick={() => handleExportGroupedImportPdf(imp, 'a4')}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                         >
-                          Xuất PDF
+                          A4
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportGroupedImportPdf(imp, 'a5')}
+                          className="px-2 py-1.5 text-xs font-semibold text-emerald-800 bg-emerald-50/70 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
+                        >
+                          A5
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleExportGroupedImportThermalPdf(imp, 80)}
+                          className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap"
+                        >
+                          K80
                         </button>
                         {imp.debtAmount > 0 && (
                           <span
@@ -7984,13 +8080,30 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
                         )}
                       </td>
                       <td className={`${impCellPad} text-right whitespace-nowrap align-middle`}>
-                        <div className="flex items-center justify-end gap-1.5">
+                        <div className="flex items-center justify-end gap-1">
                           <button
                             type="button"
-                            onClick={() => handleExportGroupedImportPdf(imp)}
+                            onClick={() => handleExportGroupedImportPdf(imp, 'a4')}
+                            title="Xuất Phiếu nhập kho A4"
                             className="px-2 py-1 text-xs font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-md whitespace-nowrap"
                           >
-                            PDF
+                            A4
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportGroupedImportPdf(imp, 'a5')}
+                            title="Xuất Phiếu nhập kho khổ gọn A5"
+                            className="px-1.5 py-1 text-xs font-semibold text-emerald-800 bg-emerald-50/70 hover:bg-emerald-100 border border-emerald-200 rounded-md whitespace-nowrap"
+                          >
+                            A5
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleExportGroupedImportThermalPdf(imp, 80)}
+                            title="In Phiếu nhập kho khổ nhiệt K80"
+                            className="px-1.5 py-1 text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md whitespace-nowrap"
+                          >
+                            K80
                           </button>
                           {canPerformRoleAction(role, 'edit_record') ? (
                             <>
@@ -8087,6 +8200,13 @@ export const ImportLogView: React.FC<ImportLogViewProps> = ({
         moduleType="imports"
         moduleTitle="Nhật Ký Nhập Hàng & Nhà Cung Cấp"
         onImportRows={onImportWarehouseFromExcel}
+        validationContext={{
+          products,
+          sales,
+          imports,
+          lockedWarehouse,
+          defaultWarehouse: warehouses[0] || 'Tâm An Mỹ Ngãi',
+        }}
         onExportCurrentData={() =>
           exportModuleDataExcel({
             moduleType: 'imports',

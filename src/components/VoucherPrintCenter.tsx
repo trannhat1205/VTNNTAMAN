@@ -28,7 +28,10 @@ import {
   VietQrBankConfig,
 } from '../types';
 import { CrossLinkChip } from './VoucherCrossLinkUI';
-import { findInvoiceGroupSales } from '../utils/smartPosFeatures';
+import {
+  findImportGroupTransactions,
+  findInvoiceGroupSales,
+} from '../utils/smartPosFeatures';
 import {
   canPerformRoleAction,
   computeDueDateAfterDays,
@@ -95,7 +98,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
   onNotifyToast,
 }) => {
   const [activeVoucher, setActiveVoucher] = useState<VoucherType>('sale_invoice');
-  const [paperFormat, setPaperFormat] = useState<'a4' | 'k80' | 'k58'>('a4');
+  const [paperFormat, setPaperFormat] = useState<'a4' | 'a5' | 'k80' | 'k58'>('a4');
   const [selectedSourceCreatedAt, setSelectedSourceCreatedAt] = useState<string>('');
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
   const [editingVoucherId, setEditingVoucherId] = useState<string | null>(null);
@@ -304,6 +307,14 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
     const groupedSalesForPrint = selectedSaleObj
       ? findInvoiceGroupSales(sales, selectedSaleObj)
       : [];
+    const selectedImportObj =
+      activeVoucher === 'import_receipt' && selectedQuickFillId
+        ? imports.find((i) => i.id === selectedQuickFillId) || null
+        : null;
+    const groupedImportsForPrint = selectedImportObj
+      ? findImportGroupTransactions(imports, selectedImportObj)
+      : [];
+
     const groupedItemsForPrint =
       groupedSalesForPrint.length > 1
         ? groupedSalesForPrint.map((s) => ({
@@ -317,8 +328,19 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
             giftQuantity: s.giftQuantity,
             dosageGuide: s.dosageGuide,
           }))
+        : groupedImportsForPrint.length > 1
+        ? groupedImportsForPrint.map((imp) => ({
+            productName: imp.batchNumber
+              ? `${imp.productName} (Lô: ${imp.batchNumber}${imp.expiryDate ? ` · HSD: ${imp.expiryDate}` : ''})`
+              : imp.productName,
+            unit: imp.unit,
+            quantity: imp.quantity,
+            unitPrice: imp.unitCost,
+          }))
         : undefined;
     const singleDosageGuide = selectedSaleObj?.dosageGuide;
+
+    const standardPaperSize: 'a4' | 'a5' = paperFormat === 'a5' ? 'a5' : 'a4';
 
     if (paperFormat === 'k80' || paperFormat === 'k58') {
       const paperWidthMm: 58 | 80 = paperFormat === 'k58' ? 58 : 80;
@@ -365,12 +387,16 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
             ? bankQrConfig
             : null,
         totalLabel:
-          activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
+          activeVoucher === 'import_receipt'
+            ? 'Tổng tiền nhập:'
+            : activeVoucher === 'sale_invoice'
             ? 'Tổng thanh toán:'
             : 'Nợ gốc / Trước GD:',
         totalAmount:
           activeVoucher === 'sale_invoice' && groupedSalesForPrint.length > 1
             ? groupedSalesForPrint.reduce((s, r) => s + r.totalAmount, 0)
+            : activeVoucher === 'import_receipt' && groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.reduce((s, r) => s + r.totalCost, 0)
             : activeVoucher === 'sale_invoice' || activeVoucher === 'import_receipt'
             ? computedTotal
             : prevDebtNum,
@@ -381,14 +407,23 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         paidAmount:
           activeVoucher === 'sale_invoice' && groupedSalesForPrint.length > 1
             ? groupedSalesForPrint.reduce((s, r) => s + r.paidAmount, 0)
+            : activeVoucher === 'import_receipt' && groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.reduce((s, r) => s + r.paidAmount, 0)
             : paidNum,
-        debtLabel: 'Còn lại:',
+        debtLabel: activeVoucher === 'import_receipt' ? 'Còn nợ NCC:' : 'Còn lại:',
         remainingDebt:
           activeVoucher === 'sale_invoice' && groupedSalesForPrint.length > 1
             ? groupedSalesForPrint.reduce((s, r) => s + r.debtAmount, 0)
+            : activeVoucher === 'import_receipt' && groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.reduce((s, r) => s + r.debtAmount, 0)
             : remainingDebt,
         dueDate: dueDate || todayIso.slice(0, 10),
         staffName: currentStaffName,
+        staffLabel: activeVoucher === 'import_receipt' ? 'Thủ kho / Người nhập' : 'Thu ngân',
+        footerNote:
+          activeVoucher === 'import_receipt'
+            ? 'Đã kiểm nhận đủ số lượng nhập kho!'
+            : 'Cảm ơn Quý khách — Hẹn gặp lại!',
         note: note.trim(),
       });
     } else if (activeVoucher === 'sale_invoice') {
@@ -423,6 +458,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         note: note.trim(),
         staffName: currentStaffName,
         createdAt: effectiveCreatedAt,
+        paperSize: standardPaperSize,
       });
     } else if (activeVoucher === 'customer_receipt') {
       const code = voucherCode.trim() || `PT-${Date.now().toString().slice(-4)}`;
@@ -439,6 +475,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         note: note.trim() || 'Thu tiền công nợ khách hàng',
         staffName: currentStaffName,
         createdAt: effectiveCreatedAt,
+        paperSize: standardPaperSize,
       });
     } else if (activeVoucher === 'supplier_payment') {
       const code = voucherCode.trim() || `PC-${Date.now().toString().slice(-4)}`;
@@ -454,6 +491,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         note: note.trim() || 'Thanh toán công nợ nhà cung cấp',
         staffName: currentStaffName,
         createdAt: effectiveCreatedAt,
+        paperSize: standardPaperSize,
       });
     } else if (activeVoucher === 'import_receipt') {
       const code = voucherCode.trim() || `PN-${Date.now().toString().slice(-4)}`;
@@ -466,13 +504,35 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
         unit: unit.trim() || 'Bao',
         quantity: qtyNum || 1,
         unitCost: priceNum,
-        totalCost: computedTotal,
-        paidAmount: paidNum,
-        debtAmount: remainingDebt,
+        totalCost:
+          groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.reduce((s, r) => s + r.totalCost, 0)
+            : computedTotal,
+        paidAmount:
+          groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.reduce((s, r) => s + r.paidAmount, 0)
+            : paidNum,
+        debtAmount:
+          groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.reduce((s, r) => s + r.debtAmount, 0)
+            : remainingDebt,
         dueDate: dueDate || todayIso.slice(0, 10),
         note: note.trim(),
         staffName: currentStaffName,
         createdAt: effectiveCreatedAt,
+        paperSize: standardPaperSize,
+        items:
+          groupedImportsForPrint.length > 1
+            ? groupedImportsForPrint.map((r) => ({
+                productName: r.productName,
+                unit: r.unit,
+                quantity: r.quantity,
+                unitCost: r.unitCost,
+                totalCost: r.totalCost,
+                batchNumber: r.batchNumber,
+                expiryDate: r.expiryDate,
+              }))
+            : undefined,
       });
     }
 
@@ -874,6 +934,7 @@ export const VoucherPrintCenter: React.FC<VoucherPrintCenterProps> = ({
                 {(
                   [
                     { id: 'a4', label: 'Khổ chuẩn A4' },
+                    { id: 'a5', label: 'Khổ gọn A5' },
                     { id: 'k80', label: 'In nhiệt K80 (80mm)' },
                     { id: 'k58', label: 'In nhiệt K58 (58mm)' },
                   ] as const

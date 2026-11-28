@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Wallet, X } from 'lucide-react';
+import { FileDown, Printer, Wallet, X } from 'lucide-react';
 import type {
   AuditLogEntry,
   CashPaymentVoucher,
@@ -28,6 +28,7 @@ interface CashDrawerCloseModalProps {
   paymentVouchers: CashPaymentVoucher[];
   warehouses: string[];
   lockedWarehouse: string | null;
+  currentStaffName?: string;
   auditLogs: AuditLogEntry[];
   onSaveClose: (params: { dateStr: string; warehouse: string; summary: string; details: string }) => void;
 }
@@ -42,6 +43,7 @@ export const CashDrawerCloseModal: React.FC<CashDrawerCloseModalProps> = ({
   paymentVouchers,
   warehouses,
   lockedWarehouse,
+  currentStaffName,
   auditLogs,
   onSaveClose,
 }) => {
@@ -290,17 +292,79 @@ export const CashDrawerCloseModal: React.FC<CashDrawerCloseModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center justify-end gap-2">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg">
-              Đóng
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
-            >
-              Lưu chốt ca
-            </button>
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={async () => {
+                  const { exportShiftCloseReportPDF } = await import('../utils/exportReports');
+                  exportShiftCloseReportPDF({
+                    format: 'k80',
+                    dateStr,
+                    warehouseName: whLabel,
+                    staffName: currentStaffName,
+                    openingCash: Number(openingCash) || 0,
+                    cashIn: summary.cashIn,
+                    salesInitialPaidInflow: report.salesInitialPaidInflow,
+                    cashOut: summary.cashOut,
+                    importsInitialPaidOutflow: report.importsInitialPaidOutflow,
+                    nonCashIn: summary.nonCashIn,
+                    nonCashOut: summary.nonCashOut,
+                    expectedCash: summary.expectedCash,
+                    countedCash: countedCash.trim() === '' ? null : Number(countedCash) || 0,
+                    difference: summary.difference,
+                    netSalesRevenue: report.netSalesRevenue,
+                    byMethodIn: summary.byMethodIn,
+                    byMethodOut: summary.byMethodOut,
+                  });
+                }}
+                className="px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg inline-flex items-center gap-1"
+              >
+                <Printer className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                <span>In K80</span>
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const { exportShiftCloseReportPDF } = await import('../utils/exportReports');
+                  exportShiftCloseReportPDF({
+                    format: 'a5',
+                    dateStr,
+                    warehouseName: whLabel,
+                    staffName: currentStaffName,
+                    openingCash: Number(openingCash) || 0,
+                    cashIn: summary.cashIn,
+                    salesInitialPaidInflow: report.salesInitialPaidInflow,
+                    cashOut: summary.cashOut,
+                    importsInitialPaidOutflow: report.importsInitialPaidOutflow,
+                    nonCashIn: summary.nonCashIn,
+                    nonCashOut: summary.nonCashOut,
+                    expectedCash: summary.expectedCash,
+                    countedCash: countedCash.trim() === '' ? null : Number(countedCash) || 0,
+                    difference: summary.difference,
+                    netSalesRevenue: report.netSalesRevenue,
+                    byMethodIn: summary.byMethodIn,
+                    byMethodOut: summary.byMethodOut,
+                  });
+                }}
+                className="px-3 py-2 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg inline-flex items-center gap-1"
+              >
+                <FileDown className="w-3.5 h-3.5 shrink-0" />
+                <span>Biên bản A5</span>
+              </button>
+            </div>
+            <div className="flex items-center gap-2 ml-auto">
+              <button type="button" onClick={onClose} className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg">
+                Đóng
+              </button>
+              <button
+                type="button"
+                onClick={handleSave}
+                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg"
+              >
+                Lưu chốt ca
+              </button>
+            </div>
           </div>
 
           {history.length > 0 && (

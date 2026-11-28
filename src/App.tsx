@@ -7133,6 +7133,7 @@ export default function App() {
         productsRef.current = nextList;
         return nextList;
       });
+      stageAndFlushRecords({ products: added }, activeUid);
       if (isGoogleAuthenticated) {
         added.forEach((p) => void syncProductToFirestore(p, true));
       }
@@ -7200,6 +7201,7 @@ export default function App() {
     });
     if (added.length > 0) {
       setCustomers((prev) => [...added, ...prev]);
+      stageAndFlushRecords({ customers: added }, activeUid);
       if (isGoogleAuthenticated) {
         added.forEach((c) => void syncCustomerToFirestore(c, true));
       }
@@ -7294,17 +7296,25 @@ export default function App() {
     if (addedSales.length > 0) {
       const nextSales = [...addedSales, ...sales];
       setSales(nextSales);
+      let updatedProductsForFlush: ProductItem[] = [];
       if (prodDeltaById.size > 0) {
         setProducts((prev) => {
           const nextList = prev.map((p) => {
             const delta = prodDeltaById.get(p.id);
-            return delta ? { ...p, stock: p.stock + delta, updatedAt: nowIso } : p;
+            if (!delta) return p;
+            const u = { ...p, stock: p.stock + delta, updatedAt: nowIso };
+            updatedProductsForFlush.push(u);
+            return u;
           });
           productsRef.current = nextList;
           return nextList;
         });
       }
       setCustomers((prev) => reconcileCustomersFromSales(prev, nextSales, nowIso).customers);
+      stageAndFlushRecords(
+        { sales: addedSales, products: updatedProductsForFlush },
+        activeUid
+      );
       showToast(
         `Đã tải lên ${addedSales.length} hóa đơn bán hàng từ tệp Excel!${
           skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi / vượt tồn)` : ''
@@ -7399,23 +7409,29 @@ export default function App() {
     });
     if (addedImports.length > 0) {
       setImports((prev) => [...addedImports, ...prev]);
+      let updatedProductsForFlush: ProductItem[] = [];
       if (prodDeltaById.size > 0) {
         setProducts((prev) => {
           const nextList = prev.map((p) => {
             const delta = prodDeltaById.get(p.id);
-            return delta
-              ? {
-                  ...p,
-                  stock: p.stock + delta.qty,
-                  importPrice: delta.avgCost > 0 ? delta.avgCost : p.importPrice,
-                  updatedAt: nowIso,
-                }
-              : p;
+            if (!delta) return p;
+            const u = {
+              ...p,
+              stock: p.stock + delta.qty,
+              importPrice: delta.avgCost > 0 ? delta.avgCost : p.importPrice,
+              updatedAt: nowIso,
+            };
+            updatedProductsForFlush.push(u);
+            return u;
           });
           productsRef.current = nextList;
           return nextList;
         });
       }
+      stageAndFlushRecords(
+        { imports: addedImports, products: updatedProductsForFlush },
+        activeUid
+      );
       showToast(
         `Đã tải lên ${addedImports.length} phiếu nhập kho từ tệp Excel!${
           skippedCount > 0 ? ` (Bỏ qua ${skippedCount} dòng lỗi số liệu)` : ''
@@ -7565,6 +7581,17 @@ export default function App() {
     }
     if (addedPayments.length > 0) {
       setPaymentVouchers((prev) => [...addedPayments, ...prev]);
+    }
+    if (salesChanged || importsChanged || addedReceipts.length > 0 || addedPayments.length > 0) {
+      stageAndFlushRecords(
+        {
+          receiptVouchers: addedReceipts,
+          paymentVouchers: addedPayments,
+          sales: salesChanged ? workingSales.filter((s) => s.updatedAt === nowIso) : [],
+          imports: importsChanged ? workingImports.filter((i) => i.updatedAt === nowIso) : [],
+        },
+        activeUid
+      );
     }
     if (updatedCount > 0) {
       showToast(
@@ -11823,6 +11850,7 @@ export default function App() {
         paymentVouchers={visiblePaymentVouchers}
         warehouses={allowedWarehouses}
         lockedWarehouse={lockedWarehouse}
+        currentStaffName={currentStaff.displayName}
         auditLogs={auditLogs}
         onSaveClose={({ dateStr, warehouse, summary, details }) => {
           recordAuditLog({

@@ -647,3 +647,794 @@ export function resolveRecordCloudSyncStatus(
   }
   return 'synced';
 }
+
+
+/* ---------------- Phase 4A: Excel Import Preview & Row-by-Row Validation */
+
+import type { ImportTransaction, VietQrBankConfig } from '../types';
+import {
+  areWarehouseNamesEquivalent,
+  buildZaloDebtReminderMessage,
+  evaluateDebtUrgency,
+  formatVND,
+  getTodayVietnamDateStr,
+  normalizeVietnameseSearch,
+  readExcelNumber,
+  type ZaloDebtVietQrSummary,
+} from './businessLogic.ts';
+import {
+  buildVietQrImageUrl,
+  isValidVietQrConfig,
+  resolveVietnamBankLabel,
+  sanitizeVietQrText,
+} from './smartPosFeatures.ts';
+
+export type ExcelPreviewModuleType = 'sales' | 'imports' | 'inventory' | 'customers' | 'debts';
+
+export interface ExcelPreviewRowEntry {
+  /** 1-based Excel spreadsheet row index (header is row 1, first data row is 2). */
+  excelRowNumber: number;
+  status: 'valid' | 'error';
+  errors: string[];
+  warnings: string[];
+  cells: string[];
+  normalizedRow: Record<string, unknown>;
+}
+
+export interface ExcelImportPreviewResult {
+  moduleType: ExcelPreviewModuleType;
+  columns: string[];
+  rows: ExcelPreviewRowEntry[];
+  totalNonEmptyRows: number;
+  emptySkippedCount: number;
+  validCount: number;
+  errorCount: number;
+  warningCount: number;
+  validNormalizedRows: Record<string, unknown>[];
+}
+
+function readExcelText(row: Record<string, unknown>, keys: string[], fallback = ''): string {
+  for (const key of keys) {
+    const val = row?.[key];
+    if (val !== undefined && val !== null && String(val).trim() !== '') {
+      return String(val).trim();
+    }
+  }
+  return fallback;
+}
+
+function isCompletelyEmptyExcelRow(row: Record<string, unknown>): boolean {
+  if (!row || typeof row !== 'object') return true;
+  return Object.values(row).every(
+    (v) => v === undefined || v === null || String(v).trim() === ''
+  );
+}
+
+function hasAnyHeaderPresent(row: Record<string, unknown>, keys: string[]): boolean {
+  return keys.some((k) => {
+    const v = row?.[k];
+    return v !== undefined && v !== null && String(v).trim() !== '';
+  });
+}
+
+/**
+ * Validates and previews uploaded Excel rows line-by-line before mutating state.
+ * Normalizes flexible Vietnamese header aliases into canonical keys expected by `App.tsx` handlers.
+ */
+export function validateAndPreviewExcelImportRows(params: {
+  moduleType: ExcelPreviewModuleType;
+  rows: Record<string, unknown>[];
+  existingProducts?: ProductItem[];
+  existingSales?: SaleTransaction[];
+  existingImports?: ImportTransaction[];
+  lockedWarehouse?: string | null;
+  defaultWarehouse?: string;
+}): ExcelImportPreviewResult {
+  const {
+    moduleType,
+    rows = [],
+    existingProducts = [],
+    existingSales = [],
+    existingImports = [],
+    lockedWarehouse = null,
+    defaultWarehouse = 'Tâm An Mỹ Ngãi',
+  } = params;
+
+  const columnsByModule: Record<ExcelPreviewModuleType, string[]> = {
+    inventory: ['Kho', 'Mã VT', 'Tên vật tư', 'ĐVT', 'Giá nhập', 'Giá bán', 'Tồn đầu'],
+    customers: ['Mã KH', 'Họ tên KH', 'SĐT', 'Nhóm KH', 'Địa chỉ', 'Dư nợ cũ'],
+    sales: ['Kho xuất', 'Khách hàng', 'Vật tư xuất', 'SL', 'Đơn giá bán', 'Đã thu'],
+    imports: ['Kho nhập', 'Nhà cung cấp', 'Vật tư nhập', 'SL', 'Đơn giá nhập', 'Đã trả NCC'],
+    debts: ['Loại', 'Mã HĐ / PN', 'Đối tác', 'Số tiền thanh toán', 'Dư nợ hiện tại'],
+  };
+
+  const previewRows: ExcelPreviewRowEntry[] = [];
+  let emptySkippedCount = 0;
+
+  // Track cumulative stock deductions across multiple rows of the same Excel upload in `sales`
+  const cumulativeSaleOutByProdId = new Map<string, number>();
+  // Track remaining debt across multiple rows of the same voucher in `debts`
+  const remainingSaleDebtByCode = new Map<string, number>();
+  for (const s of existingSales) {
+    if (s.debtAmount > 0) {
+      remainingSaleDebtByCode.set(
+        s.invoiceCode,
+        (remainingSaleDebtByCode.get(s.invoiceCode) || 0) + s.debtAmount
+      );
+    }
+  }
+  const remainingImportDebtByCode = new Map<string, number>();
+  for (const imp of existingImports) {
+    if (imp.debtAmount > 0) {
+      remainingImportDebtByCode.set(
+        imp.receiptCode,
+        (remainingImportDebtByCode.get(imp.receiptCode) || 0) + imp.debtAmount
+      );
+    }
+  }
+
+  rows.forEach((rawRow, idx) => {
+    if (isCompletelyEmptyExcelRow(rawRow)) {
+      emptySkippedCount += 1;
+      return;
+    }
+    const excelRowNumber = idx + 2;
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    if (moduleType === 'inventory') {
+      const name = readExcelText(rawRow, [
+        'Tên Vật Tư Nông Nghiệp',
+        'Tên Vật Tư',
+        'Tên SP',
+        'Tên Hàng',
+        'Sản Phẩm',
+        'name',
+      ]);
+      const code = readExcelText(rawRow, ['Mã VT', 'Mã Vật Tư', 'Mã Hàng', 'Mã SP', 'SKU', 'code']);
+      const unit = readExcelText(rawRow, ['Đơn Vị Tính', 'Đơn Vị', 'ĐVT', 'unit'], 'Bao');
+      const category = readExcelText(
+        rawRow,
+        ['Nhóm Vật Tư', 'Nhóm Hàng', 'Danh Mục'],
+        'Phân bón'
+      );
+      const supplier = readExcelText(
+        rawRow,
+        ['Nhà Cung Cấp Chính', 'Nhà Cung Cấp', 'NCC'],
+        'Nhà cung cấp VTNN'
+      );
+      const wh =
+        lockedWarehouse ||
+        readExcelText(rawRow, ['Kho Lưu Trữ', 'Kho', 'Kho Hàng'], defaultWarehouse);
+      const importPrice = readExcelNumber(
+        rawRow,
+        ['Giá Nhập (VNĐ)', 'Giá Nhập (đ)', 'Giá Nhập', 'Giá Vốn'],
+        0
+      );
+      const sellPrice = readExcelNumber(
+        rawRow,
+        ['Giá Bán Lẻ (VNĐ)', 'Giá Bán (đ)', 'Giá Bán Lẻ', 'Giá Bán'],
+        0
+      );
+      const stock = readExcelNumber(
+        rawRow,
+        ['Tồn Kho Ban Đầu', 'Tồn Kho Hiện Tại', 'Tồn Kho', 'Số Lượng Tồn'],
+        10
+      );
+      const minStock = readExcelNumber(
+        rawRow,
+        ['Mức Cảnh Báo Tối Thiểu', 'Mức Tối Thiểu', 'Định Mức Tối Thiểu'],
+        5
+      );
+
+      if (!name) errors.push('Thiếu Tên vật tư nông nghiệp.');
+      if (!Number.isFinite(importPrice) || importPrice < 0) {
+        errors.push('Giá nhập không hợp lệ hoặc bị âm.');
+      }
+      if (!Number.isFinite(sellPrice) || sellPrice < 0) {
+        errors.push('Giá bán lẻ không hợp lệ hoặc bị âm.');
+      }
+      if (!Number.isFinite(stock) || stock < 0) {
+        errors.push('Tồn kho ban đầu không hợp lệ hoặc bị âm.');
+      }
+      if (!Number.isFinite(minStock) || minStock < 0) {
+        errors.push('Mức cảnh báo tối thiểu không hợp lệ hoặc bị âm.');
+      }
+      if (errors.length === 0) {
+        if (importPrice === 0 && sellPrice === 0) {
+          warnings.push('Giá nhập & Giá bán đang là 0 đ — nên cập nhật giá thực tế.');
+        } else if (sellPrice > 0 && sellPrice < importPrice) {
+          warnings.push(`Giá bán (${formatVND(sellPrice)}) thấp hơn giá nhập (${formatVND(importPrice)}).`);
+        }
+        if (
+          code &&
+          existingProducts.some(
+            (p) =>
+              p.code.trim().toUpperCase() === code.toUpperCase() &&
+              areWarehouseNamesEquivalent(p.warehouseName || defaultWarehouse, wh)
+          )
+        ) {
+          warnings.push(`Mã VT "${code}" đã tồn tại trong kho ${wh}.`);
+        }
+      }
+
+      previewRows.push({
+        excelRowNumber,
+        status: errors.length > 0 ? 'error' : 'valid',
+        errors,
+        warnings,
+        cells: [
+          wh,
+          code || '(Tự sinh)',
+          name || '—',
+          unit,
+          Number.isFinite(importPrice) ? formatVND(importPrice) : 'Lỗi số',
+          Number.isFinite(sellPrice) ? formatVND(sellPrice) : 'Lỗi số',
+          Number.isFinite(stock) ? String(Math.round(stock)) : 'Lỗi số',
+        ],
+        normalizedRow: {
+          ...rawRow,
+          'Kho Lưu Trữ': wh,
+          'Mã VT': code,
+          'Tên Vật Tư Nông Nghiệp': name,
+          'Nhóm Vật Tư': category,
+          'Đơn Vị Tính': unit,
+          'Giá Nhập (VNĐ)': Number.isFinite(importPrice) ? Math.round(importPrice) : 0,
+          'Giá Bán Lẻ (VNĐ)': Number.isFinite(sellPrice) ? Math.round(sellPrice) : 0,
+          'Tồn Kho Ban Đầu': Number.isFinite(stock) ? Math.round(stock) : 0,
+          'Mức Cảnh Báo Tối Thiểu': Number.isFinite(minStock) ? Math.round(minStock) : 5,
+          'Nhà Cung Cấp Chính': supplier,
+        },
+      });
+      return;
+    }
+
+    if (moduleType === 'customers') {
+      const code = readExcelText(rawRow, ['Mã KH', 'Mã Khách Hàng', 'code']);
+      const name = readExcelText(rawRow, [
+        'Họ Tên Khách Hàng',
+        'Tên Khách Hàng',
+        'Họ Và Tên',
+        'Khách Hàng',
+        'name',
+      ]);
+      const phone = readExcelText(rawRow, [
+        'Số Điện Thoại',
+        'Số Điện Thoại KH',
+        'SĐT',
+        'Điện Thoại',
+        'phone',
+      ]);
+      const group = readExcelText(
+        rawRow,
+        ['Nhóm Khách Hàng', 'Nhóm KH', 'Phân Nhóm'],
+        'Nhà nông'
+      );
+      const address = readExcelText(rawRow, ['Địa Chỉ', 'Địa Chỉ KH', 'address']);
+      const email = readExcelText(rawRow, ['Email', 'email']);
+      const note = readExcelText(rawRow, ['Ghi Chú', 'note'], 'Nhập từ biểu mẫu Excel');
+      const totalPurchased = readExcelNumber(rawRow, ['Tổng Mua (VNĐ)', 'Tổng Mua'], 0);
+      const totalDebt = readExcelNumber(
+        rawRow,
+        ['Dư Nợ Hiện Tại (VNĐ)', 'Dư Nợ Hiện Tại', 'Công Nợ'],
+        0
+      );
+
+      if (!name) errors.push('Thiếu Họ tên khách hàng.');
+      if (!Number.isFinite(totalPurchased) || totalPurchased < 0) {
+        errors.push('Tổng mua không hợp lệ hoặc bị âm.');
+      }
+      if (!Number.isFinite(totalDebt) || totalDebt < 0) {
+        errors.push('Dư nợ hiện tại không hợp lệ hoặc bị âm.');
+      }
+      if (errors.length === 0 && !phone) {
+        warnings.push('Chưa có Số điện thoại (có thể bổ sung sau).');
+      }
+
+      previewRows.push({
+        excelRowNumber,
+        status: errors.length > 0 ? 'error' : 'valid',
+        errors,
+        warnings,
+        cells: [
+          code || '(Tự sinh)',
+          name || '—',
+          phone || '—',
+          group,
+          address || '—',
+          Number.isFinite(totalDebt) ? formatVND(totalDebt) : 'Lỗi số',
+        ],
+        normalizedRow: {
+          ...rawRow,
+          'Mã KH': code,
+          'Họ Tên Khách Hàng': name,
+          'Số Điện Thoại': phone,
+          Email: email,
+          'Địa Chỉ': address,
+          'Nhóm Khách Hàng': group,
+          'Ghi Chú': note,
+          'Tổng Mua (VNĐ)': Number.isFinite(totalPurchased) ? Math.round(totalPurchased) : 0,
+          'Dư Nợ Hiện Tại (VNĐ)': Number.isFinite(totalDebt) ? Math.round(totalDebt) : 0,
+        },
+      });
+      return;
+    }
+
+    if (moduleType === 'sales') {
+      const wh =
+        lockedWarehouse ||
+        readExcelText(rawRow, ['Kho Xuất Bán', 'Kho Xuất', 'Kho'], defaultWarehouse);
+      const custName = readExcelText(rawRow, [
+        'Tên Khách Hàng',
+        'Khách Hàng',
+        'Họ Tên Khách Hàng',
+      ]);
+      const custPhone = readExcelText(rawRow, ['Số Điện Thoại KH', 'Số Điện Thoại', 'SĐT']);
+      const prodName = readExcelText(rawRow, [
+        'Tên Vật Tư Nông Nghiệp',
+        'Sản Phẩm',
+        'Tên Vật Tư',
+        'Mặt Hàng',
+      ]);
+      const unit = readExcelText(rawRow, ['Đơn Vị', 'Đơn Vị Tính', 'ĐVT'], 'Bao');
+      const qty = readExcelNumber(rawRow, ['Số Lượng Bán', 'Số Lượng', 'SL'], 1);
+      const price = readExcelNumber(
+        rawRow,
+        ['Đơn Giá Bán (VNĐ)', 'Đơn Giá (đ)', 'Đơn Giá Bán', 'Đơn Giá'],
+        0
+      );
+      const fallbackPaid = Number.isFinite(qty) && Number.isFinite(price) ? qty * price : 0;
+      const paid = readExcelNumber(
+        rawRow,
+        ['Khách Đã Trả (VNĐ)', 'Đã Thu (đ)', 'Khách Đã Trả', 'Đã Thanh Toán'],
+        fallbackPaid
+      );
+
+      if (!custName) errors.push('Thiếu Tên khách hàng.');
+      if (!prodName) errors.push('Thiếu Tên vật tư xuất bán.');
+      if (!Number.isFinite(qty) || qty <= 0) errors.push('Số lượng bán phải lớn hơn 0.');
+      if (!Number.isFinite(price) || price < 0) errors.push('Đơn giá bán không hợp lệ hoặc bị âm.');
+      if (!Number.isFinite(paid) || paid < 0) errors.push('Số tiền đã thu không hợp lệ hoặc bị âm.');
+
+      const matchedProd = prodName
+        ? existingProducts.find(
+            (p) =>
+              (!p.warehouseName || !wh || areWarehouseNamesEquivalent(p.warehouseName, wh)) &&
+              normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
+          )
+        : undefined;
+
+      if (errors.length === 0) {
+        if (matchedProd) {
+          const prevUsed = cumulativeSaleOutByProdId.get(matchedProd.id) || 0;
+          if (matchedProd.stock < prevUsed + qty) {
+            errors.push(
+              `Vượt tồn kho "${matchedProd.name}" tại ${wh} (cần xuất ${prevUsed + qty}, tồn ${matchedProd.stock}).`
+            );
+          } else {
+            cumulativeSaleOutByProdId.set(matchedProd.id, prevUsed + qty);
+          }
+        } else {
+          warnings.push('Vật tư chưa có trong danh mục kho — sẽ ghi nhận theo tên trên Excel.');
+        }
+        if (price === 0) {
+          warnings.push('Đơn giá bán đang bằng 0 đ.');
+        }
+      }
+
+      previewRows.push({
+        excelRowNumber,
+        status: errors.length > 0 ? 'error' : 'valid',
+        errors,
+        warnings,
+        cells: [
+          wh,
+          custName || '—',
+          prodName || '—',
+          Number.isFinite(qty) ? `${qty} ${matchedProd?.unit || unit}` : 'Lỗi số',
+          Number.isFinite(price) ? formatVND(price) : 'Lỗi số',
+          Number.isFinite(paid) ? formatVND(paid) : 'Lỗi số',
+        ],
+        normalizedRow: {
+          ...rawRow,
+          'Kho Xuất Bán': wh,
+          'Tên Khách Hàng': custName,
+          'Số Điện Thoại KH': custPhone,
+          'Tên Vật Tư Nông Nghiệp': prodName,
+          'Đơn Vị': matchedProd?.unit || unit,
+          'Số Lượng Bán': Number.isFinite(qty) ? qty : 0,
+          'Đơn Giá Bán (VNĐ)': Number.isFinite(price) ? Math.round(price) : 0,
+          'Khách Đã Trả (VNĐ)': Number.isFinite(paid) ? Math.round(paid) : 0,
+        },
+      });
+      return;
+    }
+
+    if (moduleType === 'imports') {
+      const wh =
+        lockedWarehouse ||
+        readExcelText(rawRow, ['Kho Nhập Hàng', 'Kho Nhập', 'Kho'], defaultWarehouse);
+      const prodName = readExcelText(rawRow, [
+        'Tên Vật Tư Nhập Kho',
+        'Sản Phẩm',
+        'Tên Vật Tư',
+        'Tên Vật Tư Nông Nghiệp',
+      ]);
+      const supName = readExcelText(rawRow, ['Nhà Cung Cấp', 'Tên Nhà Cung Cấp', 'NCC']);
+      const supPhone = readExcelText(rawRow, ['SĐT Nhà Cung Cấp', 'SĐT NCC', 'Số Điện Thoại']);
+      const unit = readExcelText(rawRow, ['Đơn Vị Tính', 'Đơn Vị', 'ĐVT'], 'Bao');
+      const qty = readExcelNumber(rawRow, ['Số Lượng Nhập', 'Số Lượng', 'SL'], 1);
+      const costHeaders = ['Đơn Giá Nhập (VNĐ)', 'Giá Nhập (đ)', 'Đơn Giá Nhập', 'Giá Nhập'];
+      const cost = readExcelNumber(rawRow, costHeaders, 0);
+      const fallbackPaid = Number.isFinite(qty) && Number.isFinite(cost) ? qty * cost : 0;
+      const paid = readExcelNumber(
+        rawRow,
+        ['Đã Thanh Toán NCC (VNĐ)', 'Đã Trả NCC (đ)', 'Đã Thanh Toán NCC', 'Đã Trả'],
+        fallbackPaid
+      );
+
+      if (!prodName) errors.push('Thiếu Tên vật tư nhập kho.');
+      if (!supName) errors.push('Thiếu Tên nhà cung cấp.');
+      if (!Number.isFinite(qty) || qty <= 0) errors.push('Số lượng nhập phải lớn hơn 0.');
+      if (!Number.isFinite(cost) || cost < 0) errors.push('Đơn giá nhập không hợp lệ hoặc bị âm.');
+      if (!Number.isFinite(paid) || paid < 0) errors.push('Số tiền đã trả NCC không hợp lệ hoặc bị âm.');
+
+      if (errors.length === 0) {
+        if (!hasAnyHeaderPresent(rawRow, costHeaders) || cost === 0) {
+          warnings.push('Đơn giá nhập = 0 đ (hàng mẫu / khuyến mãi không tính tiền).');
+        }
+        const matchedProd = existingProducts.find(
+          (p) =>
+            (!p.warehouseName || !wh || areWarehouseNamesEquivalent(p.warehouseName, wh)) &&
+            normalizeVietnameseSearch(p.name) === normalizeVietnameseSearch(prodName)
+        );
+        if (!matchedProd) {
+          warnings.push('Vật tư chưa có sẵn trong danh mục kho — nên kiểm tra tên hoặc thêm vào Tồn kho.');
+        }
+      }
+
+      previewRows.push({
+        excelRowNumber,
+        status: errors.length > 0 ? 'error' : 'valid',
+        errors,
+        warnings,
+        cells: [
+          wh,
+          supName || '—',
+          prodName || '—',
+          Number.isFinite(qty) ? `${qty} ${unit}` : 'Lỗi số',
+          Number.isFinite(cost) ? formatVND(cost) : 'Lỗi số',
+          Number.isFinite(paid) ? formatVND(paid) : 'Lỗi số',
+        ],
+        normalizedRow: {
+          ...rawRow,
+          'Kho Nhập Hàng': wh,
+          'Tên Vật Tư Nhập Kho': prodName,
+          'Nhà Cung Cấp': supName,
+          'SĐT Nhà Cung Cấp': supPhone,
+          'Đơn Vị Tính': unit,
+          'Số Lượng Nhập': Number.isFinite(qty) ? qty : 0,
+          'Đơn Giá Nhập (VNĐ)': Number.isFinite(cost) ? Math.round(cost) : 0,
+          'Đã Thanh Toán NCC (VNĐ)': Number.isFinite(paid) ? Math.round(paid) : 0,
+        },
+      });
+      return;
+    }
+
+    // moduleType === 'debts'
+    const debtType = readExcelText(rawRow, ['Loại Công Nợ (KH / NCC)', 'Loại Công Nợ', 'Loại'], '');
+    const code = readExcelText(rawRow, [
+      'Mã Hóa Đơn / Mã Phiếu Nhập',
+      'Mã Chứng Từ',
+      'Mã Hóa Đơn',
+      'Mã Phiếu Nhập',
+    ]);
+    const partner = readExcelText(rawRow, ['Tên Đối Tác', 'Khách Hàng', 'Nhà Cung Cấp']);
+    const amount = readExcelNumber(
+      rawRow,
+      ['Số Tiền Thanh Toán Đợt Này (VNĐ)', 'Số Tiền Thanh Toán', 'Số Tiền Thu/Trả'],
+      0
+    );
+    const note = readExcelText(rawRow, ['Ghi Chú Thanh Toán', 'Ghi Chú'], 'Cập nhật từ Excel');
+
+    if (!code) {
+      errors.push('Thiếu Mã Hóa Đơn (HD-...) hoặc Mã Phiếu Nhập (PN-...).');
+    } else if (!code.startsWith('HD-') && !code.startsWith('PN-')) {
+      errors.push(`Mã chứng từ "${code}" phải bắt đầu bằng HD- hoặc PN-.`);
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      errors.push('Số tiền thanh toán đợt này phải lớn hơn 0 đ.');
+    }
+
+    let currentDebtDisplay = '—';
+    if (errors.length === 0) {
+      if (code.startsWith('HD-')) {
+        const rem = remainingSaleDebtByCode.get(code) || 0;
+        currentDebtDisplay = formatVND(rem);
+        if (rem <= 0) {
+          errors.push(`Hóa đơn "${code}" không tồn tại hoặc đã tất toán hết nợ.`);
+        } else {
+          if (amount > rem) {
+            warnings.push(
+              `Số tiền nhập (${formatVND(amount)}) lớn hơn dư nợ còn lại (${formatVND(rem)}) — chỉ thu tối đa ${formatVND(rem)}.`
+            );
+          }
+          remainingSaleDebtByCode.set(code, Math.max(0, rem - amount));
+        }
+      } else if (code.startsWith('PN-')) {
+        const rem = remainingImportDebtByCode.get(code) || 0;
+        currentDebtDisplay = formatVND(rem);
+        if (rem <= 0) {
+          errors.push(`Phiếu nhập "${code}" không tồn tại hoặc đã trả đủ nợ NCC.`);
+        } else {
+          if (amount > rem) {
+            warnings.push(
+              `Số tiền nhập (${formatVND(amount)}) lớn hơn nợ NCC còn lại (${formatVND(rem)}) — chỉ chi tối đa ${formatVND(rem)}.`
+            );
+          }
+          remainingImportDebtByCode.set(code, Math.max(0, rem - amount));
+        }
+      }
+    }
+
+    previewRows.push({
+      excelRowNumber,
+      status: errors.length > 0 ? 'error' : 'valid',
+      errors,
+      warnings,
+      cells: [
+        debtType || (code.startsWith('PN-') ? 'NCC' : 'KH'),
+        code || '—',
+        partner || '—',
+        Number.isFinite(amount) ? formatVND(amount) : 'Lỗi số',
+        currentDebtDisplay,
+      ],
+      normalizedRow: {
+        ...rawRow,
+        'Loại Công Nợ (KH / NCC)': debtType || (code.startsWith('PN-') ? 'NCC' : 'KH'),
+        'Mã Hóa Đơn / Mã Phiếu Nhập': code,
+        'Tên Đối Tác': partner,
+        'Số Tiền Thanh Toán Đợt Này (VNĐ)': Number.isFinite(amount) ? Math.round(amount) : 0,
+        'Ghi Chú Thanh Toán': note,
+      },
+    });
+  });
+
+  const validRows = previewRows.filter((r) => r.status === 'valid');
+  const errorCount = previewRows.filter((r) => r.status === 'error').length;
+  const warningCount = previewRows.filter((r) => r.warnings.length > 0).length;
+
+  return {
+    moduleType,
+    columns: columnsByModule[moduleType],
+    rows: previewRows,
+    totalNonEmptyRows: previewRows.length,
+    emptySkippedCount,
+    validCount: validRows.length,
+    errorCount,
+    warningCount,
+    validNormalizedRows: validRows.map((r) => r.normalizedRow),
+  };
+}
+
+/* ---------------- Phase 4C: Due Debt Zalo + VietQR Reminder Queue */
+
+export function formatVietQrSummaryForDebt(
+  bankConfig: VietQrBankConfig | null | undefined,
+  amount: number,
+  addInfoRaw: string
+): ZaloDebtVietQrSummary | null {
+  if (!isValidVietQrConfig(bankConfig) || !bankConfig) return null;
+  const safeAmount = Math.max(0, Math.round(Number(amount) || 0));
+  const transferContent = sanitizeVietQrText(addInfoRaw, 48);
+  const qrImageUrl = buildVietQrImageUrl(bankConfig, {
+    amount: safeAmount,
+    addInfo: transferContent,
+  });
+  return {
+    bankLabel: resolveVietnamBankLabel(bankConfig.bankCode),
+    accountNumber: bankConfig.accountNumber.trim(),
+    accountName: bankConfig.accountName?.trim() || undefined,
+    transferContent,
+    qrImageUrl: qrImageUrl || undefined,
+  };
+}
+
+export interface CustomerZaloReminderItem {
+  customerKey: string;
+  customerId?: string;
+  customerName: string;
+  customerPhone: string;
+  invoiceCount: number;
+  overdueInvoiceCount: number;
+  dueSoonInvoiceCount: number;
+  totalDebt: number;
+  nearestDueDate: string;
+  urgency: 'overdue' | 'due_soon' | 'normal';
+  daysDelta: number;
+  transferAddInfo: string;
+  vietQrUrl: string | null;
+  zaloUrl: string | null;
+  message: string;
+  unpaidSales: SaleTransaction[];
+}
+
+export function buildCustomerZaloDebtReminderQueue(params: {
+  sales: SaleTransaction[];
+  customers?: CustomerProfile[];
+  storeName?: string;
+  bankQrConfig?: VietQrBankConfig | null;
+  todayStr?: string;
+  leadDays?: number;
+}): CustomerZaloReminderItem[] {
+  const {
+    sales = [],
+    customers = [],
+    storeName = 'VTNN Tâm An',
+    bankQrConfig = null,
+    todayStr = getTodayVietnamDateStr(),
+    leadDays = 5,
+  } = params;
+
+  const groups = new Map<
+    string,
+    {
+      customerId?: string;
+      customerName: string;
+      customerPhone: string;
+      unpaidSales: SaleTransaction[];
+    }
+  >();
+
+  for (const s of sales) {
+    if (!s || (Number(s.debtAmount) || 0) <= 0 || s.isSupplierSale) continue;
+    const matchedProfile = customers.find(
+      (c) =>
+        (s.customerId && c.id === s.customerId) ||
+        (s.customerPhone && c.phone && c.phone.trim() === s.customerPhone.trim()) ||
+        normalizeVietnameseSearch(c.name) === normalizeVietnameseSearch(s.customerName)
+    );
+    const resolvedPhone = (s.customerPhone || matchedProfile?.phone || '').trim();
+    const resolvedId = matchedProfile?.id || s.customerId || undefined;
+    const key = resolvedId
+      ? `id:${resolvedId}`
+      : resolvedPhone
+      ? `ph:${resolvedPhone.replace(/\D/g, '')}`
+      : `nm:${normalizeVietnameseSearch(s.customerName)}`;
+
+    let bucket = groups.get(key);
+    if (!bucket) {
+      bucket = {
+        customerId: resolvedId,
+        customerName: matchedProfile?.name || s.customerName,
+        customerPhone: resolvedPhone,
+        unpaidSales: [],
+      };
+      groups.set(key, bucket);
+    } else if (!bucket.customerPhone && resolvedPhone) {
+      bucket.customerPhone = resolvedPhone;
+    }
+    bucket.unpaidSales.push(s);
+  }
+
+  const items: CustomerZaloReminderItem[] = [];
+  groups.forEach((bucket, key) => {
+    const sortedSales = [...bucket.unpaidSales].sort((a, b) =>
+      (a.dueDate || a.createdAt || '').localeCompare(b.dueDate || b.createdAt || '')
+    );
+    const totalDebt = sortedSales.reduce((sum, s) => sum + Math.max(0, Number(s.debtAmount) || 0), 0);
+    let overdueInvoiceCount = 0;
+    let dueSoonInvoiceCount = 0;
+    let minDaysRemaining = Number.POSITIVE_INFINITY;
+    let nearestDueDate = sortedSales[0]?.dueDate || '';
+
+    for (const s of sortedSales) {
+      const ev = evaluateDebtUrgency(s.dueDate, s.debtAmount, todayStr, leadDays);
+      if (ev.urgency === 'overdue') overdueInvoiceCount += 1;
+      else if (ev.urgency === 'due_soon') dueSoonInvoiceCount += 1;
+      if (ev.daysRemaining < minDaysRemaining) {
+        minDaysRemaining = ev.daysRemaining;
+        nearestDueDate = s.dueDate;
+      }
+    }
+
+    const urgency: 'overdue' | 'due_soon' | 'normal' =
+      overdueInvoiceCount > 0 ? 'overdue' : dueSoonInvoiceCount > 0 ? 'due_soon' : 'normal';
+    const firstCode = sortedSales[0]?.invoiceCode || 'CONGNO';
+    const rawAddInfo =
+      sortedSales.length === 1
+        ? `THU NO ${firstCode} ${bucket.customerName}`
+        : `THU NO ${bucket.customerName}`;
+    const qrSummary = formatVietQrSummaryForDebt(bankQrConfig, totalDebt, rawAddInfo);
+
+    const built = buildZaloDebtReminderMessage({
+      storeName,
+      customerName: bucket.customerName,
+      customerPhone: bucket.customerPhone,
+      totalDebt,
+      unpaidInvoices: sortedSales.map((s) => ({
+        invoiceCode: s.invoiceCode,
+        date: (s.createdAt || '').slice(0, 10),
+        productName: s.productName,
+        debtAmount: s.debtAmount,
+        dueDate: s.dueDate,
+      })),
+      todayStr,
+      vietQrSummary: qrSummary,
+    });
+
+    items.push({
+      customerKey: key,
+      customerId: bucket.customerId,
+      customerName: bucket.customerName,
+      customerPhone: bucket.customerPhone,
+      invoiceCount: sortedSales.length,
+      overdueInvoiceCount,
+      dueSoonInvoiceCount,
+      totalDebt,
+      nearestDueDate,
+      urgency,
+      daysDelta: Number.isFinite(minDaysRemaining) ? minDaysRemaining : 0,
+      transferAddInfo: qrSummary?.transferContent || sanitizeVietQrText(rawAddInfo, 48),
+      vietQrUrl: qrSummary?.qrImageUrl || null,
+      zaloUrl: built.zaloUrl,
+      message: built.message,
+      unpaidSales: sortedSales,
+    });
+  });
+
+  const urgencyRank = { overdue: 0, due_soon: 1, normal: 2 };
+  return items.sort(
+    (a, b) =>
+      urgencyRank[a.urgency] - urgencyRank[b.urgency] ||
+      a.daysDelta - b.daysDelta ||
+      b.totalDebt - a.totalDebt
+  );
+}
+
+export const ZALO_REMINDED_TODAY_STORAGE_KEY = 'vtnn_taman_zalo_reminded_v1';
+
+export function loadZaloRemindedTodaySet(
+  todayStr = getTodayVietnamDateStr(),
+  storage?: Pick<Storage, 'getItem'> | null
+): Set<string> {
+  try {
+    const target =
+      storage !== undefined
+        ? storage
+        : typeof window !== 'undefined'
+        ? window.localStorage
+        : null;
+    const raw = target?.getItem(ZALO_REMINDED_TODAY_STORAGE_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw) as { date?: string; keys?: string[] };
+    if (parsed?.date !== todayStr || !Array.isArray(parsed.keys)) return new Set();
+    return new Set(parsed.keys.filter((k) => typeof k === 'string'));
+  } catch {
+    return new Set();
+  }
+}
+
+export function markCustomerZaloRemindedToday(
+  customerKey: string,
+  todayStr = getTodayVietnamDateStr(),
+  storage?: Pick<Storage, 'getItem' | 'setItem'> | null
+): Set<string> {
+  const next = loadZaloRemindedTodaySet(todayStr, storage);
+  if (customerKey) next.add(customerKey);
+  try {
+    const target =
+      storage !== undefined
+        ? storage
+        : typeof window !== 'undefined'
+        ? window.localStorage
+        : null;
+    target?.setItem(
+      ZALO_REMINDED_TODAY_STORAGE_KEY,
+      JSON.stringify({ date: todayStr, keys: Array.from(next) })
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+  return next;
+}

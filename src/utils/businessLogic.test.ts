@@ -4912,3 +4912,308 @@ test('Phase 3A & 3C: Table density persistence and 1-tap VTNN unit presets', () 
   assert.ok(COMMON_VTNN_UNITS.includes('Bao 50kg'));
   assert.equal(generateUniqueCustomerCodeFromName('Anh Tư', []), 'ATU');
 });
+
+
+import {
+  buildCustomerZaloDebtReminderQueue,
+  loadZaloRemindedTodaySet,
+  markCustomerZaloRemindedToday,
+  validateAndPreviewExcelImportRows,
+} from './smartInsights.ts';
+import {
+  exportImportReceiptPDF,
+  exportSaleInvoicePDF,
+  exportShiftCloseReportPDF,
+  exportThermalReceiptPDF,
+} from './exportReports.ts';
+
+test('Phase 4A: validateAndPreviewExcelImportRows inspects line-by-line errors, warnings, Vietnamese currency strings, and cumulative stock limits', () => {
+  // 0. Bulletproof readExcelNumber edge cases (0 preserved, VN currency stripped, garbage -> NaN)
+  assert.equal(readExcelNumber({ A: 0 }, ['A'], 99), 0);
+  assert.equal(readExcelNumber({ A: '0' }, ['A'], 99), 0);
+  assert.equal(readExcelNumber({ A: '' }, ['A'], 99), 99);
+  assert.equal(readExcelNumber({ A: '1.250.000 đ' }, ['A'], 0), 1250000);
+  assert.equal(readExcelNumber({ A: '-15.000' }, ['A'], 0), -15000);
+  assert.ok(Number.isNaN(readExcelNumber({ A: 'abc' }, ['A'], 0)));
+
+  const existingProd: ProductItem = {
+    id: 'p_1',
+    code: 'BPRO',
+    name: 'Búp Pro',
+    category: 'Thuốc BVTV',
+    unit: 'Chai',
+    importPrice: 160000,
+    sellPrice: 195000,
+    stock: 10,
+    minStock: 5,
+    supplierName: 'GAP Nhất',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    ownerId: 'u1',
+    createdAt: '2026-11-01',
+    updatedAt: '2026-11-28',
+  };
+
+  // 1. Inventory preview: empty row skipped, valid row with currency formatting, invalid row missing name / negative price
+  const invPreview = validateAndPreviewExcelImportRows({
+    moduleType: 'inventory',
+    existingProducts: [existingProd],
+    rows: [
+      {},
+      {
+        'Tên Vật Tư': 'Xanil Top',
+        'ĐVT': 'Chai',
+        'Giá Nhập': '150.000 đ',
+        'Giá Bán': '185.000 VNĐ',
+        'Tồn Kho': 0,
+      },
+      {
+        'Tên Vật Tư': '',
+        'Giá Nhập': '-10.000',
+      },
+    ],
+  });
+  assert.equal(invPreview.emptySkippedCount, 1);
+  assert.equal(invPreview.totalNonEmptyRows, 2);
+  assert.equal(invPreview.validCount, 1);
+  assert.equal(invPreview.errorCount, 1);
+  assert.equal(invPreview.rows[0].excelRowNumber, 3);
+  assert.equal(invPreview.validNormalizedRows[0]['Tồn Kho Ban Đầu'], 0);
+  assert.equal(invPreview.validNormalizedRows[0]['Giá Nhập (VNĐ)'], 150000);
+  assert.equal(invPreview.rows[1].excelRowNumber, 4);
+  assert.equal(invPreview.rows[1].status, 'error');
+
+  // 2. Sales preview: cumulative stock across multiple rows catches stock overflow on the 2nd row
+  const salesPreview = validateAndPreviewExcelImportRows({
+    moduleType: 'sales',
+    existingProducts: [existingProd],
+    rows: [
+      { 'Tên Khách Hàng': 'Ông Hòa', 'Sản Phẩm': 'Bup Pro', 'SL': 7, 'Đơn Giá': 195000 },
+      { 'Tên Khách Hàng': 'Bà Bích', 'Sản Phẩm': 'Búp Pro', 'SL': 5, 'Đơn Giá': 195000 },
+    ],
+  });
+  assert.equal(salesPreview.validCount, 1);
+  assert.equal(salesPreview.errorCount, 1);
+  assert.ok(salesPreview.rows[1].errors[0].includes('Vượt tồn kho'));
+
+  // 3. Debts preview: rejects unknown/settled invoice, warns when payment > remaining debt
+  const unpaidSale: SaleTransaction = {
+    id: 's_debt_1',
+    invoiceCode: 'HD-2611-009',
+    customerId: 'c1',
+    customerName: 'Ông Hòa',
+    customerPhone: '0913456789',
+    productId: 'p_1',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: 2,
+    unitPrice: 200000,
+    unitCost: 160000,
+    totalAmount: 400000,
+    paidAmount: 100000,
+    debtAmount: 300000,
+    dueDate: '2026-11-25',
+    status: 'partial',
+    note: '',
+    warehouseName: 'Tâm An Mỹ Ngãi',
+    staffName: 'Admin',
+    ownerId: 'u1',
+    createdAt: '2026-11-20',
+    updatedAt: '2026-11-20',
+  };
+  const debtsPreview = validateAndPreviewExcelImportRows({
+    moduleType: 'debts',
+    existingSales: [unpaidSale],
+    rows: [
+      { 'Mã Hóa Đơn': 'HD-2611-009', 'Số Tiền Thanh Toán': '500.000 đ' },
+      { 'Mã Hóa Đơn': 'HD-2611-999', 'Số Tiền Thanh Toán': 100000 },
+    ],
+  });
+  assert.equal(debtsPreview.validCount, 1);
+  assert.equal(debtsPreview.warningCount, 1);
+  assert.equal(debtsPreview.errorCount, 1);
+});
+
+test('Phase 4B: K80 and A5 PDF exporters produce standardized file names for PN-, HD-, and Shift Close reports', () => {
+  const impA5 = exportImportReceiptPDF({
+    receiptCode: 'PN-2611-008',
+    supplierName: 'GAP Nhất',
+    supplierPhone: '0393120246',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: 5,
+    unitCost: 160000,
+    totalCost: 800000,
+    paidAmount: 500000,
+    debtAmount: 300000,
+    dueDate: '2026-12-28',
+    note: '',
+    staffName: 'Admin',
+    createdAt: '2026-11-28T08:00:00Z',
+    paperSize: 'a5',
+  });
+  assert.equal(impA5, 'PhieuNhapKho_A5_PN-2611-008_2026-11-28.pdf');
+
+  const impK80 = exportThermalReceiptPDF({
+    paperWidthMm: 80,
+    voucherTitle: 'Phiếu Nhập Kho',
+    voucherCode: 'PN-2611-008',
+    dateStr: '2026-11-28',
+    partnerLabel: 'Nhà cung cấp',
+    partnerName: 'GAP Nhất',
+    totalLabel: 'Tổng tiền nhập:',
+    totalAmount: 800000,
+    paidLabel: 'Đã trả NCC:',
+    paidAmount: 500000,
+    debtLabel: 'Còn nợ NCC:',
+    remainingDebt: 300000,
+    staffName: 'Admin',
+    staffLabel: 'Thủ kho / Người nhập',
+    footerNote: 'Đã kiểm nhận đủ số lượng nhập kho!',
+  });
+  assert.equal(impK80, 'Bill_K80_PN-2611-008_2026-11-28.pdf');
+
+  const saleA5 = exportSaleInvoicePDF({
+    invoiceCode: 'HD-2611-012',
+    customerName: 'Ông Hòa',
+    customerPhone: '0913456789',
+    productName: 'Búp Pro',
+    unit: 'Chai',
+    quantity: 2,
+    unitPrice: 195000,
+    totalAmount: 390000,
+    paidAmount: 390000,
+    debtAmount: 0,
+    dueDate: '2026-11-28',
+    note: '',
+    staffName: 'Admin',
+    createdAt: '2026-11-28T09:00:00Z',
+    paperSize: 'a5',
+  });
+  assert.equal(saleA5, 'PhieuBanHang_A5_HD-2611-012_2026-11-28.pdf');
+
+  const shiftK80 = exportShiftCloseReportPDF({
+    format: 'k80',
+    dateStr: '2026-11-28',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    staffName: 'Huỳnh Như',
+    openingCash: 1000000,
+    cashIn: 2500000,
+    salesInitialPaidInflow: 2000000,
+    cashOut: 500000,
+    importsInitialPaidOutflow: 500000,
+    nonCashIn: 1200000,
+    nonCashOut: 0,
+    expectedCash: 3000000,
+    countedCash: 3000000,
+    difference: 0,
+    netSalesRevenue: 3200000,
+  });
+  assert.equal(shiftK80, 'BienBanChotCa_K80_2026-11-28.pdf');
+
+  const shiftA5 = exportShiftCloseReportPDF({
+    format: 'a5',
+    dateStr: '2026-11-28',
+    warehouseName: 'TÂM AN MỸ NGÃI',
+    openingCash: 1000000,
+    cashIn: 2500000,
+    salesInitialPaidInflow: 2000000,
+    cashOut: 500000,
+    importsInitialPaidOutflow: 500000,
+    nonCashIn: 1200000,
+    nonCashOut: 0,
+    expectedCash: 3000000,
+    countedCash: null,
+    difference: null,
+    netSalesRevenue: 3200000,
+  });
+  assert.equal(shiftA5, 'BienBanChotCa_A5_2026-11-28.pdf');
+});
+
+test('Phase 4C: buildCustomerZaloDebtReminderQueue prioritizes overdue & due-soon debts, embeds VietQR transfer details, and tracks daily sent status', () => {
+  const sales: SaleTransaction[] = [
+    {
+      id: 's_normal',
+      invoiceCode: 'HD-2611-020',
+      customerId: 'c_normal',
+      customerName: 'Anh Bình',
+      customerPhone: '0909111222',
+      productId: 'p1',
+      productName: 'NPK Đầu Trâu',
+      unit: 'Bao 50kg',
+      quantity: 2,
+      unitPrice: 750000,
+      unitCost: 650000,
+      totalAmount: 1500000,
+      paidAmount: 0,
+      debtAmount: 1500000,
+      dueDate: '2026-12-20',
+      status: 'unpaid',
+      note: '',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-25',
+      updatedAt: '2026-11-25',
+    },
+    {
+      id: 's_overdue',
+      invoiceCode: 'HD-2611-005',
+      customerId: 'c_overdue',
+      customerName: 'Ông Nguyễn Văn Hòa',
+      customerPhone: '+84 913 456 789',
+      productId: 'p1',
+      productName: 'Búp Pro',
+      unit: 'Chai',
+      quantity: 4,
+      unitPrice: 200000,
+      unitCost: 160000,
+      totalAmount: 800000,
+      paidAmount: 200000,
+      debtAmount: 600000,
+      dueDate: '2026-11-20',
+      status: 'partial',
+      note: '',
+      warehouseName: 'Tâm An Mỹ Ngãi',
+      staffName: 'Admin',
+      ownerId: 'u1',
+      createdAt: '2026-11-10',
+      updatedAt: '2026-11-10',
+    },
+  ];
+
+  const queue = buildCustomerZaloDebtReminderQueue({
+    sales,
+    storeName: 'Kho Tâm An Mỹ Ngãi',
+    bankQrConfig: {
+      bankCode: 'VCB',
+      bankBin: '970436',
+      accountNumber: '1023456789',
+      accountName: 'TRAN NHAT',
+    },
+    todayStr: '2026-11-28',
+    leadDays: 5,
+  });
+
+  assert.equal(queue.length, 2);
+  // Overdue customer appears first
+  assert.equal(queue[0].customerName, 'Ông Nguyễn Văn Hòa');
+  assert.equal(queue[0].urgency, 'overdue');
+  assert.equal(queue[0].zaloUrl, 'https://zalo.me/0913456789');
+  assert.ok(queue[0].vietQrUrl?.includes('img.vietqr.io/image/970436-1023456789'));
+  assert.ok(queue[0].message.includes('Thông tin chuyển khoản nhanh (VietQR):'));
+  assert.ok(queue[0].message.includes('1023456789'));
+  assert.equal(queue[0].message.includes('lãi'), false);
+
+  // Daily reminded tracker resets on a new Vietnam date
+  const mem = new Map<string, string>();
+  const mockStore = {
+    getItem: (k: string) => mem.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      mem.set(k, v);
+    },
+  };
+  const afterMark = markCustomerZaloRemindedToday(queue[0].customerKey, '2026-11-28', mockStore);
+  assert.equal(afterMark.has(queue[0].customerKey), true);
+  assert.equal(loadZaloRemindedTodaySet('2026-11-28', mockStore).has(queue[0].customerKey), true);
+  assert.equal(loadZaloRemindedTodaySet('2026-11-29', mockStore).size, 0);
+});

@@ -1,8 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   Building2,
   CalendarClock,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Copy,
   ExternalLink,
   FileDown,
   Lock,
@@ -50,6 +54,13 @@ import {
 } from '../utils/exportReports';
 import { ExcelDataBar } from './ExcelDataBar';
 import { VietQrPaymentModal } from './VietQrPaymentModal';
+import {
+  buildCustomerZaloDebtReminderQueue,
+  CustomerZaloReminderItem,
+  formatVietQrSummaryForDebt,
+  loadZaloRemindedTodaySet,
+  markCustomerZaloRemindedToday,
+} from '../utils/smartInsights';
 import {
   CancelImportConfirmModal,
   CancelSaleConfirmModal,
@@ -274,6 +285,70 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
   const totalCustomerDebt = customerDebts.reduce((sum, s) => sum + s.debtAmount, 0);
 
   const todayStr = getTodayVietnamDateStr();
+  const [isZaloQueueExpanded, setIsZaloQueueExpanded] = useState<boolean>(true);
+  const [zaloQueueFilter, setZaloQueueFilter] = useState<'urgent' | 'overdue' | 'all'>('urgent');
+  const [expandedZaloMsgKey, setExpandedZaloMsgKey] = useState<string | null>(null);
+  const [remindedTodayKeys, setRemindedTodayKeys] = useState<Set<string>>(() =>
+    loadZaloRemindedTodaySet(todayStr)
+  );
+
+  const zaloReminderQueue = useMemo(
+    () =>
+      buildCustomerZaloDebtReminderQueue({
+        sales,
+        customers,
+        storeName,
+        bankQrConfig,
+        todayStr,
+        leadDays,
+      }),
+    [sales, customers, storeName, bankQrConfig, todayStr, leadDays]
+  );
+
+  const urgentZaloCount = useMemo(
+    () => zaloReminderQueue.filter((item) => item.urgency !== 'normal').length,
+    [zaloReminderQueue]
+  );
+  const overdueZaloCount = useMemo(
+    () => zaloReminderQueue.filter((item) => item.urgency === 'overdue').length,
+    [zaloReminderQueue]
+  );
+
+  const displayedZaloQueue = useMemo(() => {
+    if (zaloQueueFilter === 'overdue') {
+      return zaloReminderQueue.filter((item) => item.urgency === 'overdue');
+    }
+    if (zaloQueueFilter === 'urgent') {
+      const urgent = zaloReminderQueue.filter((item) => item.urgency !== 'normal');
+      return urgent.length > 0 ? urgent : zaloReminderQueue;
+    }
+    return zaloReminderQueue;
+  }, [zaloReminderQueue, zaloQueueFilter]);
+
+  const handleDispatchZaloQueueItem = (
+    item: CustomerZaloReminderItem,
+    openZaloTab: boolean
+  ) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(item.message).catch(() => undefined);
+    }
+    const updatedSet = markCustomerZaloRemindedToday(item.customerKey, todayStr);
+    setRemindedTodayKeys(new Set(updatedSet));
+    const notify = (msg: string) => {
+      if (onShowToast) onShowToast(msg);
+      else setFifoFeedback(msg);
+    };
+    if (openZaloTab && item.zaloUrl && typeof window !== 'undefined') {
+      window.open(item.zaloUrl, '_blank', 'noopener,noreferrer');
+      notify(`Đã sao chép tin nhắc nợ + VietQR cho ${item.customerName} & mở Zalo!`);
+    } else if (openZaloTab && !item.zaloUrl) {
+      notify(
+        `Đã sao chép tin nhắc nợ + VietQR cho ${item.customerName} (khách chưa có SĐT để mở Zalo tự động).`
+      );
+    } else {
+      notify(`Đã sao chép nội dung nhắc nợ + VietQR của ${item.customerName}!`);
+    }
+  };
   const overdueSuppliers = supplierDebts.filter(
     (i) => evaluateDebtUrgency(i.dueDate, i.debtAmount, todayStr, leadDays).urgency === 'overdue'
   );
@@ -313,6 +388,11 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
         s.customerName === sale.customerName
     );
     const totalCustDebt = matchingUnpaid.reduce((sum, s) => sum + s.debtAmount, 0);
+    const qrSummary = formatVietQrSummaryForDebt(
+      bankQrConfig,
+      qrAmt,
+      `THU NO ${sale.invoiceCode} ${sale.customerName}`
+    );
     const { message } = buildZaloDebtReminderMessage({
       storeName,
       customerName: sale.customerName,
@@ -326,6 +406,7 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
         dueDate: s.dueDate,
       })),
       todayStr,
+      vietQrSummary: qrSummary,
     });
     setVietQrTarget({
       title: `VietQR thu nợ ${sale.customerName}`,
@@ -345,6 +426,13 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
         s.customerName === sale.customerName
     );
     const totalCustDebt = matchingUnpaid.reduce((sum, s) => sum + s.debtAmount, 0);
+    const qrSummary = formatVietQrSummaryForDebt(
+      bankQrConfig,
+      totalCustDebt,
+      matchingUnpaid.length === 1
+        ? `THU NO ${sale.invoiceCode} ${sale.customerName}`
+        : `THU NO ${sale.customerName}`
+    );
     const { message, zaloUrl } = buildZaloDebtReminderMessage({
       storeName,
       customerName: sale.customerName,
@@ -358,13 +446,25 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
         dueDate: s.dueDate,
       })),
       todayStr,
+      vietQrSummary: qrSummary,
     });
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       void navigator.clipboard.writeText(message).catch(() => undefined);
     }
+    const matchedQueueItem = zaloReminderQueue.find(
+      (q) =>
+        (sale.customerId && q.customerId === sale.customerId) ||
+        (sale.customerPhone && q.customerPhone === sale.customerPhone) ||
+        q.customerName === sale.customerName
+    );
+    if (matchedQueueItem) {
+      setRemindedTodayKeys(
+        new Set(markCustomerZaloRemindedToday(matchedQueueItem.customerKey, todayStr))
+      );
+    }
     const toastMsg = zaloUrl
-      ? `Đã sao chép tin nhắn nhắc nợ cho ${sale.customerName} & mở Zalo!`
-      : `Đã sao chép nội dung nhắc nợ cho ${sale.customerName} (chưa có SĐT để mở Zalo trực tiếp).`;
+      ? `Đã sao chép tin nhắn nhắc nợ (kèm VietQR) cho ${sale.customerName} & mở Zalo!`
+      : `Đã sao chép nội dung nhắc nợ (kèm VietQR) cho ${sale.customerName} (chưa có SĐT để mở Zalo trực tiếp).`;
     if (onShowToast) {
       onShowToast(toastMsg);
     } else {
@@ -1609,6 +1709,239 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
         </div>
       </div>
 
+      {/* Phase 4C: Batch Zalo Debt Reminder Queue with Pre-Built Message & VietQR */}
+      {canAccessCustomerDebts && zaloReminderQueue.length > 0 && (
+        <div className="bg-white rounded-xl border border-sky-200 overflow-hidden shadow-2xs">
+          <div className="px-4 sm:px-5 py-3.5 bg-sky-50/70 border-b border-sky-200 flex flex-wrap items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <MessageCircle className="w-4 h-4 text-sky-700 shrink-0" />
+              <h3 className="text-xs sm:text-sm font-bold text-slate-900">
+                Danh Sách Nhắc Nợ Đến Hạn Qua Zalo (Tạo Sẵn Tin &amp; Mã VietQR)
+              </h3>
+              <span className="px-2 py-0.5 text-[11px] font-bold rounded-md bg-sky-100 text-sky-900 border border-sky-200">
+                {zaloReminderQueue.length} khách đang nợ
+              </span>
+              {urgentZaloCount > 0 && (
+                <span className="px-2 py-0.5 text-[11px] font-bold rounded-md bg-rose-100 text-rose-800 border border-rose-200">
+                  {urgentZaloCount} cần nhắc ngay
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {displayedZaloQueue.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const combined = displayedZaloQueue
+                      .map((it, idx) => `--- [${idx + 1}] ${it.customerName} (${it.customerPhone || 'Chưa có SĐT'}) ---\n${it.message}`)
+                      .join('\n\n');
+                    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+                      void navigator.clipboard.writeText(combined).catch(() => undefined);
+                    }
+                    const msg = `Đã sao chép trọn bộ ${displayedZaloQueue.length} tin nhắn nhắc nợ Zalo kèm VietQR!`;
+                    if (onShowToast) onShowToast(msg);
+                    else setFifoFeedback(msg);
+                  }}
+                  className="px-2.5 py-1 text-xs font-semibold text-sky-900 bg-white border border-sky-300 hover:bg-sky-100 rounded-lg inline-flex items-center gap-1"
+                >
+                  <Copy className="w-3.5 h-3.5 shrink-0" />
+                  <span>Sao chép tất cả ({displayedZaloQueue.length})</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsZaloQueueExpanded((v) => !v)}
+                className="px-2.5 py-1 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg inline-flex items-center gap-1"
+              >
+                {isZaloQueueExpanded ? (
+                  <>
+                    <ChevronUp className="w-3.5 h-3.5" />
+                    <span>Thu gọn</span>
+                  </>
+                ) : (
+                  <>
+                    <ChevronDown className="w-3.5 h-3.5" />
+                    <span>Mở danh sách ({zaloReminderQueue.length})</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {isZaloQueueExpanded && (
+            <div className="p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="inline-flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-lg">
+                  {(
+                    [
+                      {
+                        id: 'urgent',
+                        label:
+                          urgentZaloCount > 0
+                            ? `Quá hạn & Sắp đến hạn (${urgentZaloCount})`
+                            : `Ưu tiên nhắc (${zaloReminderQueue.length})`,
+                      },
+                      { id: 'overdue', label: `Chỉ đã quá hạn (${overdueZaloCount})` },
+                      { id: 'all', label: `Tất cả KH đang nợ (${zaloReminderQueue.length})` },
+                    ] as const
+                  ).map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => setZaloQueueFilter(f.id)}
+                      className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                        zaloQueueFilter === f.id
+                          ? 'bg-white text-slate-900 shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {f.label}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[11px] text-slate-500">
+                  Bấm <strong>Gửi Zalo</strong> để tự sao chép bảng đối soát + thông tin VietQR và mở thẳng khung chat Zalo của khách.
+                </span>
+              </div>
+
+              {displayedZaloQueue.length === 0 ? (
+                <div className="py-6 text-center text-xs text-slate-500">
+                  Không có khách hàng nào trong nhóm lọc này.
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-200 border border-slate-200 rounded-xl overflow-hidden">
+                  {displayedZaloQueue.map((item) => {
+                    const isReminded = remindedTodayKeys.has(item.customerKey);
+                    const isMsgOpen = expandedZaloMsgKey === item.customerKey;
+                    return (
+                      <div
+                        key={item.customerKey}
+                        className={`p-3.5 transition-colors ${
+                          isReminded ? 'bg-emerald-50/30' : 'bg-white hover:bg-slate-50/80'
+                        }`}
+                      >
+                        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-xs sm:text-sm font-bold text-slate-900">
+                                {item.customerName}
+                              </span>
+                              {item.customerPhone ? (
+                                <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-slate-100 text-slate-700 rounded">
+                                  {item.customerPhone}
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100 text-amber-800 rounded">
+                                  Chưa có SĐT
+                                </span>
+                              )}
+                              {item.urgency === 'overdue' ? (
+                                <span className="px-2 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200 rounded">
+                                  Quá hạn {Math.abs(item.daysDelta)} ngày ({item.overdueInvoiceCount} HĐ)
+                                </span>
+                              ) : item.urgency === 'due_soon' ? (
+                                <span className="px-2 py-0.5 text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-200 rounded">
+                                  Còn {item.daysDelta} ngày đến hạn
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-600 rounded">
+                                  Hạn gần nhất: {item.nearestDueDate}
+                                </span>
+                              )}
+                              {isReminded && (
+                                <span className="inline-flex items-center gap-0.5 px-2 py-0.5 text-[10px] font-semibold bg-emerald-100 text-emerald-800 border border-emerald-200 rounded">
+                                  <CheckCircle2 className="w-3 h-3 shrink-0" />
+                                  <span>Đã nhắc hôm nay ✓</span>
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="text-xs text-slate-600 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                              <span>
+                                Gồm <strong>{item.invoiceCount}</strong> hóa đơn chưa tất toán
+                              </span>
+                              <span>·</span>
+                              <span>
+                                Tổng nợ phải thu:{' '}
+                                <strong className="font-mono text-red-600">
+                                  {formatVND(item.totalDebt)}
+                                </strong>
+                              </span>
+                              {item.vietQrUrl && (
+                                <>
+                                  <span>·</span>
+                                  <span className="text-teal-700 font-semibold">
+                                    Đã đính kèm VietQR
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedZaloMsgKey(isMsgOpen ? null : item.customerKey)
+                              }
+                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg"
+                            >
+                              {isMsgOpen ? 'Ẩn tin mẫu' : 'Xem tin mẫu'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setVietQrTarget({
+                                  title: `VietQR thu tổng nợ ${item.customerName}`,
+                                  subtitle: `${item.invoiceCount} hóa đơn · Tổng dư nợ ${formatVND(item.totalDebt)}`,
+                                  amount: item.totalDebt,
+                                  addInfo: item.transferAddInfo,
+                                  customerPhone: item.customerPhone,
+                                  zaloMessage: item.message,
+                                })
+                              }
+                              className="px-2.5 py-1.5 text-xs font-semibold text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 rounded-lg inline-flex items-center gap-1"
+                            >
+                              <QrCode className="w-3.5 h-3.5 shrink-0" />
+                              <span>Hiện QR</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDispatchZaloQueueItem(item, false)}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg inline-flex items-center gap-1"
+                            >
+                              <Copy className="w-3.5 h-3.5 shrink-0" />
+                              <span>Sao chép</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDispatchZaloQueueItem(item, true)}
+                              className="px-3 py-1.5 text-xs font-bold text-white bg-sky-600 hover:bg-sky-700 rounded-lg inline-flex items-center gap-1 shadow-2xs"
+                            >
+                              <MessageCircle className="w-3.5 h-3.5 shrink-0" />
+                              <span>Gửi Zalo</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {isMsgOpen && (
+                          <div className="mt-2.5 p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-2">
+                            <pre className="whitespace-pre-wrap font-sans text-slate-800 leading-relaxed">
+                              {item.message}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Debt Table */}
       {activeTab === 'supplier' ? (
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
@@ -2644,6 +2977,11 @@ export const DebtModule: React.FC<DebtModuleProps> = ({
         moduleType="debts"
         moduleTitle="Quản Lý Công Nợ Khách Hàng & Nhà Cung Cấp"
         onImportRows={onImportDebtPaymentsFromExcel}
+        validationContext={{
+          products,
+          sales,
+          imports,
+        }}
         onExportCurrentData={() =>
           exportModuleDataExcel({
             moduleType: 'debts',
